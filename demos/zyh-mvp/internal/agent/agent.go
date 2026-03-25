@@ -237,65 +237,22 @@ func (a *Agent) finalizeAnswer(ctx context.Context) (string, error) {
 		Messages:    a.requestMessages(),
 		Temperature: a.cfg.Model.Temperature,
 	})
-	if err == nil {
-		content := strings.TrimSpace(resp.Message.Content)
-		if content != "" && len(resp.Message.ToolCalls) == 0 {
-			a.history = append(a.history, model.Message{Role: "assistant", Content: content})
-			return content, nil
-		}
-	}
-	if a.hasSuccessfulToolAction() {
-		answer := a.localCompletedActionAnswer(err)
-		a.history = append(a.history, model.Message{Role: "assistant", Content: answer})
-		return answer, nil
-	}
-	answer := a.localFallbackAnswer(err)
-	a.history = append(a.history, model.Message{Role: "assistant", Content: answer})
-	return answer, nil
-}
 
-func (a *Agent) localFallbackAnswer(modelErr error) string {
-	reason := "the model did not provide a usable final answer"
-	if modelErr != nil {
-		reason = modelErr.Error()
+	// 如果模型请求本身出错了，直接把错误抛给上层，不要在里面转成字符串
+	if err != nil {
+		return "", fmt.Errorf("final model completion failed: %w", err)
 	}
-	files, _ := a.ws.ListFiles(8)
-	answer := "I inspected the workspace and the model did not finish cleanly, so here is a local fallback answer."
-	if len(files) > 0 {
-		answer += "\n\nVisible files:\n- " + strings.Join(files, "\n- ")
-	}
-	answer += "\n\nAvailable capabilities:\n- analyze mode can list files, read files, and search content\n- full mode can write files, show a diff preview, and run whitelisted verification commands\n- the session keeps in-memory conversation context\n- model settings are configurable through an OpenAI-compatible endpoint"
-	answer += "\n\nFallback reason: " + reason
-	return answer
-}
 
-func (a *Agent) localToolFailureAnswer(modelErr error) string {
-	reason := "the model timed out after tool execution"
-	if modelErr != nil && strings.TrimSpace(modelErr.Error()) != "" {
-		reason = modelErr.Error()
-	}
-	summaries := a.recentToolSummaries()
-	answer := "The requested file or command action already ran, but the final model response failed."
-	if len(summaries) > 0 {
-		answer += "\n\nCompleted actions:\n- " + strings.Join(summaries, "\n- ")
-	}
-	answer += "\n\nYou can inspect the generated files in the workspace directly."
-	answer += "\n\nFallback reason: " + reason
-	return answer
-}
+	content := strings.TrimSpace(resp.Message.Content)
 
-func (a *Agent) localCompletedActionAnswer(modelErr error) string {
-	summaries := a.recentToolSummaries()
-	if len(summaries) == 0 {
-		return "操作已完成，你可以直接在工作区查看结果。"
+	// 如果模型没有返回内容，且也没有执行工具逻辑，说明模型逻辑断了
+	if content == "" && len(resp.Message.ToolCalls) == 0 {
+		return "", errors.New("model failed to provide a final answer")
 	}
-	answer := "操作已完成。"
-	answer += "\n\n已执行内容:\n- " + strings.Join(summaries, "\n- ")
-	answer += "\n\n你可以直接在工作区查看生成或更新后的文件。"
-	if modelErr != nil && strings.TrimSpace(modelErr.Error()) != "" {
-		answer += "\n\n补充说明：最终模型总结超时，但不影响已完成的文件或命令操作。"
-	}
-	return answer
+
+	// 记录历史并返回
+	a.history = append(a.history, model.Message{Role: "assistant", Content: content})
+	return content, nil
 }
 
 func asksCapabilities(input string) bool {

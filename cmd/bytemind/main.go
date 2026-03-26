@@ -204,7 +204,7 @@ func bootstrap(configPath, modelOverride, sessionID, streamOverride, workspaceOv
 
 	apiKey := cfg.Provider.ResolveAPIKey()
 	if apiKey == "" {
-		return nil, nil, nil, errors.New("missing API key; set BYTEMIND_API_KEY or configure provider.api_key")
+		return nil, nil, nil, errors.New("missing API key; configure provider.api_key in the config file")
 	}
 
 	store, err := session.NewStore(cfg.SessionDir)
@@ -433,8 +433,8 @@ func sameWorkspace(a, b string) bool {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "bytemind chat [-config path] [-model name] [-session id] [-stream true|false] [-workspace path] [-max-iterations n]")
-	fmt.Fprintln(w, "bytemind run -prompt \"task\" [-config path] [-model name] [-session id] [-stream true|false] [-workspace path] [-max-iterations n]")
+	fmt.Fprintln(w, "go run ./cmd/bytemind chat [-config path] [-model name] [-session id] [-stream true|false] [-workspace path] [-max-iterations n]")
+	fmt.Fprintln(w, "go run ./cmd/bytemind run -prompt \"task\" [-config path] [-model name] [-session id] [-stream true|false] [-workspace path] [-max-iterations n]")
 }
 
 func printCommandSuggestions(w io.Writer, input string, suggestions []string) {

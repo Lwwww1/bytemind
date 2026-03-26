@@ -27,57 +27,20 @@ internal/llm            通用消息与工具类型
 internal/provider       多 provider 适配层
 internal/session        会话持久化
 internal/tools          文件工具、patch 工具、shell 工具
-scripts                 安装与卸载脚本
-```
-
-## 安装
-
-推荐在仓库根目录执行：
-
-```powershell
-.\scripts\install.ps1
-```
-
-或者：
-
-```cmd
-scripts\install.cmd
-```
-
-安装脚本会：
-
-- 构建 `bytemind.exe`
-- 安装到 `%LOCALAPPDATA%\Programs\ByteMind\bin`
-- 自动把该目录加入当前用户的 `PATH`
-
-安装完成后，打开一个新的终端，就可以在任意目录直接执行：
-
-```powershell
-bytemind chat
-bytemind run -prompt "analyze this repo"
-bytemind chat -workspace E:\experiments
-```
-
-卸载：
-
-```powershell
-.\scripts\uninstall.ps1
 ```
 
 ## 快速开始
 
-如果你暂时不想安装，也可以直接在仓库根目录运行：
+先按下方“配置文件”章节准备好 `config.json`，再在仓库根目录运行：
 
 ```powershell
-$env:BYTEMIND_API_KEY = "your-api-key"
-$env:BYTEMIND_MODEL = "gpt-4.1-mini"
 go run ./cmd/bytemind chat
 ```
 
 聊天模式：
 
 ```powershell
-bytemind chat
+go run ./cmd/bytemind chat
 ```
 
 单次任务：
@@ -89,24 +52,18 @@ go run ./cmd/bytemind run -prompt "分析当前项目并生成改进建议"
 需要更大的执行预算时：
 
 ```powershell
-bytemind chat -max-iterations 64
-bytemind run -prompt "refactor this module" -max-iterations 64
+go run ./cmd/bytemind chat -max-iterations 64
+go run ./cmd/bytemind run -prompt "refactor this module" -max-iterations 64
 ```
 
 ## 跨目录运行
 
 `go run ./cmd/bytemind ...` 只能在本仓库模块根目录内执行，因为 Go 需要从当前目录向上找到 `go.mod`。
 
-如果你还没安装，但想在别的目录里启动并让程序作用在那个目录，可以这样：
+如果你想在别的目录里启动并让程序作用在那个目录，可以这样：
 
 ```powershell
 go -C E:\ByteMind run ./cmd/bytemind chat -workspace E:\experiments
-```
-
-如果已经安装，则更简单：
-
-```powershell
-bytemind chat -workspace E:\experiments
 ```
 
 ## 配置文件
@@ -133,8 +90,7 @@ Copy-Item config.example.json config.json
     "type": "openai-compatible",
     "base_url": "https://api.openai.com/v1",
     "model": "gpt-5.4-mini",
-    "api_key": "your-api-key-here",
-    "api_key_env": ""
+    "api_key": "your-api-key-here"
   },
   "approval_policy": "on-request",
   "max_iterations": 32,
@@ -152,7 +108,6 @@ Anthropic 示例：
     "base_url": "https://api.anthropic.com",
     "model": "claude-sonnet-4-20250514",
     "api_key": "your-api-key-here",
-    "api_key_env": "",
     "anthropic_version": "2023-06-01"
   }
 }

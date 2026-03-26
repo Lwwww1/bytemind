@@ -3,8 +3,7 @@
     "type": "",
     "base_url": "",
     "model": "",
-    "api_key": "",
-    "api_key_env": ""
+    "api_key": ""
   },
   "approval_policy": "on-request",
   "max_iterations": 32,

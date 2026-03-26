@@ -1,6 +1,7 @@
 .gocache/
 .gomodcache/
 .aicoding/
+aicoding.config.json
 .installtest*/
 aicoding.exe
 *.test

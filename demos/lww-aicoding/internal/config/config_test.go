@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -48,5 +49,47 @@ func TestResolveConfigPathExplicit(t *testing.T) {
 	}
 	if got == "" {
 		t.Fatal("expected explicit path")
+	}
+}
+
+func TestLoadUsesWorkspaceRootConfigFile(t *testing.T) {
+	workspace := t.TempDir()
+	configPath := filepath.Join(workspace, "aicoding.config.json")
+	data, err := json.Marshal(map[string]any{
+		"provider": map[string]any{
+			"type":     "openai-compatible",
+			"base_url": "https://api.openai.com/v1",
+			"model":    "gpt-5.4-mini",
+			"api_key":  "test-key",
+		},
+		"approval_policy": "never",
+		"max_iterations":  16,
+		"stream":          false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider.ResolveAPIKey() != "test-key" {
+		t.Fatalf("expected api key from workspace root config, got %q", cfg.Provider.ResolveAPIKey())
+	}
+	if cfg.Provider.Model != "gpt-5.4-mini" {
+		t.Fatalf("expected model from workspace root config, got %q", cfg.Provider.Model)
+	}
+	if cfg.ApprovalPolicy != "never" {
+		t.Fatalf("expected approval policy never, got %q", cfg.ApprovalPolicy)
+	}
+	if cfg.MaxIterations != 16 {
+		t.Fatalf("expected max iterations 16, got %d", cfg.MaxIterations)
+	}
+	if cfg.Stream {
+		t.Fatalf("expected stream false from workspace root config")
 	}
 }

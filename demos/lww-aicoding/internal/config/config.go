@@ -31,7 +31,7 @@ func Default(workspace string) Config {
 		Provider: ProviderConfig{
 			Type:             "openai-compatible",
 			BaseURL:          "https://api.openai.com/v1",
-			Model:            "GPT-5.4", 
+			Model:            "GPT-5.4",
 			APIKeyEnv:        "AICODING_API_KEY",
 			AnthropicVersion: "2023-06-01",
 		},
@@ -83,6 +83,7 @@ func resolveConfigPath(workspace, explicit string) (string, error) {
 	}
 
 	candidates := []string{
+		filepath.Join(workspace, "aicoding.config.json"),
 		filepath.Join(workspace, ".aicoding", "config.json"),
 	}
 	if home, err := os.UserHomeDir(); err == nil {

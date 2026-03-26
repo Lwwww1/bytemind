@@ -112,15 +112,30 @@ aicoding chat -workspace E:\experiments
 
 ## 配置文件
 
-支持工作区 `.aicoding/config.json` 或用户目录 `.aicoding/config.json`：
+支持以下配置文件，按优先级查找：
+
+1. 工作区根目录 `aicoding.config.json`
+2. 工作区 `.aicoding/config.json`
+3. 用户目录 `.aicoding/config.json`
+
+推荐直接从仓库根目录复制示例模板开始：
+
+```powershell
+Copy-Item aicoding.config.example.json aicoding.config.json
+```
+
+然后把 `api_key` 等字段改成你自己的配置。
+
+配置示例：
 
 ```json
 {
   "provider": {
     "type": "openai-compatible",
     "base_url": "https://api.openai.com/v1",
-    "model": "gpt-4.1-mini",
-    "api_key_env": "AICODING_API_KEY"
+    "model": "gpt-5.4-mini",
+    "api_key": "your-api-key-here",
+    "api_key_env": ""
   },
   "approval_policy": "on-request",
   "max_iterations": 32,
@@ -137,7 +152,8 @@ Anthropic 示例：
     "type": "anthropic",
     "base_url": "https://api.anthropic.com",
     "model": "claude-sonnet-4-20250514",
-    "api_key_env": "AICODING_API_KEY",
+    "api_key": "your-api-key-here",
+    "api_key_env": "",
     "anthropic_version": "2023-06-01"
   }
 }

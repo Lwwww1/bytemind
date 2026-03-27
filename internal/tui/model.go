@@ -153,7 +153,7 @@ func newModel(opts Options) model {
 	vp.YPosition = 0
 
 	chatItems, toolRuns := rebuildSessionTimeline(opts.Session)
-	summaries, _ := opts.Store.List(defaultSessionLimit)
+	summaries, _, _ := opts.Store.List(defaultSessionLimit)
 
 	opts.Runner.SetObserver(agent.ObserverFunc(func(event agent.Event) {
 		async <- agentEventMsg{Event: event}
@@ -960,7 +960,7 @@ func (m model) startRunCmd(prompt string) tea.Cmd {
 
 func (m model) loadSessionsCmd() tea.Cmd {
 	return func() tea.Msg {
-		summaries, err := m.store.List(m.sessionLimit)
+		summaries, _, err := m.store.List(m.sessionLimit)
 		return sessionsLoadedMsg{Summaries: summaries, Err: err}
 	}
 }

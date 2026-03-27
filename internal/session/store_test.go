@@ -202,3 +202,14 @@ func TestStoreSaveReplacesExistingSessionFile(t *testing.T) {
 		}
 	}
 }
+
+func TestSummarizeMessagePreservesUTF8WhenTruncating(t *testing.T) {
+	text := "\u7ee7\u7eed\u521a\u624d\u7684\u4e0a\u4e0b\u6587\uff0c\u7ed9\u6211\u5217\u4e00\u4e0b\u5f53\u524d\u4e3b MVP \u6700\u5173\u952e\u7684\u6d4b\u8bd5\u70b9"
+	got := summarizeMessage(text, 24)
+	if strings.ContainsRune(got, '\uFFFD') {
+		t.Fatalf("expected valid utf-8 preview, got %q", got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("expected truncated preview to end with ellipsis, got %q", got)
+	}
+}

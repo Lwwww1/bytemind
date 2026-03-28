@@ -17,7 +17,7 @@ type Options struct {
 }
 
 func Run(opts Options) error {
-	program := tea.NewProgram(newModel(opts), tea.WithAltScreen())
+	program := tea.NewProgram(newModel(opts), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := program.Run()
 	return err
 }

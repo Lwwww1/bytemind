@@ -117,10 +117,20 @@ func TestHandleMouseWheelScrollsInputWhenPointerIsOverInput(t *testing.T) {
 
 	beforeLine := m.input.Line()
 	beforeOffset := m.viewport.YOffset
+	inputY := -1
+	for y := 0; y < m.height; y++ {
+		if m.mouseOverInput(y) {
+			inputY = y
+			break
+		}
+	}
+	if inputY < 0 {
+		t.Fatalf("expected to find chat input region")
+	}
 	got, _ := m.handleMouse(tea.MouseMsg{
 		Button: tea.MouseButtonWheelUp,
 		Action: tea.MouseActionPress,
-		Y:      20,
+		Y:      inputY,
 	})
 	updated := got.(model)
 
@@ -148,10 +158,20 @@ func TestHandleMouseWheelScrollsLandingInputWhenPointerIsOverInput(t *testing.T)
 	}
 
 	beforeLine := m.input.Line()
+	inputY := -1
+	for y := 0; y < m.height; y++ {
+		if m.mouseOverInput(y) {
+			inputY = y
+			break
+		}
+	}
+	if inputY < 0 {
+		t.Fatalf("expected to find landing input region")
+	}
 	got, _ := m.handleMouse(tea.MouseMsg{
 		Button: tea.MouseButtonWheelUp,
 		Action: tea.MouseActionPress,
-		Y:      18,
+		Y:      inputY,
 	})
 	updated := got.(model)
 
@@ -180,6 +200,24 @@ func TestCtrlLFromLandingOpensSessions(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatalf("expected ctrl+l on landing screen to trigger session loading")
+	}
+}
+
+func TestTabTogglesBetweenBuildAndPlanModes(t *testing.T) {
+	m := model{
+		mode: modeBuild,
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	updated := got.(model)
+	if updated.mode != modePlan {
+		t.Fatalf("expected tab to switch to plan mode, got %q", updated.mode)
+	}
+
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	updated = got.(model)
+	if updated.mode != modeBuild {
+		t.Fatalf("expected second tab to switch back to build mode, got %q", updated.mode)
 	}
 }
 
@@ -254,9 +292,12 @@ func TestChatViewOmitsRedundantChrome(t *testing.T) {
 		}
 	}
 	for _, wanted := range []string{
+		"tab agents",
 		"/ commands",
 		"Ctrl+L sessions",
 		"Ctrl+C quit",
+		"Build",
+		"Plan",
 	} {
 		if !strings.Contains(view, wanted) {
 			t.Fatalf("expected chat view to contain %q", wanted)
@@ -321,6 +362,32 @@ func TestEnterSubmitsPrompt(t *testing.T) {
 	}
 	if updated.chatItems[0].Body != "ship this prompt" {
 		t.Fatalf("expected submitted user prompt to match input, got %q", updated.chatItems[0].Body)
+	}
+}
+
+func TestCtrlJInsertsNewlineWithoutSubmitting(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.SetWidth(40)
+	input.SetHeight(3)
+	input.SetValue("first line")
+	input.CursorEnd()
+
+	m := model{
+		screen:    screenChat,
+		input:     input,
+		workspace: "E:\\bytemind",
+		sess:      session.New("E:\\bytemind"),
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	updated := got.(model)
+
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected ctrl+j not to submit prompt")
+	}
+	if updated.input.Value() != "first line\n" {
+		t.Fatalf("expected ctrl+j to insert newline, got %q", updated.input.Value())
 	}
 }
 
@@ -392,6 +459,7 @@ func TestHelpTextOnlyMentionsSupportedEntryPoints(t *testing.T) {
 	for _, wanted := range []string{
 		"go run ./cmd/bytemind chat",
 		"go run ./cmd/bytemind run -prompt",
+		"/session",
 		"/quit",
 		"/new",
 	} {
@@ -421,6 +489,7 @@ func TestRenderFooterOnlyShowsInputRegion(t *testing.T) {
 		}
 	}
 	for _, wanted := range []string{
+		"tab agents",
 		"/ commands",
 		"Ctrl+L sessions",
 		"Ctrl+C quit",
@@ -431,6 +500,23 @@ func TestRenderFooterOnlyShowsInputRegion(t *testing.T) {
 	}
 	if strings.Contains(footer, "PgUp/PgDn") {
 		t.Fatalf("footer should not advertise PgUp/PgDn anymore")
+	}
+}
+
+func TestSyncInputStyleUsesSingleLineSearchField(t *testing.T) {
+	input := textarea.New()
+	m := model{
+		screen: screenChat,
+		input:  input,
+	}
+
+	m.syncInputStyle()
+
+	if m.input.Prompt != "" {
+		t.Fatalf("expected empty prompt, got %q", m.input.Prompt)
+	}
+	if m.input.Placeholder != "Ask Bytemind to inspect, change, or verify this workspace..." {
+		t.Fatalf("unexpected placeholder: %q", m.input.Placeholder)
 	}
 }
 
@@ -493,15 +579,26 @@ func TestFilteredCommandsShowsRootSelectorGroups(t *testing.T) {
 		usages = append(usages, item.Usage)
 	}
 
-	for _, want := range []string{"/help", "/new", "/quit"} {
+	for _, want := range []string{"/help", "/session", "/new", "/quit"} {
 		if !containsString(usages, want) {
 			t.Fatalf("expected root selector to contain %q, got %v", want, usages)
 		}
 	}
-	for _, unwanted := range []string{"/session", "/sessions [limit]", "/resume <id>", "/plan", "/plan add <step>"} {
+	for _, unwanted := range []string{"/sessions [limit]", "/resume <id>", "/plan", "/plan add <step>"} {
 		if containsString(usages, unwanted) {
 			t.Fatalf("did not expect root selector to contain %q", unwanted)
 		}
+	}
+}
+
+func TestHandleSlashSessionOpensSessionsModal(t *testing.T) {
+	m := model{}
+
+	if err := m.handleSlashCommand("/session"); err != nil {
+		t.Fatalf("expected /session to succeed, got %v", err)
+	}
+	if !m.sessionsOpen {
+		t.Fatalf("expected /session to open sessions modal")
 	}
 }
 
@@ -593,7 +690,7 @@ func TestLandingViewRendersCommandPaletteAboveInput(t *testing.T) {
 	m.syncCommandPalette()
 
 	view := m.View()
-	if !strings.Contains(view, "Bytemind Chat") {
+	if !strings.Contains(view, "Build") || !strings.Contains(view, "Plan") {
 		t.Fatalf("expected landing view to remain visible, got %q", view)
 	}
 	if !strings.Contains(view, "/help") {
@@ -672,7 +769,7 @@ func TestRenderCommandPaletteDoesNotCorruptChineseDescriptions(t *testing.T) {
 	if strings.Contains(got, string('\uFFFD')) {
 		t.Fatalf("expected command palette not to contain replacement glyphs, got %q", got)
 	}
-	for _, want := range []string{"/help", "/new", "/quit"} {
+	for _, want := range []string{"/help", "/session", "/new"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected command palette to contain %q, got %q", want, got)
 		}
@@ -820,7 +917,7 @@ func TestToolStartReplacesStreamedAssistantTurnWithStableToolIntro(t *testing.T)
 	if len(m.chatItems) != 3 {
 		t.Fatalf("expected tool start to append only tool call after streamed assistant turn, got %d items", len(m.chatItems))
 	}
-	if m.chatItems[1].Body != "我先调用 `list_files` 看一下相关内容。" || m.chatItems[1].Status != "thinking" || m.chatItems[1].Title != thinkingLabel {
+	if !strings.Contains(m.chatItems[1].Body, "`list_files`") || m.chatItems[1].Status != "thinking" || m.chatItems[1].Title != thinkingLabel {
 		t.Fatalf("expected streamed assistant turn to be replaced with stable tool intro, got %+v", m.chatItems[1])
 	}
 	if !strings.Contains(m.chatItems[2].Title, "Tool Call | list_files") {

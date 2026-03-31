@@ -40,6 +40,13 @@ const (
 	screenChat    screenKind = "chat"
 )
 
+type agentMode string
+
+const (
+	modeBuild agentMode = "build"
+	modePlan  agentMode = "plan"
+)
+
 type chatEntry struct {
 	Kind   string
 	Title  string
@@ -96,8 +103,9 @@ type sessionsLoadedMsg struct {
 }
 
 var commandItems = []commandItem{
-	{Name: "/help", Usage: "/help", Description: "打开帮助面板，查看当前可用命令和基础用法。", Kind: "command"},
-	{Name: "/new", Usage: "/new", Description: "在当前工作区创建一个全新的持久会话。", Kind: "command"},
+	{Name: "/help", Usage: "/help", Description: "打开帮助说明，查看当前可用命令和基础用法。", Kind: "command"},
+	{Name: "/session", Usage: "/session", Description: "打开最近历史会话列表。", Kind: "command"},
+	{Name: "/new", Usage: "/new", Description: "在当前工作区创建一个全新的会话。", Kind: "command"},
 	{Name: "/quit", Usage: "/quit", Description: "退出当前 TUI 界面。", Kind: "command"},
 }
 
@@ -124,6 +132,7 @@ type model struct {
 	sessionCursor  int
 	commandCursor  int
 	screen         screenKind
+	mode           agentMode
 	sessionsOpen   bool
 	helpOpen       bool
 	commandOpen    bool
@@ -146,9 +155,9 @@ func newModel(opts Options) model {
 	input.Focus()
 	input.CharLimit = 0
 	input.SetWidth(72)
-	input.SetHeight(3)
+	input.SetHeight(2)
 	input.ShowLineNumbers = false
-	input.Prompt = "> "
+	input.Prompt = ""
 
 	spin := spinner.New()
 	spin.Spinner = spinner.MiniDot
@@ -188,6 +197,7 @@ func newModel(opts Options) model {
 		sessions:       summaries,
 		sessionLimit:   defaultSessionLimit,
 		screen:         initialScreen(opts.Session),
+		mode:           modeBuild,
 		streamingIndex: -1,
 		statusNote:     "Ready.",
 		phase:          "idle",
@@ -385,21 +395,22 @@ func (m model) mouseOverLandingInput(y int) bool {
 		return false
 	}
 	logoHeight := lipgloss.Height(landingLogoStyle.Render(strings.Join([]string{
-		"   ___       __        __  ___ _           __",
-		"  / _ )__ __/ /____   /  |/  (_)__  ___ _/ /",
-		" / _  / // / __/ -_) / /|_/ / / _ \\/ _ `/ _ \\",
-		"/____/\\_, /\\__/\\__/ /_/  /_/_/_//_/\\_,_/_.__/",
-		"     /___/",
+		"    ____        __                      _           __",
+		"   / __ )__  __/ /____  ____ ___  ____(_)___  ____/ /",
+		"  / __  / / / / __/ _ \\/ __ `__ \\/ __/ / __ \\/ __  / ",
+		" / /_/ / /_/ / /_/  __/ / / / / / /_/ / / / / /_/ /  ",
+		"/_____/\\__, /\\__/\\___/_/ /_/ /_/\\__/_/_/ /_/\\__,_/   ",
+		"      /____/                                          ",
 	}, "\n")))
-	titleHeight := lipgloss.Height(landingTitleStyle.Render(chatTitleLabel))
-	subtitleHeight := lipgloss.Height(mutedStyle.Render("Start with a prompt below. Press Enter to open the full conversation workspace."))
+	titleHeight := 0
+	subtitleHeight := 0
 	inputHeight := lipgloss.Height(
 		landingInputStyle.Copy().
-			BorderForeground(colorAccent).
+			BorderForeground(m.modeAccentColor()).
 			Width(m.landingInputShellWidth()).
 			Render(m.input.View()),
 	)
-	hintHeight := lipgloss.Height(mutedStyle.Render("Type / for supported commands, Ctrl+C to quit."))
+	hintHeight := lipgloss.Height(mutedStyle.Render("tab agents  ·  / commands  ·  Ctrl+L sessions  ·  Ctrl+C quit"))
 	contentHeight := logoHeight + 1 + titleHeight + subtitleHeight + 1 + inputHeight + 1 + hintHeight
 	contentTop := max(0, (m.height-contentHeight)/2)
 	inputTop := contentTop + logoHeight + 1 + titleHeight + subtitleHeight + 1
@@ -414,6 +425,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.approval.Reply <- approvalDecision{Approved: false}
 		}
 		return m, tea.Quit
+	case "tab":
+		m.toggleMode()
+		return m, nil
 	case "?":
 		if m.approval == nil {
 			m.helpOpen = !m.helpOpen
@@ -479,6 +493,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sessionsOpen = true
 		}
 		return m, m.loadSessionsCmd()
+	case "ctrl+j":
+		before := m.input.Value()
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if m.input.Value() != before {
+			m.noteInputMutation(before, m.input.Value(), "ctrl+j")
+			m.syncCommandPalette()
+		}
+		return m, cmd
 	case "ctrl+n":
 		if !m.busy && m.screen == screenChat {
 			if err := m.newSession(); err != nil {
@@ -617,6 +640,16 @@ func (m *model) openCommandPalette() {
 	m.commandCursor = 0
 	m.setInputValue("/")
 	m.syncCommandPalette()
+}
+
+func (m *model) toggleMode() {
+	if m.mode == modeBuild {
+		m.mode = modePlan
+		m.statusNote = "Switched to Plan mode. UI only for now."
+		return
+	}
+	m.mode = modeBuild
+	m.statusNote = "Switched to Build mode."
 }
 
 func (m *model) closeCommandPalette() {
@@ -1012,29 +1045,32 @@ func (m model) renderMainPanel() string {
 
 func (m model) renderLanding() string {
 	logo := landingLogoStyle.Render(strings.Join([]string{
-		"   ___       __        __  ___ _           __",
-		"  / _ )__ __/ /____   /  |/  (_)__  ___ _/ /",
-		" / _  / // / __/ -_) / /|_/ / / _ \\/ _ `/ _ \\",
-		"/____/\\_, /\\__/\\__/ /_/  /_/_/_//_/\\_,_/_.__/",
-		"     /___/",
+		"    ____        __                      _           __",
+		"   / __ )__  __/ /____  ____ ___  ____(_)___  ____/ /",
+		"  / __  / / / / __/ _ \\/ __ `__ \\/ __/ / __ \\/ __  / ",
+		" / /_/ / /_/ / /_/  __/ / / / / / /_/ / / / / /_/ /  ",
+		"/_____/\\__, /\\__/\\___/_/ /_/ /_/\\__/_/_/ /_/\\__,_/   ",
+		"      /____/                                          ",
 	}, "\n"))
-	title := landingTitleStyle.Render(chatTitleLabel)
-	subtitle := mutedStyle.Render("Start with a prompt below. Press Enter to open the full conversation workspace.")
 	inputBox := landingInputStyle.Copy().
-		BorderForeground(colorAccent).
+		BorderForeground(m.modeAccentColor()).
 		Width(m.landingInputShellWidth()).
 		Render(m.input.View())
-	parts := []string{logo, "", title, subtitle, ""}
+	parts := []string{logo, "", m.renderModeTabs(), ""}
 	if m.commandOpen {
 		parts = append(parts, m.renderCommandPalette(), "")
 	}
-	parts = append(parts, inputBox, "", mutedStyle.Render("Type / for supported commands, Ctrl+L for sessions, Ctrl+C to quit."))
+	parts = append(parts, inputBox, "", mutedStyle.Render("tab agents  ·  / commands  ·  Ctrl+L sessions  ·  Ctrl+C quit"))
 	content := lipgloss.JoinVertical(lipgloss.Center, parts...)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
 func (m model) renderFooter() string {
-	hint := mutedStyle.Width(m.chatPanelInnerWidth()).Render("/ commands  -  Ctrl+L sessions  -  Ctrl+C quit")
+	hint := lipgloss.NewStyle().
+		Width(m.chatPanelInnerWidth()).
+		Align(lipgloss.Right).
+		Foreground(colorMuted).
+		Render("tab agents  ·  / commands  ·  Ctrl+L sessions  ·  Ctrl+C quit")
 	inputBorder := m.inputBorderStyle().
 		Width(m.chatPanelInnerWidth()).
 		Render(m.input.View())
@@ -1045,11 +1081,28 @@ func (m model) renderFooter() string {
 	if m.commandOpen {
 		parts = append(parts, m.renderCommandPalette())
 	}
-	parts = append(parts, inputBorder, hint)
+	parts = append(parts, lipgloss.NewStyle().Width(m.chatPanelInnerWidth()).Render(m.renderModeTabs()), inputBorder, hint)
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	return panelStyle.Width(m.chatPanelWidth()).Render(content)
 }
 
+func (m model) renderModeTabs() string {
+	buildStyle := modeTabStyle.Copy().Foreground(colorMuted)
+	planStyle := modeTabStyle.Copy().Foreground(colorMuted)
+	if m.mode == modeBuild {
+		buildStyle = buildStyle.Copy().Foreground(colorAccent).Bold(true)
+	} else {
+		planStyle = planStyle.Copy().Foreground(colorThinking).Bold(true)
+	}
+	parts := []string{
+		buildStyle.Render("Build"),
+		planStyle.Render("Plan"),
+	}
+	if modelName := strings.TrimSpace(m.cfg.Provider.Model); modelName != "" {
+		parts = append(parts, mutedStyle.Render(modelName))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
+}
 func (m model) renderSessionsModal() string {
 	lines := []string{modalTitleStyle.Render("Recent Sessions"), mutedStyle.Render("Up/Down to select, Enter to resume, Esc to close"), ""}
 	if len(m.sessions) == 0 {
@@ -1076,7 +1129,7 @@ func (m model) renderSessionsModal() string {
 
 func (m model) renderHelpModal() string {
 	return modalBoxStyle.Width(min(88, max(54, m.width-16))).Render(
-		lipgloss.JoinVertical(lipgloss.Left, modalTitleStyle.Render("帮助"), m.helpText()),
+		lipgloss.JoinVertical(lipgloss.Left, modalTitleStyle.Render("甯姪"), m.helpText()),
 	)
 }
 
@@ -1084,10 +1137,10 @@ func (m model) renderApprovalBanner() string {
 	width := max(24, m.chatPanelInnerWidth())
 	commandWidth := max(20, width-4)
 	lines := []string{
-		accentStyle.Render("需要你的确认"),
-		mutedStyle.Render("原因: " + trimPreview(m.approval.Reason, commandWidth)),
+		accentStyle.Render("Approval required"),
+		mutedStyle.Render("Reason: " + trimPreview(m.approval.Reason, commandWidth)),
 		codeStyle.Width(commandWidth).Render(m.approval.Command),
-		mutedStyle.Render("Y / Enter 同意    N / Esc 拒绝"),
+		mutedStyle.Render("Y / Enter approve    N / Esc reject"),
 	}
 	return approvalBannerStyle.Width(width).Render(strings.Join(lines, "\n"))
 }
@@ -1141,13 +1194,16 @@ func (m *model) handleSlashCommand(input string) error {
 		m.appendChat(chatEntry{Kind: "assistant", Title: assistantLabel, Body: m.helpText(), Status: "final"})
 		m.statusNote = "已在聊天区显示帮助说明。"
 		return nil
+	case "/session":
+		m.sessionsOpen = true
+		m.statusNote = "已打开最近历史会话。"
+		return nil
 	case "/new":
 		return m.newSession()
 	default:
 		return fmt.Errorf("unknown command: %s", fields[0])
 	}
 }
-
 func (m *model) newSession() error {
 	next := session.New(m.workspace)
 	if err := m.store.Save(next); err != nil {
@@ -1249,8 +1305,12 @@ func rebuildSessionTimeline(sess *session.Session) ([]chatEntry, []toolRun) {
 func renderChatCard(item chatEntry, width int) string {
 	title := cardTitleStyle.Foreground(colorAccent)
 	border := chatAssistantStyle
-	bodyStyle := lipgloss.NewStyle()
+	bodyStyle := chatBodyStyle
 	status := item.Status
+	displayTitle := item.Title
+	if status == "final" {
+		status = ""
+	}
 	switch item.Kind {
 	case "user":
 		title = cardTitleStyle.Foreground(colorUser)
@@ -1258,34 +1318,37 @@ func renderChatCard(item chatEntry, width int) string {
 	case "tool":
 		title = cardTitleStyle.Foreground(colorTool)
 		border = chatToolStyle
+		bodyStyle = toolBodyStyle
 	case "system":
 		title = cardTitleStyle.Foreground(colorMuted)
 		border = chatSystemStyle
 	default:
 		if item.Status == "thinking" {
-			title = cardTitleStyle.Foreground(colorThinking)
+			title = cardTitleStyle.Foreground(colorThinking).Italic(true)
 			border = chatThinkingStyle
 			bodyStyle = thinkingBodyStyle
+			displayTitle = "Thinking:"
 			status = ""
 		}
 	}
-	outerWidth := max(12, width)
-	innerWidth := max(8, outerWidth-border.GetHorizontalFrameSize())
-	headContent := title.Render(item.Title)
+	contentWidth := max(8, width-border.GetHorizontalFrameSize())
+	headContent := title.Render(displayTitle)
 	if status != "" {
 		headContent = lipgloss.JoinHorizontal(lipgloss.Left, headContent, mutedStyle.Render("  "+status))
 	}
 	head := lipgloss.NewStyle().
-		Width(innerWidth).
+		Width(contentWidth).
 		Render(headContent)
-	body := bodyStyle.Width(innerWidth).Render(formatChatBody(item, innerWidth))
-	return border.Width(outerWidth).Render(lipgloss.JoinVertical(lipgloss.Left, head, body))
+	body := bodyStyle.Width(contentWidth).Render(formatChatBody(item, contentWidth))
+	return border.Width(contentWidth).Render(lipgloss.JoinVertical(lipgloss.Left, head, body))
 }
 
 func renderChatRow(item chatEntry, width int) string {
 	bubbleWidth := chatBubbleWidth(item, width)
 	card := renderChatCard(item, bubbleWidth)
-	return lipgloss.PlaceHorizontal(width, lipgloss.Left, card)
+	return lipgloss.NewStyle().
+		MarginBottom(1).
+		Render(lipgloss.PlaceHorizontal(width, lipgloss.Left, card))
 }
 
 func renderModal(width, height int, modal string) string {
@@ -1678,39 +1741,39 @@ func summarizeArgs(raw string) string {
 
 func legacyAssistantToolIntro(toolName string) string {
 	if strings.TrimSpace(toolName) == "" {
-		return "我先查看一下相关内容。"
+		return "I will check the relevant context first."
 	}
-	return fmt.Sprintf("我先调用 `%s` 看一下相关内容。", toolName)
+	return fmt.Sprintf("I will call `%s` to inspect the relevant context first.", toolName)
 }
 
 func legacyAssistantToolFollowUp(toolName, summary, status string) string {
 	if strings.TrimSpace(summary) == "" {
-		return "我拿到工具结果了，继续整理一下。"
+		return "I have the tool result. Let me organize the next step."
 	}
 	switch status {
 	case "error", "warn":
-		return fmt.Sprintf("`%s` 已返回结果，我先根据这个情况继续判断。", toolName)
+		return fmt.Sprintf("`%s` returned a result. I will continue from that signal.", toolName)
 	default:
-		return fmt.Sprintf("`%s` 已经执行完了，我继续往下整理。", toolName)
+		return fmt.Sprintf("`%s` finished successfully. I will keep鏁寸悊ing the result.", toolName)
 	}
 }
 
 func assistantToolIntro(toolName string) string {
 	if strings.TrimSpace(toolName) == "" {
-		return "我先查看一下相关内容。"
+		return "I will check the relevant context first."
 	}
-	return fmt.Sprintf("我先调用 `%s` 看一下相关内容。", toolName)
+	return fmt.Sprintf("I will call `%s` to inspect the relevant context first.", toolName)
 }
 
 func assistantToolFollowUp(toolName, summary, status string) string {
 	if strings.TrimSpace(summary) == "" {
-		return "我拿到工具结果了，继续整理一下。"
+		return "I have the tool result. Let me organize the next step."
 	}
 	switch status {
 	case "error", "warn":
-		return fmt.Sprintf("`%s` 已返回结果，我先根据这个情况继续判断。", toolName)
+		return fmt.Sprintf("`%s` returned a result. I will continue from that signal.", toolName)
 	default:
-		return fmt.Sprintf("`%s` 已经执行完了，我继续往下整理。", toolName)
+		return fmt.Sprintf("`%s` finished successfully. I will keep鏁寸悊ing the result.", toolName)
 	}
 }
 
@@ -1780,7 +1843,7 @@ func (m *model) setInputValue(value string) {
 
 func shouldExecuteFromPalette(item commandItem) bool {
 	switch item.Name {
-	case "/help", "/new", "/quit":
+	case "/help", "/session", "/new", "/quit":
 		return true
 	default:
 		return false
@@ -1790,24 +1853,24 @@ func shouldExecuteFromPalette(item commandItem) bool {
 func (m model) helpText() string {
 	return strings.Join([]string{
 		"进入方式",
-		"在仓库根目录运行 `go run ./cmd/bytemind chat` 即可启动。",
-		"`go run ./cmd/bytemind chat` 会先进入带大 Logo 的启动页。",
+		"在仓库根目录运行 `go run ./cmd/bytemind chat` 即可启动 TUI。",
+		"`go run ./cmd/bytemind chat` 会先进入带 Logo 的启动页。",
 		"在启动页输入内容并按 Enter 后，会进入正式聊天界面。",
 		"`go run ./cmd/bytemind run -prompt \"...\"` 可用于一次性执行模式。",
 		"",
 		"斜杠命令",
-		"/help: 查看帮助说明。",
-		"/new: 新建一个会话。",
-		"/quit: 退出 TUI。",
+		"/help：在聊天区显示帮助说明。",
+		"/session：打开最近历史会话。",
+		"/new：新建一个会话。",
+		"/quit：退出 TUI。",
 		"",
-		"当前界面",
-		"启动页是一个居中的 Logo 加输入框。",
-		"主界面只显示用户消息和助手回复，不把聊天内容塞到旁边区域。",
-		"顶部状态栏会显示工作区、provider、model、审批策略和当前状态。",
-		"如果需要 shell 审批，会在聊天输入区上方显示确认条等待确认。",
+		"界面说明",
+		"启动页会居中显示 Logo 和输入框。",
+		"聊天页主要显示消息时间线和输入框。",
+		"如果需要审批，会在输入框上方显示确认条。",
+		"底部会保留 tab agents、/ commands、Ctrl+L sessions、Ctrl+C quit 等必要提示。",
 	}, "\n")
 }
-
 func visibleCommandItems(group string) []commandItem {
 	items := make([]commandItem, 0, len(commandItems))
 	for _, item := range commandItems {
@@ -1845,10 +1908,8 @@ func matchesCommandItem(item commandItem, query string) bool {
 	query = strings.ToLower(query)
 	name := strings.ToLower(strings.TrimPrefix(item.Name, "/"))
 	usage := strings.ToLower(strings.TrimPrefix(item.Usage, "/"))
-	desc := strings.ToLower(item.Description)
 	return strings.HasPrefix(name, query) ||
-		strings.HasPrefix(usage, query) ||
-		strings.Contains(desc, query)
+		strings.HasPrefix(usage, query)
 }
 
 func (m model) chatPanelWidth() int {
@@ -1875,16 +1936,20 @@ func (m model) landingInputContentWidth() int {
 }
 
 func (m model) inputBorderStyle() lipgloss.Style {
-	return inputStyle.BorderForeground(colorAccent)
+	return inputStyle.BorderForeground(m.modeAccentColor())
+}
+
+func (m model) modeAccentColor() lipgloss.Color {
+	if m.mode == modePlan {
+		return colorThinking
+	}
+	return colorAccent
 }
 
 func (m *model) syncInputStyle() {
-	if m.screen == screenLanding {
-		m.input.Placeholder = "Ask Bytemind to inspect, change, or verify this workspace..."
-	} else {
-		m.input.Placeholder = "Continue the conversation..."
-	}
-	m.input.Prompt = "> "
+	m.input.Placeholder = "Ask Bytemind to inspect, change, or verify this workspace..."
+	m.input.Prompt = ""
+	m.input.SetHeight(2)
 }
 
 func resolveSessionID(summaries []session.Summary, prefix string) (string, error) {

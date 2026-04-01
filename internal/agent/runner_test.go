@@ -71,7 +71,7 @@ func TestRunPromptReturnsBudgetSummaryInsteadOfError(t *testing.T) {
 		Stdout:   io.Discard,
 	})
 
-	answer, err := runner.RunPrompt(context.Background(), sess, "inspect workspace", io.Discard)
+	answer, err := runner.RunPrompt(context.Background(), sess, "inspect workspace", "build", io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestRunPromptStopsOnRepeatedToolPlan(t *testing.T) {
 		Stdout:   io.Discard,
 	})
 
-	answer, err := runner.RunPrompt(context.Background(), sess, "looping task", io.Discard)
+	answer, err := runner.RunPrompt(context.Background(), sess, "looping task", "build", io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestRunPromptCompletesMinimalToolLoop(t *testing.T) {
 		Stdout:   io.Discard,
 	})
 
-	answer, err := runner.RunPrompt(context.Background(), sess, "inspect workspace", io.Discard)
+	answer, err := runner.RunPrompt(context.Background(), sess, "inspect workspace", "build", io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestRunPromptEncodesToolExecutionErrorsAndContinues(t *testing.T) {
 		Stdout:   io.Discard,
 	})
 
-	answer, err := runner.RunPrompt(context.Background(), sess, "trigger failing tool", io.Discard)
+	answer, err := runner.RunPrompt(context.Background(), sess, "trigger failing tool", "build", io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,6 +9,7 @@ import (
 
 	"bytemind/internal/config"
 	"bytemind/internal/llm"
+	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 	"bytemind/internal/tools"
 )
@@ -72,7 +73,21 @@ func (r *Runner) SetApprovalHandler(handler tools.ApprovalHandler) {
 	r.approval = handler
 }
 
-func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput string, out io.Writer) (string, error) {
+func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput, mode string, out io.Writer) (string, error) {
+	runMode := planpkg.NormalizeMode(mode)
+	mode = string(runMode)
+	if sess.Mode != runMode {
+		sess.Mode = runMode
+	}
+	if runMode == planpkg.ModePlan {
+		if strings.TrimSpace(sess.Plan.Goal) == "" {
+			sess.Plan.Goal = strings.TrimSpace(userInput)
+		}
+		if sess.Plan.Phase == planpkg.PhaseNone {
+			sess.Plan.Phase = planpkg.PhaseDrafting
+		}
+	}
+
 	sess.Messages = append(sess.Messages, llm.Message{
 		Role:    "user",
 		Content: userInput,
@@ -100,8 +115,8 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				ProviderType:   r.config.Provider.Type,
 				Model:          r.config.Provider.Model,
 				MaxIterations:  r.config.MaxIterations,
-				Mode:           "build",
-				Plan:           append([]session.PlanItem(nil), sess.Plan...),
+				Mode:           mode,
+				Plan:           planpkg.CloneState(sess.Plan),
 			}),
 		})
 		messages = append(messages, sess.Messages...)
@@ -109,7 +124,7 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 		request := llm.ChatRequest{
 			Model:       r.config.Provider.Model,
 			Messages:    messages,
-			Tools:       r.registry.Definitions(),
+			Tools:       r.registry.DefinitionsForMode(runMode),
 			Temperature: 0.2,
 		}
 
@@ -120,6 +135,16 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 		}
 
 		if len(reply.ToolCalls) == 0 {
+			answer := strings.TrimSpace(reply.Content)
+			if runMode == planpkg.ModePlan && !planpkg.HasStructuredPlan(sess.Plan) {
+				reminder := "Plan mode requires a structured plan before finishing. Please restate the plan using update_plan."
+				if answer != "" {
+					answer += "\n\n" + reminder
+				} else {
+					answer = reminder
+				}
+				reply.Content = answer
+			}
 			sess.Messages = append(sess.Messages, reply)
 			if err := r.store.Save(sess); err != nil {
 				return "", err
@@ -135,7 +160,7 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				Content:   reply.Content,
 			})
 
-			answer := strings.TrimSpace(reply.Content)
+			answer = strings.TrimSpace(reply.Content)
 			if answer == "" {
 				return "", fmt.Errorf("assistant returned neither content nor tool calls")
 			}
@@ -182,11 +207,12 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				fmt.Fprintf(out, "%s%stool>%s %s\n", ansiBold, ansiCyan, ansiReset, call.Function.Name)
 			}
 
-			result, execErr := r.registry.Execute(ctx, call.Function.Name, call.Function.Arguments, &tools.ExecutionContext{
+			result, execErr := r.registry.ExecuteForMode(ctx, runMode, call.Function.Name, call.Function.Arguments, &tools.ExecutionContext{
 				Workspace:      r.workspace,
 				ApprovalPolicy: r.config.ApprovalPolicy,
 				Approval:       r.approval,
 				Session:        sess,
+				Mode:           runMode,
 				Stdin:          r.stdin,
 				Stdout:         r.stdout,
 			})
@@ -223,7 +249,7 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				r.emit(Event{
 					Type:      EventPlanUpdated,
 					SessionID: sess.ID,
-					Plan:      append([]session.PlanItem(nil), sess.Plan...),
+					Plan:      planpkg.CloneState(sess.Plan),
 				})
 			}
 		}
@@ -556,3 +582,6 @@ func (r *Runner) emit(event Event) {
 	}
 	r.observer.HandleEvent(event)
 }
+
+
+

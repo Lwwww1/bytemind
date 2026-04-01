@@ -117,6 +117,11 @@ var (
 				Background(lipgloss.Color("#17140D")).
 				Padding(0, 1)
 
+	statusBarStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#DCE7F5")).
+			Background(lipgloss.Color("#111A24")).
+			Padding(0, 1)
+
 	commandPaletteStyle = lipgloss.NewStyle().
 				Background(colorPanel).
 				BorderStyle(lipgloss.NormalBorder()).

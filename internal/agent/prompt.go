@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"bytemind/internal/session"
+	planpkg "bytemind/internal/plan"
 )
 
 //go:embed prompts/core.md
@@ -49,7 +49,7 @@ type PromptInput struct {
 	Mode             string
 	Platform         string
 	Now              time.Time
-	Plan             []session.PlanItem
+	Plan             planpkg.State
 	RepoRulesSummary string
 	Skills           []PromptSkill
 	OutputContract   string
@@ -117,25 +117,84 @@ func renderEnvironmentPrompt(input PromptInput) string {
 	return replacer.Replace(strings.TrimSpace(environmentPromptSource))
 }
 
-func renderPlanPrompt(plan []session.PlanItem) string {
-	if len(plan) == 0 {
+func renderPlanPrompt(state planpkg.State) string {
+	state = planpkg.NormalizeState(state)
+	if !planpkg.HasStructuredPlan(state) {
 		return ""
 	}
 
-	lines := make([]string, 0, len(plan))
-	for _, item := range plan {
-		step := strings.TrimSpace(item.Step)
-		if step == "" {
-			continue
-		}
-		status := strings.TrimSpace(item.Status)
-		if status == "" {
-			status = "pending"
-		}
-		lines = append(lines, fmt.Sprintf("- [%s] %s", status, step))
+	lines := make([]string, 0, len(state.Steps)+12)
+	if state.Goal != "" {
+		lines = append(lines, "Goal: "+state.Goal)
 	}
-	if len(lines) == 0 {
-		return ""
+	if state.Summary != "" {
+		lines = append(lines, "Summary: "+state.Summary)
+	}
+	if state.Phase != "" && state.Phase != planpkg.PhaseNone {
+		lines = append(lines, "Phase: "+string(state.Phase))
+	}
+	if len(lines) > 0 {
+		lines = append(lines, "")
+	}
+
+	completed := make([]planpkg.Step, 0, 3)
+	upcoming := make([]planpkg.Step, 0, 4)
+	var current planpkg.Step
+	var hasCurrent bool
+	for _, step := range state.Steps {
+		switch planpkg.NormalizeStepStatus(string(step.Status)) {
+		case planpkg.StepCompleted:
+			completed = append(completed, step)
+			if len(completed) > 3 {
+				completed = completed[len(completed)-3:]
+			}
+		case planpkg.StepInProgress, planpkg.StepBlocked:
+			if !hasCurrent {
+				current = step
+				hasCurrent = true
+			}
+		default:
+			if len(upcoming) < 4 {
+				upcoming = append(upcoming, step)
+			}
+		}
+	}
+	if len(completed) > 0 {
+		lines = append(lines, "Recently completed:")
+		for _, step := range completed {
+			lines = append(lines, fmt.Sprintf("- [%s] %s", step.Status, step.Title))
+		}
+		lines = append(lines, "")
+	}
+	if hasCurrent {
+		lines = append(lines, "Current step:")
+		lines = append(lines, fmt.Sprintf("- [%s] %s", current.Status, current.Title))
+		if len(current.Files) > 0 {
+			lines = append(lines, "  files: "+strings.Join(current.Files, ", "))
+		}
+		if len(current.Verify) > 0 {
+			lines = append(lines, "  verify: "+strings.Join(current.Verify, " | "))
+		}
+		if current.Risk != "" {
+			lines = append(lines, "  risk: "+string(current.Risk))
+		}
+		if current.Description != "" {
+			lines = append(lines, "  note: "+current.Description)
+		}
+		lines = append(lines, "")
+	}
+	if len(upcoming) > 0 {
+		lines = append(lines, "Upcoming:")
+		for _, step := range upcoming {
+			lines = append(lines, fmt.Sprintf("- [%s] %s", step.Status, step.Title))
+		}
+		lines = append(lines, "")
+	}
+	if state.NextAction != "" {
+		lines = append(lines, "Next Action: "+state.NextAction)
+	}
+	if state.BlockReason != "" {
+		lines = append(lines, "Blocked Reason: "+state.BlockReason)
 	}
 
 	return strings.ReplaceAll(strings.TrimSpace(planPromptSource), "{{PLAN_ITEMS}}", strings.Join(lines, "\n"))

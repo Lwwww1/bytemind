@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 	"unicode"
 
 	"bytemind/internal/llm"
+	planpkg "bytemind/internal/plan"
 )
 
 type RunShellTool struct{}
@@ -113,6 +115,17 @@ func (RunShellTool) Run(ctx context.Context, raw json.RawMessage, execCtx *Execu
 }
 
 func requireApproval(command string, execCtx *ExecutionContext) error {
+	mode := planpkg.ModeBuild
+	if execCtx != nil {
+		mode = planpkg.NormalizeMode(string(execCtx.Mode))
+	}
+	if mode == planpkg.ModePlan {
+		if !isPlanSafeCommand(command) {
+			return errors.New("shell command is unavailable in plan mode unless it matches the strict read-only allowlist")
+		}
+		return nil
+	}
+
 	assessment := assessShellCommand(command)
 	if assessment.Risk == shellRiskBlocked {
 		return errors.New(assessment.Reason)
@@ -128,6 +141,73 @@ func requireApproval(command string, execCtx *ExecutionContext) error {
 			return promptForApproval(command, assessment.Reason, execCtx)
 		}
 		return nil
+	}
+}
+
+func isPlanSafeCommand(command string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return false
+	}
+	if hasWriteRedirection(command) {
+		return false
+	}
+	segments := splitCommandSegments(command)
+	if len(segments) != 1 {
+		return false
+	}
+	fields := splitCommandFields(segments[0])
+	if len(fields) == 0 {
+		return false
+	}
+	first := strings.ToLower(strings.TrimSpace(fields[0]))
+	if first == "" {
+		return false
+	}
+	if looksLikeScript(first) {
+		return false
+	}
+	for _, field := range fields {
+		trimmed := strings.TrimSpace(field)
+		switch trimmed {
+		case "|", ">", ">>", "<", ";", "&&", "||":
+			return false
+		}
+	}
+
+	switch first {
+	case "ls", "dir", "pwd", "cat", "type", "rg", "grep", "find", "tree":
+		return true
+	case "git":
+		if len(fields) < 2 {
+			return false
+		}
+		sub := strings.ToLower(fields[1])
+		return sub == "status" || sub == "diff" || sub == "log"
+	case "go":
+		if len(fields) < 2 {
+			return false
+		}
+		sub := strings.ToLower(fields[1])
+		return sub == "env" || sub == "list"
+	case "bash", "sh", "pwsh", "powershell", "python", "python3", "node":
+		return false
+	default:
+		return false
+	}
+}
+
+func looksLikeScript(command string) bool {
+	command = strings.ToLower(strings.TrimSpace(command))
+	if strings.HasPrefix(command, "./") || strings.HasPrefix(command, ".\\") {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(command))
+	switch ext {
+	case ".sh", ".ps1", ".bat", ".cmd":
+		return true
+	default:
+		return false
 	}
 }
 

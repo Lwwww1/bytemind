@@ -1,6 +1,6 @@
 package agent
 
-import "bytemind/internal/session"
+import planpkg "bytemind/internal/plan"
 
 type EventType string
 
@@ -23,7 +23,7 @@ type Event struct {
 	ToolArguments string
 	ToolResult    string
 	Error         string
-	Plan          []session.PlanItem
+	Plan          planpkg.State
 }
 
 type Observer interface {

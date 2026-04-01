@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"bytemind/internal/session"
+	planpkg "bytemind/internal/plan"
 )
 
 func TestSystemPromptRendersConfiguredBlocks(t *testing.T) {
@@ -18,9 +18,15 @@ func TestSystemPromptRendersConfiguredBlocks(t *testing.T) {
 		Mode:           "build",
 		Platform:       "linux/amd64",
 		Now:            time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC),
-		Plan: []session.PlanItem{
-			{Step: "Inspect relevant files", Status: "completed"},
-			{Step: "Rewrite prompt architecture", Status: "in_progress"},
+		Plan: planpkg.State{
+			Goal:    "Rewrite prompt architecture",
+			Summary: "Keep the prompt composable and mode-aware.",
+			Phase:   planpkg.PhaseExecuting,
+			Steps: []planpkg.Step{
+				{Title: "Inspect relevant files", Status: planpkg.StepCompleted},
+				{Title: "Rewrite prompt architecture", Status: planpkg.StepInProgress, Files: []string{"internal/agent/prompt.go"}, Verify: []string{"go test ./internal/agent"}, Risk: planpkg.RiskMedium},
+			},
+			NextAction: "Continue: Rewrite prompt architecture",
 		},
 		RepoRulesSummary: "- Prefer Go standard library when practical.",
 		Skills: []PromptSkill{
@@ -37,6 +43,7 @@ func TestSystemPromptRendersConfiguredBlocks(t *testing.T) {
 	assertContains(t, prompt, "gpt-5.4-mini")
 	assertContains(t, prompt, "linux/amd64")
 	assertContains(t, prompt, "2026-03-31")
+	assertContains(t, prompt, "Goal: Rewrite prompt architecture")
 	assertContains(t, prompt, "- [completed] Inspect relevant files")
 	assertContains(t, prompt, "- [in_progress] Rewrite prompt architecture")
 	assertContains(t, prompt, "[Current Execution Plan]")

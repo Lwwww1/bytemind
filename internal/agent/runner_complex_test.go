@@ -11,6 +11,7 @@ import (
 
 	"bytemind/internal/config"
 	"bytemind/internal/llm"
+	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 	"bytemind/internal/tools"
 )
@@ -94,7 +95,7 @@ func TestRunPromptStreamsAssistantReplyAndEmitsObserverEvents(t *testing.T) {
 		Stdout: io.Discard,
 	})
 
-	answer, err := runner.RunPrompt(context.Background(), sess, "say hi", &out)
+	answer, err := runner.RunPrompt(context.Background(), sess, "say hi", "build", &out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +194,7 @@ func TestRunPromptExecutesMultipleToolCallsInOrder(t *testing.T) {
 		Stdout:   io.Discard,
 	})
 
-	answer, err := runner.RunPrompt(context.Background(), sess, "do both steps", io.Discard)
+	answer, err := runner.RunPrompt(context.Background(), sess, "do both steps", "build", io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +226,7 @@ func TestRunPromptUpdatePlanSyncsSessionAndEmitsPlanEvent(t *testing.T) {
 				ID:   "call-plan",
 				Type: "function",
 				Function: llm.ToolFunctionCall{
-					Name: "update_plan",
+					Name:      "update_plan",
 					Arguments: `{"explanation":"starting","plan":[{"step":"Inspect provider","status":"completed"},{"step":"Add tests","status":"in_progress"}]}`,
 				},
 			}},
@@ -254,14 +255,14 @@ func TestRunPromptUpdatePlanSyncsSessionAndEmitsPlanEvent(t *testing.T) {
 		Stdout: io.Discard,
 	})
 
-	answer, err := runner.RunPrompt(context.Background(), sess, "make a plan", io.Discard)
+	answer, err := runner.RunPrompt(context.Background(), sess, "make a plan", "build", io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if answer != "Plan updated." {
 		t.Fatalf("unexpected answer: %q", answer)
 	}
-	if len(sess.Plan) != 2 || sess.Plan[1].Step != "Add tests" || sess.Plan[1].Status != "in_progress" {
+	if len(sess.Plan.Steps) != 2 || sess.Plan.Steps[1].Title != "Add tests" || sess.Plan.Steps[1].Status != planpkg.StepInProgress {
 		t.Fatalf("unexpected session plan: %#v", sess.Plan)
 	}
 
@@ -280,7 +281,7 @@ func TestRunPromptUpdatePlanSyncsSessionAndEmitsPlanEvent(t *testing.T) {
 	if !slices.Equal(eventTypes, wantTypes) {
 		t.Fatalf("unexpected event sequence: got=%v want=%v", eventTypes, wantTypes)
 	}
-	if len(events[3].Plan) != 2 || events[3].Plan[1].Step != "Add tests" {
+	if len(events[3].Plan.Steps) != 2 || events[3].Plan.Steps[1].Title != "Add tests" {
 		t.Fatalf("expected plan in event, got %#v", events[3])
 	}
 }
@@ -299,7 +300,7 @@ func TestRunPromptSendsUpdatedPlanIntoNextTurnSystemPrompt(t *testing.T) {
 				ID:   "call-plan",
 				Type: "function",
 				Function: llm.ToolFunctionCall{
-					Name: "update_plan",
+					Name:      "update_plan",
 					Arguments: `{"plan":[{"step":"Inspect provider","status":"completed"},{"step":"Add tests","status":"in_progress"}]}`,
 				},
 			}},
@@ -324,7 +325,7 @@ func TestRunPromptSendsUpdatedPlanIntoNextTurnSystemPrompt(t *testing.T) {
 		Stdout:   io.Discard,
 	})
 
-	if _, err := runner.RunPrompt(context.Background(), sess, "make a plan", io.Discard); err != nil {
+	if _, err := runner.RunPrompt(context.Background(), sess, "make a plan", "build", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.requests) != 2 {

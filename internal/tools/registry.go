@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"bytemind/internal/llm"
+	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 )
 
@@ -16,6 +17,7 @@ type ExecutionContext struct {
 	ApprovalPolicy string
 	Approval       ApprovalHandler
 	Session        *session.Session
+	Mode           planpkg.AgentMode
 	Stdin          io.Reader
 	Stdout         io.Writer
 }
@@ -47,9 +49,15 @@ func (r *Registry) Add(tool Tool) {
 }
 
 func (r *Registry) Definitions() []llm.ToolDefinition {
+	return r.DefinitionsForMode(planpkg.ModeBuild)
+}
+
+func (r *Registry) DefinitionsForMode(mode planpkg.AgentMode) []llm.ToolDefinition {
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {
-		names = append(names, name)
+		if toolAllowedInMode(mode, name) {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 
@@ -61,12 +69,34 @@ func (r *Registry) Definitions() []llm.ToolDefinition {
 }
 
 func (r *Registry) Execute(ctx context.Context, name, rawArgs string, execCtx *ExecutionContext) (string, error) {
+	return r.ExecuteForMode(ctx, planpkg.ModeBuild, name, rawArgs, execCtx)
+}
+
+func (r *Registry) ExecuteForMode(ctx context.Context, mode planpkg.AgentMode, name, rawArgs string, execCtx *ExecutionContext) (string, error) {
 	tool, ok := r.tools[name]
 	if !ok {
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
+	if !toolAllowedInMode(mode, name) {
+		return "", fmt.Errorf("tool %q is unavailable in %s mode", name, mode)
+	}
 	if rawArgs == "" {
 		rawArgs = "{}"
 	}
+	if execCtx != nil {
+		execCtx.Mode = mode
+	}
 	return tool.Run(ctx, json.RawMessage(rawArgs), execCtx)
+}
+
+func toolAllowedInMode(mode planpkg.AgentMode, name string) bool {
+	if planpkg.NormalizeMode(string(mode)) != planpkg.ModePlan {
+		return true
+	}
+	switch name {
+	case "list_files", "read_file", "search_text", "update_plan", "run_shell":
+		return true
+	default:
+		return false
+	}
 }

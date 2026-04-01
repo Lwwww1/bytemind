@@ -8,6 +8,7 @@ import (
 
 	"bytemind/internal/agent"
 	"bytemind/internal/config"
+	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 	"bytemind/internal/tools"
 
@@ -182,6 +183,102 @@ func TestHandleMouseWheelScrollsLandingInputWhenPointerIsOverInput(t *testing.T)
 	}
 }
 
+func TestHandleMouseWheelScrollsPlanPanel(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	m := model{
+		screen:    screenChat,
+		width:     140,
+		height:    24,
+		input:     input,
+		viewport:  viewport.New(0, 0),
+		planView:  viewport.New(0, 0),
+		mode:      modeBuild,
+		sess:      session.New("E:\\bytemind"),
+		workspace: "E:\\bytemind",
+		plan: planpkg.State{
+			Phase: planpkg.PhaseReady,
+			Steps: []planpkg.Step{
+				{Title: "Step 1", Status: planpkg.StepCompleted},
+				{Title: "Step 2", Status: planpkg.StepCompleted},
+				{Title: "Step 3", Status: planpkg.StepInProgress, Description: strings.Repeat("detail ", 10)},
+				{Title: "Step 4", Status: planpkg.StepPending, Description: strings.Repeat("detail ", 10)},
+				{Title: "Step 5", Status: planpkg.StepPending, Description: strings.Repeat("detail ", 10)},
+				{Title: "Step 6", Status: planpkg.StepPending, Description: strings.Repeat("detail ", 10)},
+				{Title: "Step 7", Status: planpkg.StepPending, Description: strings.Repeat("detail ", 10)},
+			},
+		},
+	}
+
+	m.refreshViewport()
+	if m.planView.Height <= 0 {
+		t.Fatalf("expected plan viewport height to be initialized")
+	}
+
+	planX, planY := -1, -1
+	for y := 0; y < m.height; y++ {
+		for x := 0; x < m.width; x++ {
+			if m.mouseOverPlan(x, y) {
+				planX, planY = x, y
+				break
+			}
+		}
+		if planX >= 0 {
+			break
+		}
+	}
+	if planX < 0 || planY < 0 {
+		t.Fatalf("expected to find a mouse-active plan panel region")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Button: tea.MouseButtonWheelDown,
+		Action: tea.MouseActionPress,
+		X:      planX,
+		Y:      planY,
+	})
+	updated := got.(model)
+	if updated.planView.YOffset == 0 {
+		t.Fatalf("expected plan viewport to scroll down, got offset %d", updated.planView.YOffset)
+	}
+}
+
+func TestPlanModeDoesNotShowDetailedPlanPanel(t *testing.T) {
+	input := textarea.New()
+	m := model{
+		screen:    screenChat,
+		width:     140,
+		height:    24,
+		input:     input,
+		viewport:  viewport.New(0, 0),
+		planView:  viewport.New(0, 0),
+		mode:      modePlan,
+		sess:      session.New("E:\\bytemind"),
+		workspace: "E:\\bytemind",
+		plan: planpkg.State{
+			Phase: planpkg.PhaseReady,
+			Goal:  "Create a plan",
+			Steps: []planpkg.Step{
+				{Title: "Step 1", Status: planpkg.StepInProgress},
+				{Title: "Step 2", Status: planpkg.StepPending},
+			},
+		},
+	}
+
+	m.refreshViewport()
+
+	if m.hasPlanPanel() {
+		t.Fatalf("expected detailed plan panel to stay hidden in plan mode")
+	}
+	for y := 0; y < m.height; y++ {
+		for x := 0; x < m.width; x++ {
+			if m.mouseOverPlan(x, y) {
+				t.Fatalf("did not expect a mouse-active plan panel region in plan mode")
+			}
+		}
+	}
+}
+
 func TestCtrlLFromLandingOpensSessions(t *testing.T) {
 	store, err := session.NewStore(t.TempDir())
 	if err != nil {
@@ -205,6 +302,22 @@ func TestCtrlLFromLandingOpensSessions(t *testing.T) {
 	}
 }
 
+func TestCtrlGOpensAndClosesHelp(t *testing.T) {
+	m := model{}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlG})
+	opened := got.(model)
+	if !opened.helpOpen {
+		t.Fatalf("expected ctrl+g to open help")
+	}
+
+	got, _ = opened.handleKey(tea.KeyMsg{Type: tea.KeyCtrlG})
+	closed := got.(model)
+	if closed.helpOpen {
+		t.Fatalf("expected ctrl+g to close help")
+	}
+}
+
 func TestTabTogglesBetweenBuildAndPlanModes(t *testing.T) {
 	m := model{
 		mode: modeBuild,
@@ -220,6 +333,93 @@ func TestTabTogglesBetweenBuildAndPlanModes(t *testing.T) {
 	updated = got.(model)
 	if updated.mode != modeBuild {
 		t.Fatalf("expected second tab to switch back to build mode, got %q", updated.mode)
+	}
+}
+
+func TestRefreshViewportPreservesManualScrollOffset(t *testing.T) {
+	input := textarea.New()
+	m := model{
+		screen:    screenChat,
+		width:     100,
+		height:    24,
+		input:     input,
+		viewport:  viewport.New(0, 0),
+		planView:  viewport.New(0, 0),
+		sess:      session.New("E:\\bytemind"),
+		workspace: "E:\\bytemind",
+	}
+	for i := 0; i < 20; i++ {
+		m.chatItems = append(m.chatItems, chatEntry{
+			Kind:   "assistant",
+			Title:  "Bytemind",
+			Body:   strings.Repeat("message ", 12),
+			Status: "final",
+		})
+	}
+
+	m.chatAutoFollow = true
+	m.refreshViewport()
+	m.viewport.LineUp(5)
+	m.chatAutoFollow = false
+	beforeOffset := m.viewport.YOffset
+	m.chatItems = append(m.chatItems, chatEntry{
+		Kind:   "assistant",
+		Title:  "Bytemind",
+		Body:   "new content should not force the viewport to jump",
+		Status: "final",
+	})
+
+	m.refreshViewport()
+
+	if m.viewport.YOffset != beforeOffset {
+		t.Fatalf("expected manual scroll offset %d to be preserved, got %d", beforeOffset, m.viewport.YOffset)
+	}
+}
+
+func TestContinueExecutionInputPreparesPlanAndSubmitsPrompt(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.SetWidth(40)
+	input.SetHeight(3)
+	input.SetValue("继续执行")
+	input.CursorEnd()
+	m := model{
+		screen:    screenChat,
+		width:     100,
+		height:    24,
+		input:     input,
+		viewport:  viewport.New(0, 0),
+		planView:  viewport.New(0, 0),
+		mode:      modePlan,
+		sess:      session.New("E:\\bytemind"),
+		workspace: "E:\\bytemind",
+		plan: planpkg.State{
+			Goal:       "Finish plan mode",
+			Phase:      planpkg.PhaseReady,
+			NextAction: "Start: Implement continuation",
+			Steps: []planpkg.Step{
+				{Title: "Implement continuation", Status: planpkg.StepPending},
+				{Title: "Verify workflow", Status: planpkg.StepPending},
+			},
+		},
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := got.(model)
+	if updated.mode != modeBuild {
+		t.Fatalf("expected continue execution to switch to build mode, got %q", updated.mode)
+	}
+	if updated.plan.Phase != planpkg.PhaseExecuting {
+		t.Fatalf("expected plan phase to become executing, got %q", updated.plan.Phase)
+	}
+	if len(updated.chatItems) < 2 {
+		t.Fatalf("expected continue execution to submit a prompt")
+	}
+	if updated.chatItems[0].Body != "继续执行" {
+		t.Fatalf("expected original continue input to be appended, got %q", updated.chatItems[0].Body)
+	}
+	if updated.plan.Steps[0].Status != planpkg.StepInProgress {
+		t.Fatalf("expected first pending step to become in progress, got %q", updated.plan.Steps[0].Status)
 	}
 }
 
@@ -367,7 +567,7 @@ func TestEnterSubmitsPrompt(t *testing.T) {
 	}
 }
 
-func TestCtrlJInsertsNewlineWithoutSubmitting(t *testing.T) {
+func TestAltEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
 	input := textarea.New()
 	input.Focus()
 	input.SetWidth(40)
@@ -382,14 +582,14 @@ func TestCtrlJInsertsNewlineWithoutSubmitting(t *testing.T) {
 		sess:      session.New("E:\\bytemind"),
 	}
 
-	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
 	updated := got.(model)
 
 	if len(updated.chatItems) != 0 {
-		t.Fatalf("expected ctrl+j not to submit prompt")
+		t.Fatalf("expected alt+enter not to submit prompt")
 	}
 	if updated.input.Value() != "first line\n" {
-		t.Fatalf("expected ctrl+j to insert newline, got %q", updated.input.Value())
+		t.Fatalf("expected alt+enter to insert newline, got %q", updated.input.Value())
 	}
 }
 
@@ -464,6 +664,8 @@ func TestHelpTextOnlyMentionsSupportedEntryPoints(t *testing.T) {
 		"/session",
 		"/quit",
 		"/new",
+		"Ctrl+G",
+		"continue execution",
 	} {
 		if !strings.Contains(text, wanted) {
 			t.Fatalf("help text should mention %q", wanted)
@@ -502,6 +704,39 @@ func TestRenderFooterOnlyShowsInputRegion(t *testing.T) {
 	}
 	if strings.Contains(footer, "PgUp/PgDn") {
 		t.Fatalf("footer should not advertise PgUp/PgDn anymore")
+	}
+}
+
+func TestRenderStatusBarShowsCurrentRuntimeState(t *testing.T) {
+	m := model{
+		width:          200,
+		mode:           modeBuild,
+		phase:          "thinking",
+		chatAutoFollow: false,
+		cfg: config.Config{
+			Provider: config.ProviderConfig{Model: "deepseek-chat"},
+		},
+		sess: &session.Session{ID: "1234567890abcdef"},
+		plan: planpkg.State{
+			Phase: planpkg.PhaseExecuting,
+			Steps: []planpkg.Step{
+				{Title: "Implement plan resumption", Status: planpkg.StepInProgress},
+			},
+		},
+	}
+
+	bar := m.renderStatusBar()
+	for _, want := range []string{
+		"Mode: BUILD",
+		"Phase: executing",
+		"Session: 1234567890ab",
+		"Step: Implement plan resumption",
+		"Follow: manual",
+		"Model: deepseek-chat",
+	} {
+		if !strings.Contains(bar, want) {
+			t.Fatalf("expected status bar to contain %q", want)
+		}
 	}
 }
 

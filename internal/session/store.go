@@ -12,21 +12,23 @@ import (
 	"strings"
 	"time"
 
+	planpkg "bytemind/internal/plan"
 	"bytemind/internal/llm"
 )
 
-type PlanItem struct {
+type legacyPlanItem struct {
 	Step   string `json:"step"`
 	Status string `json:"status"`
 }
 
 type Session struct {
-	ID        string        `json:"id"`
-	Workspace string        `json:"workspace"`
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
-	Messages  []llm.Message `json:"messages"`
-	Plan      []PlanItem    `json:"plan,omitempty"`
+	ID        string            `json:"id"`
+	Workspace string            `json:"workspace"`
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
+	Messages  []llm.Message     `json:"messages"`
+	Mode      planpkg.AgentMode `json:"mode,omitempty"`
+	Plan      planpkg.State     `json:"plan,omitempty"`
 }
 
 type Store struct {
@@ -50,8 +52,84 @@ func New(workspace string) *Session {
 		CreatedAt: now,
 		UpdatedAt: now,
 		Messages:  make([]llm.Message, 0, 32),
-		Plan:      make([]PlanItem, 0, 8),
+		Mode:      planpkg.ModeBuild,
+		Plan: planpkg.State{
+			Phase: planpkg.PhaseNone,
+			Steps: make([]planpkg.Step, 0, 8),
+		},
 	}
+}
+
+func (s *Session) UnmarshalJSON(data []byte) error {
+	type rawSession struct {
+		ID        string          `json:"id"`
+		Workspace string          `json:"workspace"`
+		CreatedAt time.Time       `json:"created_at"`
+		UpdatedAt time.Time       `json:"updated_at"`
+		Messages  []llm.Message   `json:"messages"`
+		Mode      string          `json:"mode,omitempty"`
+		Plan      json.RawMessage `json:"plan,omitempty"`
+	}
+	var raw rawSession
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	s.ID = raw.ID
+	s.Workspace = raw.Workspace
+	s.CreatedAt = raw.CreatedAt
+	s.UpdatedAt = raw.UpdatedAt
+	s.Messages = raw.Messages
+	s.Mode = planpkg.NormalizeMode(raw.Mode)
+	s.Plan = planpkg.State{Phase: planpkg.PhaseNone, Steps: make([]planpkg.Step, 0, 8)}
+
+	trimmed := bytes.TrimSpace(raw.Plan)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+
+	switch trimmed[0] {
+	case '[':
+		var legacy []legacyPlanItem
+		if err := json.Unmarshal(trimmed, &legacy); err != nil {
+			return err
+		}
+		s.Plan = legacyPlanToState(legacy)
+	default:
+		var state planpkg.State
+		if err := json.Unmarshal(trimmed, &state); err != nil {
+			return err
+		}
+		s.Plan = planpkg.NormalizeState(state)
+	}
+
+	if s.Mode == "" {
+		s.Mode = planpkg.ModeBuild
+	}
+	if len(s.Plan.Steps) > 0 && s.Plan.UpdatedAt.IsZero() {
+		s.Plan.UpdatedAt = s.UpdatedAt
+	}
+	return nil
+}
+
+func legacyPlanToState(items []legacyPlanItem) planpkg.State {
+	steps := make([]planpkg.Step, 0, len(items))
+	for i, item := range items {
+		step := strings.TrimSpace(item.Step)
+		if step == "" {
+			continue
+		}
+		steps = append(steps, planpkg.Step{
+			ID:     fmt.Sprintf("s%d", i+1),
+			Title:  step,
+			Status: planpkg.NormalizeStepStatus(item.Status),
+		})
+	}
+	state := planpkg.State{
+		Phase: planpkg.PhaseReady,
+		Steps: steps,
+	}
+	return planpkg.NormalizeState(state)
 }
 
 func NewStore(dir string) (*Store, error) {
@@ -63,6 +141,13 @@ func NewStore(dir string) (*Store, error) {
 
 func (s *Store) Save(session *Session) error {
 	session.UpdatedAt = time.Now().UTC()
+	if session.Mode == "" {
+		session.Mode = planpkg.ModeBuild
+	}
+	session.Plan = planpkg.NormalizeState(session.Plan)
+	if len(session.Plan.Steps) > 0 {
+		session.Plan.UpdatedAt = session.UpdatedAt
+	}
 	var buf bytes.Buffer
 	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)

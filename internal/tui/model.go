@@ -11,6 +11,7 @@ import (
 
 	"bytemind/internal/agent"
 	"bytemind/internal/config"
+	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 	"bytemind/internal/tools"
 
@@ -103,10 +104,10 @@ type sessionsLoadedMsg struct {
 }
 
 var commandItems = []commandItem{
-	{Name: "/help", Usage: "/help", Description: "打开帮助说明，查看当前可用命令和基础用法。", Kind: "command"},
-	{Name: "/session", Usage: "/session", Description: "打开最近历史会话列表。", Kind: "command"},
-	{Name: "/new", Usage: "/new", Description: "在当前工作区创建一个全新的会话。", Kind: "command"},
-	{Name: "/quit", Usage: "/quit", Description: "退出当前 TUI 界面。", Kind: "command"},
+	{Name: "/help", Usage: "/help", Description: "Show usage and supported commands.", Kind: "command"},
+	{Name: "/session", Usage: "/session", Description: "Open the recent session list.", Kind: "command"},
+	{Name: "/new", Usage: "/new", Description: "Start a fresh session in this workspace.", Kind: "command"},
+	{Name: "/quit", Usage: "/quit", Description: "Exit the current TUI window.", Kind: "command"},
 }
 
 type model struct {
@@ -121,12 +122,13 @@ type model struct {
 
 	async    chan tea.Msg
 	viewport viewport.Model
+	planView viewport.Model
 	input    textarea.Model
 	spinner  spinner.Model
 
 	chatItems      []chatEntry
 	toolRuns       []toolRun
-	plan           []session.PlanItem
+	plan           planpkg.State
 	sessions       []session.Summary
 	sessionLimit   int
 	sessionCursor  int
@@ -145,6 +147,7 @@ type model struct {
 	lastPasteAt    time.Time
 	lastInputAt    time.Time
 	inputBurstSize int
+	chatAutoFollow bool
 }
 
 func newModel(opts Options) model {
@@ -168,6 +171,11 @@ func newModel(opts Options) model {
 	vp.MouseWheelEnabled = true
 	vp.MouseWheelDelta = scrollStep
 
+	planVP := viewport.New(0, 0)
+	planVP.YPosition = 0
+	planVP.MouseWheelEnabled = true
+	planVP.MouseWheelDelta = scrollStep
+
 	chatItems, toolRuns := rebuildSessionTimeline(opts.Session)
 	summaries, _, _ := opts.Store.List(defaultSessionLimit)
 
@@ -189,19 +197,21 @@ func newModel(opts Options) model {
 		workspace:      opts.Workspace,
 		async:          async,
 		viewport:       vp,
+		planView:       planVP,
 		input:          input,
 		spinner:        spin,
 		chatItems:      chatItems,
 		toolRuns:       toolRuns,
-		plan:           copyPlan(opts.Session.Plan),
+		plan:           copyPlanState(opts.Session.Plan),
 		sessions:       summaries,
 		sessionLimit:   defaultSessionLimit,
 		screen:         initialScreen(opts.Session),
-		mode:           modeBuild,
+		mode:           toAgentMode(opts.Session.Mode),
 		streamingIndex: -1,
 		statusNote:     "Ready.",
 		phase:          "idle",
 		llmConnected:   true,
+		chatAutoFollow: true,
 	}
 	m.syncInputStyle()
 	m.syncCommandPalette()
@@ -306,18 +316,35 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.screen == screenChat {
+		if m.mouseOverPlan(msg.X, msg.Y) {
+			m.ensurePlanMouse()
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				m.planView.LineUp(scrollStep)
+				return m, nil
+			case tea.MouseButtonWheelDown:
+				m.planView.LineDown(scrollStep)
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.planView, cmd = m.planView.Update(msg)
+				return m, cmd
+			}
+		}
 		m.ensureViewportMouse()
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			m.viewport.LineUp(scrollStep)
+			m.chatAutoFollow = false
 			return m, nil
 		case tea.MouseButtonWheelDown:
 			m.viewport.LineDown(scrollStep)
+			m.chatAutoFollow = m.viewport.AtBottom()
 			return m, nil
 		default:
-			m.ensureViewportMouse()
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
+			m.chatAutoFollow = m.viewport.AtBottom()
 			return m, cmd
 		}
 	}
@@ -328,6 +355,13 @@ func (m *model) ensureViewportMouse() {
 	m.viewport.MouseWheelEnabled = true
 	if m.viewport.MouseWheelDelta <= 0 {
 		m.viewport.MouseWheelDelta = scrollStep
+	}
+}
+
+func (m *model) ensurePlanMouse() {
+	m.planView.MouseWheelEnabled = true
+	if m.planView.MouseWheelDelta <= 0 {
+		m.planView.MouseWheelDelta = scrollStep
 	}
 }
 
@@ -371,6 +405,36 @@ func (m model) mouseOverInput(y int) bool {
 	}
 }
 
+func (m model) mouseOverPlan(x, y int) bool {
+	if m.screen != screenChat || !m.hasPlanPanel() || m.width <= 0 || m.height <= 0 {
+		return false
+	}
+
+	footerHeight := lipgloss.Height(m.renderFooter())
+	bodyHeight := max(0, m.height-footerHeight)
+	if bodyHeight == 0 {
+		return false
+	}
+
+	innerTop := panelStyle.GetVerticalFrameSize() / 2
+	innerLeft := panelStyle.GetHorizontalFrameSize() / 2
+	panelHeight := m.planPanelRenderHeight()
+
+	if m.showPlanSidebar() {
+		left := innerLeft + m.conversationPanelWidth() + 1
+		right := left + m.planPanelWidth() - 1
+		top := innerTop
+		bottom := min(bodyHeight-1, top+panelHeight-1)
+		return x >= left && x <= right && y >= top && y <= bottom
+	}
+
+	top := innerTop
+	bottom := min(bodyHeight-1, top+panelHeight-1)
+	left := innerLeft
+	right := left + m.chatPanelInnerWidth() - 1
+	return x >= left && x <= right && y >= top && y <= bottom
+}
+
 func (m model) mouseOverChatInput(y int) bool {
 	if m.height <= 0 {
 		return false
@@ -410,7 +474,7 @@ func (m model) mouseOverLandingInput(y int) bool {
 			Width(m.landingInputShellWidth()).
 			Render(m.input.View()),
 	)
-	hintHeight := lipgloss.Height(mutedStyle.Render("tab agents  ·  / commands  ·  Ctrl+L sessions  ·  Ctrl+C quit"))
+	hintHeight := lipgloss.Height(mutedStyle.Render("tab agents  路  / commands  路  Ctrl+L sessions  路  Ctrl+C quit"))
 	contentHeight := logoHeight + 1 + titleHeight + subtitleHeight + 1 + inputHeight + 1 + hintHeight
 	contentTop := max(0, (m.height-contentHeight)/2)
 	inputTop := contentTop + logoHeight + 1 + titleHeight + subtitleHeight + 1
@@ -428,7 +492,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		m.toggleMode()
 		return m, nil
-	case "?":
+	case "ctrl+g":
 		if m.approval == nil {
 			m.helpOpen = !m.helpOpen
 		}
@@ -452,7 +516,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.helpOpen {
-		if msg.String() == "esc" || msg.String() == "?" {
+		if msg.String() == "esc" || msg.String() == "ctrl+g" {
 			m.helpOpen = false
 		}
 		return m, nil
@@ -493,15 +557,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sessionsOpen = true
 		}
 		return m, m.loadSessionsCmd()
-	case "ctrl+j":
-		before := m.input.Value()
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyEnter})
-		if m.input.Value() != before {
-			m.noteInputMutation(before, m.input.Value(), "ctrl+j")
-			m.syncCommandPalette()
-		}
-		return m, cmd
 	case "ctrl+n":
 		if !m.busy && m.screen == screenChat {
 			if err := m.newSession(); err != nil {
@@ -511,14 +566,27 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadSessionsCmd()
 	case "home":
 		m.viewport.GotoTop()
+		m.chatAutoFollow = false
 		return m, nil
 	case "end":
 		m.viewport.GotoBottom()
+		m.chatAutoFollow = true
 		return m, nil
 	}
 
 	if m.busy {
 		return m, nil
+	}
+
+	if msg.Type == tea.KeyEnter && msg.Alt {
+		before := m.input.Value()
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if m.input.Value() != before {
+			m.noteInputMutation(before, m.input.Value(), "alt+enter")
+			m.syncCommandPalette()
+		}
+		return m, cmd
 	}
 
 	if msg.String() == "enter" {
@@ -536,16 +604,36 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if value == "" {
 			return m, nil
 		}
+		if isContinueExecutionInput(value) && planpkg.HasStructuredPlan(m.plan) {
+			state, err := preparePlanForContinuation(m.plan)
+			if err != nil {
+				m.statusNote = err.Error()
+				return m, nil
+			}
+			m.plan = state
+			m.mode = modeBuild
+			if m.sess != nil {
+				m.sess.Mode = planpkg.ModeBuild
+				m.sess.Plan = copyPlanState(state)
+				if m.store != nil {
+					if err := m.store.Save(m.sess); err != nil {
+						m.statusNote = err.Error()
+						return m, nil
+					}
+				}
+			}
+		}
 		if value == "/quit" {
 			return m, tea.Quit
 		}
 		if strings.HasPrefix(value, "/") {
 			m.input.Reset()
-			if err := m.handleSlashCommand(value); err != nil {
+			next, cmd, err := m.executeCommand(value)
+			if err != nil {
 				m.statusNote = err.Error()
+				return m, nil
 			}
-			m.refreshViewport()
-			return m, m.loadSessionsCmd()
+			return next, cmd
 		}
 		return m.submitPrompt(value)
 	}
@@ -602,23 +690,25 @@ func (m model) handleCommandPaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.closeCommandPalette()
 			m.input.Reset()
-			if err := m.handleSlashCommand(value); err != nil {
+			next, cmd, err := m.executeCommand(value)
+			if err != nil {
 				m.statusNote = err.Error()
+				return m, nil
 			}
-			m.refreshViewport()
-			return m, m.loadSessionsCmd()
+			return next, cmd
 		}
 		m.closeCommandPalette()
-		if shouldExecuteFromPalette(selected) {
+		if shouldExecuteFromPalette(selected) || selected.Name == "/continue" {
 			if selected.Name == "/quit" {
 				return m, tea.Quit
 			}
 			m.input.Reset()
-			if err := m.handleSlashCommand(selected.Name); err != nil {
+			next, cmd, err := m.executeCommand(selected.Name)
+			if err != nil {
 				m.statusNote = err.Error()
+				return m, nil
 			}
-			m.refreshViewport()
-			return m, m.loadSessionsCmd()
+			return next, cmd
 		}
 		m.setInputValue(selected.Usage)
 		m.statusNote = selected.Description
@@ -645,11 +735,25 @@ func (m *model) openCommandPalette() {
 func (m *model) toggleMode() {
 	if m.mode == modeBuild {
 		m.mode = modePlan
-		m.statusNote = "Switched to Plan mode. UI only for now."
-		return
+		if m.plan.Phase == planpkg.PhaseNone {
+			m.plan.Phase = planpkg.PhaseDrafting
+		}
+		m.statusNote = "Switched to Plan mode. Draft the plan before executing."
+	} else {
+		m.mode = modeBuild
+		m.statusNote = "Switched to Build mode. Execution still requires confirmation."
 	}
-	m.mode = modeBuild
-	m.statusNote = "Switched to Build mode."
+	if m.sess != nil {
+		m.sess.Mode = planpkg.NormalizeMode(string(m.mode))
+		m.sess.Plan = copyPlanState(m.plan)
+		if m.store != nil {
+			_ = m.store.Save(m.sess)
+		}
+	}
+	if m.width > 0 && m.height > 0 {
+		m.syncLayoutForCurrentScreen()
+		m.refreshViewport()
+	}
 }
 
 func (m *model) closeCommandPalette() {
@@ -720,9 +824,12 @@ func (m model) submitPrompt(value string) (tea.Model, tea.Cmd) {
 	m.phase = "thinking"
 	m.llmConnected = true
 	m.busy = true
-	m.syncLayoutForCurrentScreen()
-	m.refreshViewport()
-	return m, tea.Batch(m.startRunCmd(value), m.spinner.Tick, waitForAsync(m.async))
+	m.chatAutoFollow = true
+	if m.width > 0 && m.height > 0 {
+		m.syncLayoutForCurrentScreen()
+		m.refreshViewport()
+	}
+	return m, tea.Batch(m.startRunCmd(value, string(m.mode)), m.spinner.Tick, waitForAsync(m.async))
 }
 
 func (m *model) handleAgentEvent(event agent.Event) {
@@ -768,8 +875,12 @@ func (m *model) handleAgentEvent(event agent.Event) {
 		m.statusNote = summary
 		m.phase = "thinking"
 	case agent.EventPlanUpdated:
-		m.plan = copyPlan(event.Plan)
-		m.statusNote = fmt.Sprintf("Plan updated with %d step(s).", len(m.plan))
+		m.plan = copyPlanState(event.Plan)
+		m.phase = string(planpkg.NormalizePhase(string(m.plan.Phase)))
+		if m.phase == "none" {
+			m.phase = "plan"
+		}
+		m.statusNote = fmt.Sprintf("Plan updated with %d step(s).", len(m.plan.Steps))
 	case agent.EventRunFinished:
 		if strings.TrimSpace(event.Content) != "" {
 			m.statusNote = "Run finished."
@@ -960,8 +1071,19 @@ func (m *model) failLatestAssistant(errText string) {
 
 func (m *model) refreshViewport() {
 	m.syncViewportSize()
+	chatOffset := m.viewport.YOffset
+	keepChatBottom := m.chatAutoFollow || m.viewport.AtBottom()
 	m.viewport.SetContent(m.renderConversation())
-	m.viewport.GotoBottom()
+	if keepChatBottom {
+		m.viewport.GotoBottom()
+		m.chatAutoFollow = true
+	} else {
+		m.viewport.SetYOffset(chatOffset)
+	}
+
+	planOffset := m.planView.YOffset
+	m.planView.SetContent(m.planPanelContent(max(16, m.planView.Width)))
+	m.planView.SetYOffset(planOffset)
 }
 
 func (m *model) syncLayoutForCurrentScreen() {
@@ -977,8 +1099,10 @@ func (m *model) syncLayoutForCurrentScreen() {
 }
 
 func (m *model) resize() {
-	m.syncLayoutForCurrentScreen()
-	m.refreshViewport()
+	if m.width > 0 && m.height > 0 {
+		m.syncLayoutForCurrentScreen()
+		m.refreshViewport()
+	}
 }
 
 func (m model) View() string {
@@ -1015,7 +1139,11 @@ func (m model) renderConversation() string {
 	if len(m.chatItems) == 0 {
 		return mutedStyle.Render("No messages yet. Start with an instruction like \"analyze this repo\" or \"implement a TUI shell\".")
 	}
-	width := max(24, m.viewport.Width)
+	width := m.viewport.Width
+	if width <= 0 {
+		width = m.conversationPanelWidth()
+	}
+	width = max(24, width)
 	blocks := make([]string, 0, len(m.chatItems))
 	for _, item := range m.chatItems {
 		blocks = append(blocks, renderChatRow(item, width))
@@ -1033,14 +1161,42 @@ func (m *model) syncViewportSize() {
 		bodyHeight = 6
 	}
 	panelInnerWidth := m.chatPanelInnerWidth()
-	panelInnerHeight := max(4, bodyHeight-panelStyle.GetVerticalFrameSize())
-	contentHeight := max(3, panelInnerHeight)
-	m.viewport.Width = panelInnerWidth
+	statusHeight := lipgloss.Height(m.renderStatusBar())
+	panelInnerHeight := max(4, bodyHeight-panelStyle.GetVerticalFrameSize()-statusHeight-1)
+	extraHeight := 0
+	if m.hasPlanPanel() {
+		planInnerWidth := m.planPanelWidth() - modalBoxStyle.GetHorizontalFrameSize()
+		if m.showPlanSidebar() {
+			m.planView.Width = max(16, planInnerWidth)
+			m.planView.Height = max(3, panelInnerHeight-modalBoxStyle.GetVerticalFrameSize())
+		} else {
+			m.planView.Width = max(16, panelInnerWidth-modalBoxStyle.GetHorizontalFrameSize())
+			m.planView.Height = max(3, min(12, panelInnerHeight/3))
+			extraHeight = m.planPanelRenderHeight() + 1
+		}
+	} else {
+		m.planView.Width = 0
+		m.planView.Height = 0
+	}
+	contentHeight := max(3, panelInnerHeight-extraHeight)
+	m.viewport.Width = m.conversationPanelWidth()
 	m.viewport.Height = contentHeight
 }
 
 func (m model) renderMainPanel() string {
-	return m.viewport.View()
+	statusBar := m.renderStatusBar()
+	if !m.hasPlanPanel() {
+		return lipgloss.JoinVertical(lipgloss.Left, statusBar, "", m.viewport.View())
+	}
+	var content string
+	if m.showPlanSidebar() {
+		conversation := lipgloss.NewStyle().Width(m.conversationPanelWidth()).Render(m.viewport.View())
+		planPanel := m.renderPlanPanel(m.planPanelWidth())
+		content = lipgloss.JoinHorizontal(lipgloss.Top, conversation, spacer(1), planPanel)
+	} else {
+		content = lipgloss.JoinVertical(lipgloss.Left, m.renderPlanPanel(m.chatPanelInnerWidth()), "", m.viewport.View())
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, statusBar, "", content)
 }
 
 func (m model) renderLanding() string {
@@ -1060,7 +1216,7 @@ func (m model) renderLanding() string {
 	if m.commandOpen {
 		parts = append(parts, m.renderCommandPalette(), "")
 	}
-	parts = append(parts, inputBox, "", mutedStyle.Render("tab agents  ·  / commands  ·  Ctrl+L sessions  ·  Ctrl+C quit"))
+	parts = append(parts, inputBox, "", mutedStyle.Render("tab agents  路  / commands  路  Ctrl+L sessions  路  Ctrl+C quit"))
 	content := lipgloss.JoinVertical(lipgloss.Center, parts...)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 }
@@ -1070,7 +1226,7 @@ func (m model) renderFooter() string {
 		Width(m.chatPanelInnerWidth()).
 		Align(lipgloss.Right).
 		Foreground(colorMuted).
-		Render("tab agents  ·  / commands  ·  Ctrl+L sessions  ·  Ctrl+C quit")
+		Render("tab agents  路  / commands  路  Ctrl+L sessions  路  Ctrl+C quit")
 	inputBorder := m.inputBorderStyle().
 		Width(m.chatPanelInnerWidth()).
 		Render(m.input.View())
@@ -1129,7 +1285,7 @@ func (m model) renderSessionsModal() string {
 
 func (m model) renderHelpModal() string {
 	return modalBoxStyle.Width(min(88, max(54, m.width-16))).Render(
-		lipgloss.JoinVertical(lipgloss.Left, modalTitleStyle.Render("甯姪"), m.helpText()),
+		lipgloss.JoinVertical(lipgloss.Left, modalTitleStyle.Render("Help"), m.helpText()),
 	)
 }
 
@@ -1143,6 +1299,24 @@ func (m model) renderApprovalBanner() string {
 		mutedStyle.Render("Y / Enter approve    N / Esc reject"),
 	}
 	return approvalBannerStyle.Width(width).Render(strings.Join(lines, "\n"))
+}
+
+func (m model) renderStatusBar() string {
+	width := max(24, m.chatPanelInnerWidth())
+	stepTitle := currentOrNextStepTitle(m.plan)
+	if stepTitle == "" {
+		stepTitle = "-"
+	}
+	items := []string{
+		"Mode: " + strings.ToUpper(string(m.mode)),
+		"Phase: " + m.currentPhaseLabel(),
+		"Session: " + m.currentSessionLabel(),
+		"Step: " + stepTitle,
+		"Follow: " + m.autoFollowLabel(),
+		"Model: " + m.currentModelLabel(),
+	}
+	line := compact(strings.Join(items, "  |  "), width)
+	return statusBarStyle.Width(width).Render(line)
 }
 
 func (m model) renderCommandPalette() string {
@@ -1192,17 +1366,25 @@ func (m *model) handleSlashCommand(input string) error {
 		m.screen = screenChat
 		m.appendChat(chatEntry{Kind: "user", Title: "You", Body: input, Status: "final"})
 		m.appendChat(chatEntry{Kind: "assistant", Title: assistantLabel, Body: m.helpText(), Status: "final"})
-		m.statusNote = "已在聊天区显示帮助说明。"
+		m.statusNote = "Help opened in the conversation view."
 		return nil
 	case "/session":
 		m.sessionsOpen = true
-		m.statusNote = "已打开最近历史会话。"
+		m.statusNote = "Opened recent sessions."
 		return nil
 	case "/new":
 		return m.newSession()
 	default:
 		return fmt.Errorf("unknown command: %s", fields[0])
 	}
+}
+
+func (m model) executeCommand(input string) (tea.Model, tea.Cmd, error) {
+	if err := m.handleSlashCommand(input); err != nil {
+		return m, nil, err
+	}
+	m.refreshViewport()
+	return m, m.loadSessionsCmd(), nil
 }
 func (m *model) newSession() error {
 	next := session.New(m.workspace)
@@ -1211,14 +1393,18 @@ func (m *model) newSession() error {
 	}
 	m.sess = next
 	m.screen = screenLanding
-	m.plan = nil
+	m.plan = planpkg.State{}
+	m.mode = modeBuild
 	m.chatItems = nil
 	m.toolRuns = nil
 	m.streamingIndex = -1
 	m.statusNote = "Started a new session."
+	m.chatAutoFollow = true
 	m.input.Reset()
-	m.syncLayoutForCurrentScreen()
-	m.refreshViewport()
+	if m.width > 0 && m.height > 0 {
+		m.syncLayoutForCurrentScreen()
+		m.refreshViewport()
+	}
 	return nil
 }
 
@@ -1236,19 +1422,23 @@ func (m *model) resumeSession(prefix string) error {
 	}
 	m.sess = next
 	m.screen = screenChat
-	m.plan = copyPlan(next.Plan)
+	m.plan = copyPlanState(next.Plan)
+	m.mode = toAgentMode(next.Mode)
 	m.chatItems, m.toolRuns = rebuildSessionTimeline(next)
 	m.streamingIndex = -1
 	m.statusNote = "Resumed session " + shortID(next.ID)
-	m.syncLayoutForCurrentScreen()
-	m.refreshViewport()
+	m.chatAutoFollow = true
+	if m.width > 0 && m.height > 0 {
+		m.syncLayoutForCurrentScreen()
+		m.refreshViewport()
+	}
 	return nil
 }
 
-func (m model) startRunCmd(prompt string) tea.Cmd {
+func (m model) startRunCmd(prompt, mode string) tea.Cmd {
 	return func() tea.Msg {
 		go func() {
-			_, err := m.runner.RunPrompt(context.Background(), m.sess, prompt, io.Discard)
+			_, err := m.runner.RunPrompt(context.Background(), m.sess, prompt, mode, io.Discard)
 			m.async <- runFinishedMsg{Err: err}
 		}()
 		return nil
@@ -1689,14 +1879,15 @@ func summarizeTool(name, payload string) (string, []string, string) {
 		}
 	case "update_plan":
 		var result struct {
-			Plan []session.PlanItem `json:"plan"`
+			Plan planpkg.State `json:"plan"`
 		}
 		if json.Unmarshal([]byte(payload), &result) == nil {
-			lines := make([]string, 0, min(4, len(result.Plan)))
-			for i := 0; i < min(4, len(result.Plan)); i++ {
-				lines = append(lines, fmt.Sprintf("[%s] %s", result.Plan[i].Status, result.Plan[i].Step))
+			lines := make([]string, 0, min(4, len(result.Plan.Steps)))
+			for i := 0; i < min(4, len(result.Plan.Steps)); i++ {
+				step := result.Plan.Steps[i]
+				lines = append(lines, fmt.Sprintf("[%s] %s", step.Status, step.Title))
 			}
-			return fmt.Sprintf("Updated plan with %d step(s)", len(result.Plan)), lines, "done"
+			return fmt.Sprintf("Updated plan with %d step(s)", len(result.Plan.Steps)), lines, "done"
 		}
 	case "run_shell":
 		var result struct {
@@ -1754,7 +1945,7 @@ func legacyAssistantToolFollowUp(toolName, summary, status string) string {
 	case "error", "warn":
 		return fmt.Sprintf("`%s` returned a result. I will continue from that signal.", toolName)
 	default:
-		return fmt.Sprintf("`%s` finished successfully. I will keep鏁寸悊ing the result.", toolName)
+		return fmt.Sprintf("`%s` finished successfully. I will keep using the result.", toolName)
 	}
 }
 
@@ -1773,7 +1964,7 @@ func assistantToolFollowUp(toolName, summary, status string) string {
 	case "error", "warn":
 		return fmt.Sprintf("`%s` returned a result. I will continue from that signal.", toolName)
 	default:
-		return fmt.Sprintf("`%s` finished successfully. I will keep鏁寸悊ing the result.", toolName)
+		return fmt.Sprintf("`%s` finished successfully. I will keep using the result.", toolName)
 	}
 }
 
@@ -1852,23 +2043,24 @@ func shouldExecuteFromPalette(item commandItem) bool {
 
 func (m model) helpText() string {
 	return strings.Join([]string{
-		"进入方式",
-		"在仓库根目录运行 `go run ./cmd/bytemind chat` 即可启动 TUI。",
-		"`go run ./cmd/bytemind chat` 会先进入带 Logo 的启动页。",
-		"在启动页输入内容并按 Enter 后，会进入正式聊天界面。",
-		"`go run ./cmd/bytemind run -prompt \"...\"` 可用于一次性执行模式。",
+		"Entry points",
+		"Run `go run ./cmd/bytemind chat` from the repository root to open the TUI.",
+		"The chat command opens the landing screen first, then enters the conversation view after you submit a prompt.",
+		"Run `go run ./cmd/bytemind run -prompt \"...\"` for one-shot execution.",
 		"",
-		"斜杠命令",
-		"/help：在聊天区显示帮助说明。",
-		"/session：打开最近历史会话。",
-		"/new：新建一个会话。",
-		"/quit：退出 TUI。",
+		"Slash commands",
+		"/help: show this help inside the conversation.",
+		"/session: open recent sessions.",
+		"/new: start a fresh session.",
+		"/quit: exit the TUI.",
 		"",
-		"界面说明",
-		"启动页会居中显示 Logo 和输入框。",
-		"聊天页主要显示消息时间线和输入框。",
-		"如果需要审批，会在输入框上方显示确认条。",
-		"底部会保留 tab agents、/ commands、Ctrl+L sessions、Ctrl+C quit 等必要提示。",
+		"UI notes",
+		"Tab toggles between Build and Plan modes.",
+		"Plan mode keeps the plan panel visible and focused on structured steps.",
+		"Use Ctrl+G to open or close the help panel.",
+		"After restoring a session with a saved plan, type 'continue execution' to resume it.",
+		"Approval requests appear above the input area when a shell command needs confirmation.",
+		"The footer keeps only the essential shortcuts: tab agents, / commands, Ctrl+L sessions, Ctrl+C quit.",
 	}, "\n")
 }
 func visibleCommandItems(group string) []commandItem {
@@ -1996,15 +2188,221 @@ func parsePlanSteps(raw string) []string {
 	return steps
 }
 
-func copyPlan(plan []session.PlanItem) []session.PlanItem {
-	if len(plan) == 0 {
-		return nil
+func canContinuePlan(state planpkg.State) bool {
+	state = planpkg.NormalizeState(state)
+	if !planpkg.HasStructuredPlan(state) {
+		return false
 	}
-	cloned := make([]session.PlanItem, len(plan))
-	copy(cloned, plan)
-	return cloned
+	switch planpkg.NormalizePhase(string(state.Phase)) {
+	case planpkg.PhaseBlocked, planpkg.PhaseCompleted:
+		return false
+	default:
+		return true
+	}
 }
 
+func currentOrNextStepTitle(state planpkg.State) string {
+	state = planpkg.NormalizeState(state)
+	if step, ok := planpkg.CurrentStep(state); ok && strings.TrimSpace(step.Title) != "" {
+		return strings.TrimSpace(step.Title)
+	}
+	for _, step := range state.Steps {
+		if planpkg.NormalizeStepStatus(string(step.Status)) == planpkg.StepPending && strings.TrimSpace(step.Title) != "" {
+			return strings.TrimSpace(step.Title)
+		}
+	}
+	return ""
+}
+
+func isContinueExecutionInput(input string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(input))
+	switch normalized {
+	case "continue", "continue execution", "continue plan", "resume", "resume execution", "继续", "继续执行", "继续做", "继续任务":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m model) currentPhaseLabel() string {
+	if phase := m.planPhaseLabel(); phase != "none" {
+		return phase
+	}
+	if strings.TrimSpace(m.phase) != "" {
+		return strings.TrimSpace(m.phase)
+	}
+	return "idle"
+}
+
+func (m model) currentSessionLabel() string {
+	if m.sess == nil {
+		return "none"
+	}
+	return shortID(m.sess.ID)
+}
+
+func (m model) autoFollowLabel() string {
+	if m.chatAutoFollow {
+		return "auto"
+	}
+	return "manual"
+}
+
+func (m model) currentModelLabel() string {
+	if model := strings.TrimSpace(m.cfg.Provider.Model); model != "" {
+		return model
+	}
+	return "-"
+}
+
+func preparePlanForContinuation(state planpkg.State) (planpkg.State, error) {
+	state = planpkg.NormalizeState(state)
+	if !planpkg.HasStructuredPlan(state) {
+		return state, fmt.Errorf("no structured plan is available to continue")
+	}
+	switch planpkg.NormalizePhase(string(state.Phase)) {
+	case planpkg.PhaseBlocked:
+		if state.BlockReason != "" {
+			return state, fmt.Errorf("plan is blocked: %s", state.BlockReason)
+		}
+		return state, fmt.Errorf("plan is blocked and cannot continue yet")
+	case planpkg.PhaseCompleted:
+		return state, fmt.Errorf("plan is already completed")
+	}
+
+	if _, ok := planpkg.CurrentStep(state); !ok {
+		for i := range state.Steps {
+			if planpkg.NormalizeStepStatus(string(state.Steps[i].Status)) == planpkg.StepPending {
+				state.Steps[i].Status = planpkg.StepInProgress
+				break
+			}
+		}
+	}
+
+	state.Phase = planpkg.PhaseExecuting
+	if strings.TrimSpace(state.NextAction) == "" {
+		state.NextAction = planpkg.DefaultNextAction(state)
+	}
+	return planpkg.NormalizeState(state), nil
+}
+
+func copyPlanState(state planpkg.State) planpkg.State {
+	return planpkg.CloneState(state)
+}
+
+func toAgentMode(mode planpkg.AgentMode) agentMode {
+	if planpkg.NormalizeMode(string(mode)) == planpkg.ModePlan {
+		return modePlan
+	}
+	return modeBuild
+}
+
+func (m model) hasPlanPanel() bool {
+	return m.mode == modeBuild && planpkg.HasStructuredPlan(m.plan)
+}
+
+func (m model) showPlanSidebar() bool {
+	return m.hasPlanPanel() && m.chatPanelInnerWidth() >= 104
+}
+
+func (m model) planPanelWidth() int {
+	if !m.showPlanSidebar() {
+		return m.chatPanelInnerWidth()
+	}
+	return clamp(m.chatPanelInnerWidth()/3, 30, 42)
+}
+
+func (m model) conversationPanelWidth() int {
+	width := m.chatPanelInnerWidth()
+	if m.showPlanSidebar() {
+		width -= m.planPanelWidth() + 1
+	}
+	return max(24, width)
+}
+
+func (m model) planModeLabel() string {
+	if m.mode == modePlan {
+		return "PLAN"
+	}
+	return "BUILD"
+}
+
+func (m model) planPhaseLabel() string {
+	phase := planpkg.NormalizePhase(string(m.plan.Phase))
+	if phase == planpkg.PhaseNone && m.mode == modePlan {
+		phase = planpkg.PhaseDrafting
+	}
+	if phase == planpkg.PhaseNone {
+		return "none"
+	}
+	return string(phase)
+}
+
+func (m model) renderPlanPanel(width int) string {
+	width = max(24, width)
+	return modalBoxStyle.Width(width).Render(m.planView.View())
+}
+
+func (m model) planPanelContent(width int) string {
+	width = max(16, width)
+	lines := []string{
+		accentStyle.Render(m.planModeLabel()),
+		mutedStyle.Render("Phase: " + m.planPhaseLabel()),
+	}
+
+	if goal := strings.TrimSpace(m.plan.Goal); goal != "" {
+		lines = append(lines, "", cardTitleStyle.Render("Goal"), wrapPlainText(goal, width))
+	}
+	if summary := strings.TrimSpace(m.plan.Summary); summary != "" {
+		lines = append(lines, "", cardTitleStyle.Render("Summary"), wrapPlainText(summary, width))
+	}
+
+	lines = append(lines, "", cardTitleStyle.Render("Steps"))
+	if len(m.plan.Steps) == 0 {
+		lines = append(lines, mutedStyle.Render("No structured plan yet. Use update_plan to create one."))
+	} else {
+		for _, step := range m.plan.Steps {
+			lines = append(lines, m.renderPlanStep(step, width), "")
+		}
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+	}
+
+	if nextAction := strings.TrimSpace(m.plan.NextAction); nextAction != "" {
+		lines = append(lines, "", cardTitleStyle.Render("Next Action"), wrapPlainText(nextAction, width))
+	}
+	if reason := strings.TrimSpace(m.plan.BlockReason); reason != "" {
+		lines = append(lines, "", cardTitleStyle.Render("Blocked Reason"), errorStyle.Render(wrapPlainText(reason, width)))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (m model) planPanelRenderHeight() int {
+	if !m.hasPlanPanel() {
+		return 0
+	}
+	return m.planView.Height + modalBoxStyle.GetVerticalFrameSize()
+}
+
+func (m model) renderPlanStep(step planpkg.Step, width int) string {
+	header := fmt.Sprintf("%s %s", statusGlyph(string(step.Status)), step.Title)
+	parts := []string{wrapPlainText(header, width)}
+	if desc := strings.TrimSpace(step.Description); desc != "" {
+		parts = append(parts, mutedStyle.Render(wrapPlainText(desc, width)))
+	}
+	if len(step.Files) > 0 {
+		parts = append(parts, mutedStyle.Render("Files: "+compact(strings.Join(step.Files, ", "), width)))
+	}
+	if len(step.Verify) > 0 {
+		parts = append(parts, mutedStyle.Render("Verify: "+compact(strings.Join(step.Verify, " | "), width)))
+	}
+	if risk := strings.TrimSpace(string(step.Risk)); risk != "" {
+		parts = append(parts, mutedStyle.Render("Risk: "+risk))
+	}
+	return strings.Join(parts, "\n")
+}
 func (m model) sessionText() string {
 	if m.sess == nil {
 		return "No active session."
@@ -2018,17 +2416,22 @@ func (m model) sessionText() string {
 }
 
 func statusGlyph(status string) string {
-	switch status {
-	case "completed", "done":
-		return doneStyle.Render("x")
-	case "in_progress", "running":
+	switch planpkg.NormalizeStepStatus(status) {
+	case planpkg.StepCompleted:
+		return doneStyle.Render("✓")
+	case planpkg.StepInProgress:
 		return accentStyle.Render(">")
-	case "warn":
-		return warnStyle.Render("!")
-	case "error":
-		return errorStyle.Render("x")
+	case planpkg.StepBlocked:
+		return errorStyle.Render("!")
 	default:
-		return mutedStyle.Render("-")
+		switch status {
+		case "warn":
+			return warnStyle.Render("!")
+		case "error":
+			return errorStyle.Render("x")
+		default:
+			return mutedStyle.Render("-")
+		}
 	}
 }
 

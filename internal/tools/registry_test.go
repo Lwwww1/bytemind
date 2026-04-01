@@ -1,0 +1,82 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"slices"
+	"strings"
+	"testing"
+
+	"bytemind/internal/llm"
+)
+
+type recordingTool struct {
+	name    string
+	lastRaw string
+	result  string
+}
+
+func (t *recordingTool) Definition() llm.ToolDefinition {
+	return llm.ToolDefinition{
+		Type: "function",
+		Function: llm.FunctionDefinition{
+			Name: t.name,
+		},
+	}
+}
+
+func (t *recordingTool) Run(_ context.Context, raw json.RawMessage, _ *ExecutionContext) (string, error) {
+	t.lastRaw = string(raw)
+	return t.result, nil
+}
+
+func TestDefaultRegistryDefinitionsAreSortedAndComplete(t *testing.T) {
+	registry := DefaultRegistry()
+	defs := registry.Definitions()
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		names = append(names, def.Function.Name)
+	}
+
+	want := []string{
+		"apply_patch",
+		"list_files",
+		"read_file",
+		"replace_in_file",
+		"run_shell",
+		"search_text",
+		"update_plan",
+		"write_file",
+	}
+	if !slices.Equal(names, want) {
+		t.Fatalf("unexpected definition order or contents: got=%v want=%v", names, want)
+	}
+}
+
+func TestRegistryExecuteReturnsUnknownToolError(t *testing.T) {
+	registry := DefaultRegistry()
+	_, err := registry.Execute(context.Background(), "missing_tool", `{}`, &ExecutionContext{})
+	if err == nil {
+		t.Fatal("expected unknown tool error")
+	}
+	if !strings.Contains(err.Error(), `unknown tool "missing_tool"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRegistryExecuteDefaultsEmptyArgsToJSONObject(t *testing.T) {
+	tool := &recordingTool{name: "fake_tool", result: `{"ok":true}`}
+	registry := &Registry{tools: map[string]Tool{}}
+	registry.Add(tool)
+
+	result, err := registry.Execute(context.Background(), "fake_tool", "", &ExecutionContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("unexpected result %q", result)
+	}
+	if tool.lastRaw != "{}" {
+		t.Fatalf("expected empty args to default to {}, got %q", tool.lastRaw)
+	}
+}

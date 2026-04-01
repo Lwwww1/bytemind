@@ -1,0 +1,104 @@
+name: Main Checks
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-check-linux:
+    name: Main Full Check (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.2"
+          cache: true
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run full test suite with coverage
+        run: go test ./... -coverprofile=coverage.out
+
+      - name: Print coverage summary
+        run: go tool cover -func=coverage.out
+
+      - name: Report package coverage soft thresholds
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "## Coverage Soft Thresholds" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Package | Coverage | Suggested floor | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | ---: | ---: | --- |" >> "$GITHUB_STEP_SUMMARY"
+
+          report_pkg () {
+            pkg="$1"
+            floor="$2"
+            safe_name="${pkg//\//-}"
+            profile="${safe_name}.cover.out"
+
+            go test "$pkg" -coverprofile="$profile" >/tmp/"$safe_name".log
+            coverage=$(go tool cover -func="$profile" | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+            status="OK"
+            awk -v cov="$coverage" -v floor="$floor" 'BEGIN { exit !(cov+0 < floor+0) }' && status="Below floor (non-blocking)" || true
+
+            echo "| \`$pkg\` | ${coverage}% | ${floor}% | ${status} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "$pkg coverage: ${coverage}% (suggested floor: ${floor}%) - ${status}"
+          }
+
+          report_pkg ./cmd/bytemind 55
+          report_pkg ./internal/agent 65
+          report_pkg ./internal/tools 70
+          report_pkg ./internal/provider 75
+          report_pkg ./internal/tui 55
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.out
+          flags: main-linux
+          name: main-linux
+          fail_ci_if_error: true
+          verbose: true
+
+      - name: Run race detector
+        run: go test -race ./...
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-linux
+          path: coverage.out
+
+  full-check-windows:
+    name: Main Full Check (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.2"
+          cache: true
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run full test suite
+        run: go test ./...

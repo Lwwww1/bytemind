@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"bytemind/internal/config"
 	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
+	"bytemind/internal/tools"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -1101,6 +1103,58 @@ func TestHandleAgentEventShowsToolProgressInChat(t *testing.T) {
 	}
 }
 
+func TestHandleAgentEventTracksRunLifecyclePhases(t *testing.T) {
+	m := model{
+		busy:         true,
+		llmConnected: true,
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "inspect tui", Status: "final"},
+			{Kind: "assistant", Title: thinkingLabel, Body: "thinking", Status: "thinking"},
+		},
+		streamingIndex: 1,
+	}
+
+	m.handleAgentEvent(agent.Event{
+		Type:    agent.EventAssistantDelta,
+		Content: "Inspecting the TUI flow...",
+	})
+	if m.phase != "responding" || m.statusNote != "LLM is responding..." {
+		t.Fatalf("expected assistant delta to move UI into responding phase, got phase=%q note=%q", m.phase, m.statusNote)
+	}
+	if m.chatItems[1].Status != "streaming" || !strings.Contains(m.chatItems[1].Body, "Inspecting the TUI flow") {
+		t.Fatalf("expected streaming assistant card after delta, got %+v", m.chatItems[1])
+	}
+
+	m.handleAgentEvent(agent.Event{
+		Type:          agent.EventToolCallStarted,
+		ToolName:      "read_file",
+		ToolArguments: `{"path":"internal/tui/model.go","start_line":1,"end_line":5}`,
+	})
+	if m.phase != "tool" || m.statusNote != "Running tool: read_file" {
+		t.Fatalf("expected tool start to move UI into tool phase, got phase=%q note=%q", m.phase, m.statusNote)
+	}
+
+	m.handleAgentEvent(agent.Event{
+		Type:       agent.EventToolCallCompleted,
+		ToolName:   "read_file",
+		ToolResult: `{"path":"internal/tui/model.go","start_line":1,"end_line":5}`,
+	})
+	if m.phase != "thinking" {
+		t.Fatalf("expected completed tool to return UI to thinking phase, got %q", m.phase)
+	}
+	if !strings.Contains(m.statusNote, "Read internal/tui/model.go lines 1-5") {
+		t.Fatalf("expected tool result summary in status note, got %q", m.statusNote)
+	}
+
+	m.handleAgentEvent(agent.Event{
+		Type:    agent.EventRunFinished,
+		Content: "Done.",
+	})
+	if m.phase != "idle" || m.statusNote != "Run finished." {
+		t.Fatalf("expected run finished event to return UI to idle, got phase=%q note=%q", m.phase, m.statusNote)
+	}
+}
+
 func TestToolStartReplacesStreamedAssistantTurnWithStableToolIntro(t *testing.T) {
 	m := model{
 		chatItems: []chatEntry{
@@ -1174,6 +1228,212 @@ func TestApprovalBannerRendersAboveInput(t *testing.T) {
 	if strings.Contains(footer, "Approval Request") {
 		t.Fatalf("did not expect old centered approval modal title in footer")
 	}
+}
+
+func TestUpdateApprovalRequestMsgSetsApprovalPhase(t *testing.T) {
+	reply := make(chan approvalDecision, 1)
+	m := model{async: make(chan tea.Msg, 1)}
+
+	got, cmd := m.Update(approvalRequestMsg{
+		Request: tools.ApprovalRequest{
+			Command: "go test ./internal/tui",
+			Reason:  "run focused tests",
+		},
+		Reply: reply,
+	})
+	updated := got.(model)
+
+	if cmd == nil {
+		t.Fatalf("expected approval request to keep waiting for async events")
+	}
+	if updated.approval == nil {
+		t.Fatalf("expected approval prompt to be stored on the model")
+	}
+	if updated.approval.Command != "go test ./internal/tui" || updated.approval.Reason != "run focused tests" {
+		t.Fatalf("expected approval prompt contents to be preserved, got %+v", updated.approval)
+	}
+	if updated.phase != "approval" || updated.statusNote != "Approval required." {
+		t.Fatalf("expected approval request to switch UI into approval state, got phase=%q note=%q", updated.phase, updated.statusNote)
+	}
+}
+
+func TestApprovalKeysTransitionStateAndSendDecision(t *testing.T) {
+	t.Run("approve", func(t *testing.T) {
+		reply := make(chan approvalDecision, 1)
+		m := model{
+			approval: &approvalPrompt{
+				Command: "go test ./internal/tui",
+				Reason:  "run focused tests",
+				Reply:   reply,
+			},
+			phase: "approval",
+		}
+
+		got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+		updated := got.(model)
+
+		if updated.approval != nil {
+			t.Fatalf("expected approval prompt to clear after approval")
+		}
+		if updated.phase != "tool" || updated.statusNote != "Shell command approved." {
+			t.Fatalf("expected approval to move UI into tool phase, got phase=%q note=%q", updated.phase, updated.statusNote)
+		}
+
+		select {
+		case decision := <-reply:
+			if !decision.Approved {
+				t.Fatalf("expected approval decision to be true")
+			}
+		default:
+			t.Fatalf("expected approval decision to be sent")
+		}
+	})
+
+	t.Run("reject", func(t *testing.T) {
+		reply := make(chan approvalDecision, 1)
+		m := model{
+			approval: &approvalPrompt{
+				Command: "go test ./internal/tui",
+				Reason:  "run focused tests",
+				Reply:   reply,
+			},
+			phase: "approval",
+		}
+
+		got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+		updated := got.(model)
+
+		if updated.approval != nil {
+			t.Fatalf("expected approval prompt to clear after rejection")
+		}
+		if updated.phase != "thinking" || updated.statusNote != "Shell command rejected." {
+			t.Fatalf("expected rejection to return UI to thinking phase, got phase=%q note=%q", updated.phase, updated.statusNote)
+		}
+
+		select {
+		case decision := <-reply:
+			if decision.Approved {
+				t.Fatalf("expected rejection decision to be false")
+			}
+		default:
+			t.Fatalf("expected rejection decision to be sent")
+		}
+	})
+}
+
+func TestUpdateRunFinishedMsgResetsBusyState(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		m := model{
+			async:          make(chan tea.Msg, 1),
+			busy:           true,
+			streamingIndex: 3,
+			statusNote:     "Running...",
+			phase:          "responding",
+			llmConnected:   true,
+		}
+
+		got, cmd := m.Update(runFinishedMsg{})
+		updated := got.(model)
+
+		if cmd == nil {
+			t.Fatalf("expected run finished to schedule follow-up async/session work")
+		}
+		if updated.busy {
+			t.Fatalf("expected run finished to clear busy state")
+		}
+		if updated.streamingIndex != -1 {
+			t.Fatalf("expected run finished to clear streaming index, got %d", updated.streamingIndex)
+		}
+		if updated.phase != "idle" || updated.statusNote != "Ready." {
+			t.Fatalf("expected successful run to return to idle, got phase=%q note=%q", updated.phase, updated.statusNote)
+		}
+		if !updated.llmConnected {
+			t.Fatalf("expected successful run to keep llmConnected=true")
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		m := model{
+			async:          make(chan tea.Msg, 1),
+			busy:           true,
+			streamingIndex: 1,
+			statusNote:     "Running...",
+			phase:          "responding",
+			llmConnected:   true,
+			chatItems: []chatEntry{
+				{Kind: "user", Title: "You", Body: "inspect repo", Status: "final"},
+				{Kind: "assistant", Title: thinkingLabel, Body: "thinking", Status: "thinking"},
+			},
+		}
+
+		got, _ := m.Update(runFinishedMsg{Err: errors.New("provider unavailable")})
+		updated := got.(model)
+
+		if updated.busy {
+			t.Fatalf("expected failed run to clear busy state")
+		}
+		if updated.phase != "error" || !strings.Contains(updated.statusNote, "provider unavailable") {
+			t.Fatalf("expected failed run to switch UI into error state, got phase=%q note=%q", updated.phase, updated.statusNote)
+		}
+		if updated.llmConnected {
+			t.Fatalf("expected failed run to mark llmConnected=false")
+		}
+		last := updated.chatItems[len(updated.chatItems)-1]
+		if last.Status != "error" || !strings.Contains(last.Body, "provider unavailable") {
+			t.Fatalf("expected latest assistant card to show failure, got %+v", last)
+		}
+	})
+}
+
+func TestUpdateSessionsLoadedMsgUpdatesAndClampsSessions(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		m := model{
+			sessionCursor: 3,
+			sessions: []session.Summary{
+				{ID: "old-1"},
+				{ID: "old-2"},
+				{ID: "old-3"},
+				{ID: "old-4"},
+			},
+		}
+
+		got, _ := m.Update(sessionsLoadedMsg{
+			Summaries: []session.Summary{
+				{ID: "new-1"},
+				{ID: "new-2"},
+			},
+		})
+		updated := got.(model)
+
+		if len(updated.sessions) != 2 {
+			t.Fatalf("expected sessions list to be replaced, got %d entries", len(updated.sessions))
+		}
+		if updated.sessionCursor != 1 {
+			t.Fatalf("expected session cursor to clamp to last available entry, got %d", updated.sessionCursor)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		m := model{
+			sessionCursor: 1,
+			sessions: []session.Summary{
+				{ID: "keep-1"},
+				{ID: "keep-2"},
+			},
+		}
+
+		got, _ := m.Update(sessionsLoadedMsg{
+			Err: errors.New("store unavailable"),
+		})
+		updated := got.(model)
+
+		if len(updated.sessions) != 2 || updated.sessions[0].ID != "keep-1" || updated.sessions[1].ID != "keep-2" {
+			t.Fatalf("expected session list to stay unchanged on load error, got %+v", updated.sessions)
+		}
+		if updated.sessionCursor != 1 {
+			t.Fatalf("expected session cursor to remain unchanged on load error, got %d", updated.sessionCursor)
+		}
+	})
 }
 
 func TestFormatChatBodyPreservesExplicitBlankLines(t *testing.T) {

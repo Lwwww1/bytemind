@@ -33,36 +33,6 @@ jobs:
       - name: Run focused coverage checks
         run: go test -cover ./cmd/bytemind ./internal/agent ./internal/tools ./internal/provider ./internal/tui
 
-      - name: Report package coverage soft thresholds
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "## Coverage Soft Thresholds" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Package | Coverage | Suggested floor | Status |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| --- | ---: | ---: | --- |" >> "$GITHUB_STEP_SUMMARY"
-
-          report_pkg () {
-            pkg="$1"
-            floor="$2"
-            safe_name="${pkg//\//-}"
-            profile="${safe_name}.cover.out"
-
-            go test "$pkg" -coverprofile="$profile" >/tmp/"$safe_name".log
-            coverage=$(go tool cover -func="$profile" | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
-            status="OK"
-            awk -v cov="$coverage" -v floor="$floor" 'BEGIN { exit !(cov+0 < floor+0) }' && status="Below floor (non-blocking)" || true
-
-            echo "| \`$pkg\` | ${coverage}% | ${floor}% | ${status} |" >> "$GITHUB_STEP_SUMMARY"
-            echo "$pkg coverage: ${coverage}% (suggested floor: ${floor}%) - ${status}"
-          }
-
-          report_pkg ./cmd/bytemind 55
-          report_pkg ./internal/agent 65
-          report_pkg ./internal/tools 70
-          report_pkg ./internal/provider 75
-          report_pkg ./internal/tui 55
-
       - name: Upload coverage to Codecov
         if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: codecov/codecov-action@v5

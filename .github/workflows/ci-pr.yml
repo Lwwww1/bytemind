@@ -24,8 +24,22 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
-      - name: Run full test suite
-        run: go test ./...
+      - name: Run full test suite with coverage
+        run: go test ./... -coverprofile=coverage.out
+
+      - name: Print coverage summary
+        run: go tool cover -func=coverage.out
 
       - name: Run focused coverage checks
         run: go test -cover ./cmd/bytemind ./internal/agent ./internal/tools ./internal/provider
+
+      - name: Upload coverage to Codecov
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.out
+          flags: pr-linux
+          name: pr-linux
+          fail_ci_if_error: true
+          verbose: true

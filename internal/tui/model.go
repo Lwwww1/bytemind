@@ -29,6 +29,12 @@ var (
 	markdownOrderNoSpacePattern   = regexp.MustCompile(`^(\d+)\.(\S)`)
 	markdownBulletNoSpacePattern  = regexp.MustCompile(`^(\s*[-*])(\S)`)
 	markdownTrailingHashesPattern = regexp.MustCompile(`#{2,}\s*$`)
+	markdownMultiSpacePattern     = regexp.MustCompile(`[ \t]{2,}`)
+	markdownLeadingHeadingPattern = regexp.MustCompile(`^\s{0,3}#{1,6}\s*`)
+	markdownOrderedListPattern    = regexp.MustCompile(`^(\s*)(\d+)\.\s*(.*)$`)
+	markdownBulletListPattern     = regexp.MustCompile(`^(\s*)[-*+]\s*(.*)$`)
+	markdownQuotePattern          = regexp.MustCompile(`^\s*>\s*(.*)$`)
+	markdownTableSepPattern       = regexp.MustCompile(`^\s*:?-{2,}:?\s*$`)
 )
 
 const (
@@ -63,11 +69,12 @@ const (
 )
 
 type chatEntry struct {
-	Kind   string
-	Title  string
-	Meta   string
-	Body   string
-	Status string
+	Kind           string
+	Title          string
+	Meta           string
+	Body           string
+	Status         string
+	PreserveFormat bool
 }
 
 type commandItem struct {
@@ -163,6 +170,7 @@ type model struct {
 	lastInputAt    time.Time
 	inputBurstSize int
 	chatAutoFollow bool
+	preserveFormat bool
 }
 
 func newModel(opts Options) model {
@@ -807,6 +815,7 @@ func lenCommonPrefix(a, b string) int {
 func (m model) submitPrompt(value string) (tea.Model, tea.Cmd) {
 	m.input.Reset()
 	m.screen = screenChat
+	m.preserveFormat = shouldPreserveRequestedFormat(value)
 	m.appendChat(chatEntry{
 		Kind:   "user",
 		Title:  "You",
@@ -905,10 +914,11 @@ func (m *model) appendAssistantDelta(delta string) {
 		return
 	}
 	m.chatItems = append(m.chatItems, chatEntry{
-		Kind:   "assistant",
-		Title:  assistantLabel,
-		Body:   delta,
-		Status: "streaming",
+		Kind:           "assistant",
+		Title:          assistantLabel,
+		Body:           delta,
+		Status:         "streaming",
+		PreserveFormat: m.preserveFormat,
 	})
 	m.streamingIndex = len(m.chatItems) - 1
 	m.applyAssistantDeltaPresentation(&m.chatItems[m.streamingIndex])
@@ -956,10 +966,11 @@ func (m *model) finishAssistantMessage(content string) {
 		}
 	}
 	m.chatItems = append(m.chatItems, chatEntry{
-		Kind:   "assistant",
-		Title:  assistantLabel,
-		Body:   content,
-		Status: "final",
+		Kind:           "assistant",
+		Title:          assistantLabel,
+		Body:           content,
+		Status:         "final",
+		PreserveFormat: m.preserveFormat,
 	})
 }
 
@@ -1518,17 +1529,25 @@ func rebuildSessionTimeline(sess *session.Session) ([]chatEntry, []toolRun) {
 	items := make([]chatEntry, 0, len(sess.Messages))
 	runs := make([]toolRun, 0, 8)
 	callNames := map[string]string{}
+	preserveForAssistant := false
 
 	for _, message := range sess.Messages {
 		switch message.Role {
 		case "user":
+			preserveForAssistant = shouldPreserveRequestedFormat(message.Content)
 			items = append(items, chatEntry{Kind: "user", Title: "You", Body: message.Content, Status: "final"})
 		case "assistant":
 			for _, call := range message.ToolCalls {
 				callNames[call.ID] = call.Function.Name
 			}
 			if strings.TrimSpace(message.Content) != "" {
-				items = append(items, chatEntry{Kind: "assistant", Title: assistantLabel, Body: message.Content, Status: "final"})
+				items = append(items, chatEntry{
+					Kind:           "assistant",
+					Title:          assistantLabel,
+					Body:           message.Content,
+					Status:         "final",
+					PreserveFormat: preserveForAssistant,
+				})
 			}
 		case "tool":
 			name := callNames[message.ToolCallID]
@@ -1633,6 +1652,9 @@ func renderBytemindRunRow(items []chatEntry, width int) string {
 		return ""
 	}
 	card := renderBytemindRunCard(items, width)
+	if strings.TrimSpace(card) == "" {
+		return ""
+	}
 	return lipgloss.NewStyle().
 		MarginBottom(1).
 		Render(lipgloss.PlaceHorizontal(width, lipgloss.Left, card))
@@ -1643,7 +1665,17 @@ func renderBytemindRunCard(items []chatEntry, width int) string {
 	contentWidth := max(minCardContentWidth, width-outer.GetHorizontalFrameSize())
 	sections := make([]string, 0, len(items))
 	for _, item := range items {
-		sections = append(sections, renderChatSection(item, contentWidth))
+		if item.Kind == "assistant" && item.Status == "thinking" && !isMeaningfulThinking(item.Body, "") {
+			continue
+		}
+		section := renderChatSection(item, contentWidth)
+		if strings.TrimSpace(section) == "" {
+			continue
+		}
+		sections = append(sections, section)
+	}
+	if len(sections) == 0 {
+		return ""
 	}
 	return outer.Width(contentWidth).Render(strings.Join(sections, "\n"))
 }
@@ -1659,6 +1691,9 @@ func formatChatBody(item chatEntry, width int) string {
 	text := strings.ReplaceAll(item.Body, "\r\n", "\n")
 	if item.Kind != "assistant" {
 		return strings.TrimRight(wrapPlainText(text, width), "\n")
+	}
+	if item.PreserveFormat && item.Status != "thinking" {
+		return strings.TrimRight(wrapPlainText(tidyAssistantSpacing(text), width), "\n")
 	}
 	return strings.TrimRight(renderAssistantBody(tidyAssistantSpacing(text), width), "\n")
 }
@@ -1774,21 +1809,12 @@ func renderAssistantBody(text string, width int) string {
 			codeLines = append(codeLines, line)
 			continue
 		}
-
-		switch {
-		case trimmed == "":
+		cleaned := normalizeAssistantLine(normalized)
+		if strings.TrimSpace(cleaned) == "" {
 			out = append(out, "")
-		case isMarkdownHeading(trimmed):
-			out = append(out, renderMarkdownHeading(trimmed, width))
-		case isMarkdownListItem(trimmed):
-			out = append(out, renderMarkdownListItem(normalized, width))
-		case strings.HasPrefix(trimmed, ">"):
-			out = append(out, renderMarkdownQuote(trimmed, width))
-		case looksLikeMarkdownTable(trimmed):
-			out = append(out, tableLineStyle.Render(trimmed))
-		default:
-			out = append(out, wrapPlainText(cleanInlineMarkdown(normalized), width))
+			continue
 		}
+		out = append(out, wrapPlainText(cleaned, width))
 	}
 
 	if inCodeBlock {
@@ -1924,10 +1950,113 @@ func cleanInlineMarkdown(text string) string {
 		"**", "",
 		"__", "",
 		"~~", "",
-		"`", "",
+		"`", " ",
 	).Replace(text)
 	cleaned = markdownTrailingHashesPattern.ReplaceAllString(cleaned, "")
+	cleaned = markdownMultiSpacePattern.ReplaceAllString(cleaned, " ")
 	return cleaned
+}
+
+func normalizeAssistantLine(line string) string {
+	normalized := strings.TrimRight(line, " \t")
+	if strings.TrimSpace(normalized) == "" {
+		return ""
+	}
+	trimmed := strings.TrimSpace(normalized)
+	if looksLikeMarkdownTable(trimmed) {
+		cells := parseMarkdownTableCells(trimmed)
+		if len(cells) == 0 {
+			return ""
+		}
+		return strings.Join(cells, " / ")
+	}
+
+	if matches := markdownOrderedListPattern.FindStringSubmatch(normalized); len(matches) == 4 {
+		indent := matches[1]
+		number := matches[2]
+		content := cleanInlineMarkdown(matches[3])
+		return indent + number + ") " + strings.TrimSpace(content)
+	}
+	if matches := markdownBulletListPattern.FindStringSubmatch(normalized); len(matches) == 3 {
+		indent := matches[1]
+		content := cleanInlineMarkdown(matches[2])
+		return indent + "• " + strings.TrimSpace(content)
+	}
+	if matches := markdownQuotePattern.FindStringSubmatch(normalized); len(matches) == 2 {
+		return strings.TrimSpace(cleanInlineMarkdown(matches[1]))
+	}
+
+	normalized = markdownLeadingHeadingPattern.ReplaceAllString(normalized, "")
+	normalized = cleanInlineMarkdown(normalized)
+	return strings.TrimSpace(normalized)
+}
+
+func parseMarkdownTableCells(line string) []string {
+	parts := strings.Split(line, "|")
+	cells := make([]string, 0, len(parts))
+	for _, raw := range parts {
+		cell := strings.TrimSpace(cleanInlineMarkdown(raw))
+		if cell == "" {
+			continue
+		}
+		if markdownTableSepPattern.MatchString(cell) {
+			continue
+		}
+		cells = append(cells, cell)
+	}
+	return cells
+}
+
+func shouldPreserveRequestedFormat(prompt string) bool {
+	text := strings.ToLower(strings.TrimSpace(prompt))
+	if text == "" {
+		return false
+	}
+
+	negative := []string{
+		"不要 markdown",
+		"不要markdown",
+		"别用markdown",
+		"no markdown",
+		"without markdown",
+		"plain text",
+		"纯文本",
+		"不要 md",
+		"不要md",
+	}
+	for _, token := range negative {
+		if strings.Contains(text, token) {
+			return false
+		}
+	}
+
+	positive := []string{
+		"markdown",
+		"md 格式",
+		"md格式",
+		"json",
+		"yaml",
+		"yml",
+		"xml",
+		"csv",
+		"html",
+		"latex",
+		"mermaid",
+		"代码块",
+		"code block",
+		"table",
+		"表格",
+		"按这种格式",
+		"按这个格式",
+		"按格式",
+		"格式输出",
+	}
+	for _, token := range positive {
+		if strings.Contains(text, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func chatBubbleWidth(item chatEntry, width int) int {
@@ -2136,6 +2265,10 @@ func isMeaningfulThinking(body, toolName string) bool {
 		if strings.HasPrefix(normalized, prefix) {
 			return false
 		}
+	}
+	if strings.Contains(normalized, "request already sent to the llm") ||
+		strings.Contains(normalized, "thinking... request already sent") {
+		return false
 	}
 
 	if toolName != "" {

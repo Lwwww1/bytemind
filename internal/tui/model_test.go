@@ -1113,6 +1113,88 @@ func TestRenderAssistantBodyNormalizesLooseMarkdownSyntax(t *testing.T) {
 	}
 }
 
+func TestRenderAssistantBodyStripsBoldMarkersInListAndParagraph(t *testing.T) {
+	row := renderChatRow(chatEntry{
+		Kind:  "assistant",
+		Title: assistantLabel,
+		Body: "- **问题**：**配置在启动运行时加载，不能修改**\n建议 **: **添加 SIGHUP 信号处理重新加载配置",
+		Status: "thinking",
+	}, 110)
+
+	for _, unwanted := range []string{"**问题**", "**配置", "**: **", "**"} {
+		if strings.Contains(row, unwanted) {
+			t.Fatalf("expected rendered thinking text to strip markdown bold token %q, got %q", unwanted, row)
+		}
+	}
+	for _, wanted := range []string{"问题：配置在启动运行时加载，不能修改", "建议 : 添加 SIGHUP 信号处理重新加载配置"} {
+		if !strings.Contains(row, wanted) {
+			t.Fatalf("expected rendered text to keep readable content %q, got %q", wanted, row)
+		}
+	}
+}
+
+func TestCleanInlineMarkdownKeepsWordBoundariesAroundBackticks(t *testing.T) {
+	got := cleanInlineMarkdown("Agent `Runner`internal (`agent/runner/`).go")
+	if strings.Contains(got, "`") {
+		t.Fatalf("expected cleaned markdown to remove backticks, got %q", got)
+	}
+	if strings.Contains(got, "Runnerinternal") {
+		t.Fatalf("expected cleaned markdown to preserve spacing around inline code, got %q", got)
+	}
+}
+
+func TestRenderAssistantBodyUsesPlainModeOnNarrowWidth(t *testing.T) {
+	got := renderAssistantBody("####1. 标题\n- **问题**：内容", 48)
+	for _, unwanted := range []string{"####", "**"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("expected narrow plain mode to strip token %q, got %q", unwanted, got)
+		}
+	}
+}
+
+func TestNormalizeAssistantLineCleansMixedMarkdownScaffold(t *testing.T) {
+	cases := map[string]string{
+		"####1. 缺少配置热加载":                         "1. 缺少配置热加载",
+		"- **问题**：**配置在启动时加载**":                    "• 问题：配置在启动时加载",
+		"2. **依赖**：`github.com/charmbracelet/bubbletea`": "2) 依赖： github.com/charmbracelet/bubbletea",
+		"> **建议**：优化输出":                           "建议：优化输出",
+	}
+	for in, want := range cases {
+		got := normalizeAssistantLine(in)
+		if got != want {
+			t.Fatalf("normalizeAssistantLine(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNormalizeAssistantLineFlattensMarkdownTableToPlainText(t *testing.T) {
+	got := normalizeAssistantLine("| 列A | 列B |")
+	if got != "列A / 列B" {
+		t.Fatalf("expected markdown table row to be flattened, got %q", got)
+	}
+}
+
+func TestRenderAssistantBodyRemovesRawMarkdownTokens(t *testing.T) {
+	body := strings.Join([]string{
+		"####1. 缺少配置热加载",
+		"- **问题**：**配置在启动运行时加载，不能修改**",
+		"- **建议**：添加 `SIGHUP` 信号处理重新加载配置",
+		"> **备注**：先别改 API",
+	}, "\n")
+	got := renderAssistantBody(body, 90)
+
+	for _, unwanted := range []string{"####", "**", "`"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("expected rendered body to remove raw token %q, got %q", unwanted, got)
+		}
+	}
+	for _, wanted := range []string{"1. 缺少配置热加载", "问题：配置在启动运行时加载，不能修改", "建议：添加 SIGHUP 信号处理重新加载配置"} {
+		if !strings.Contains(got, wanted) {
+			t.Fatalf("expected rendered body to keep content %q, got %q", wanted, got)
+		}
+	}
+}
+
 func TestHandleAgentEventShowsToolProgressInChat(t *testing.T) {
 	m := model{
 		chatItems: []chatEntry{
@@ -1465,6 +1547,20 @@ func TestToolStartWithGenericToolIntentDoesNotShowThinkingCard(t *testing.T) {
 	}
 }
 
+func TestRenderBytemindRunCardSkipsGenericToolIntentThinking(t *testing.T) {
+	card := renderBytemindRunCard([]chatEntry{
+		{Kind: "assistant", Title: thinkingLabel, Body: "I will call read_file to inspect the relevant context first.", Status: "thinking"},
+		{Kind: "tool", Title: "Tool Call | read_file", Body: `params: {"path":"config.json"}`, Status: "running"},
+	}, 100)
+
+	if strings.Contains(card, "I will call read_file to inspect the relevant context first.") {
+		t.Fatalf("expected generic tool-intent thinking to be hidden, got %q", card)
+	}
+	if !strings.Contains(card, "Tool Call | read_file") {
+		t.Fatalf("expected tool call section to remain visible, got %q", card)
+	}
+}
+
 func TestAssistantDeltaPlanningTextRendersAsThinking(t *testing.T) {
 	m := model{
 		chatItems: []chatEntry{
@@ -1776,7 +1872,7 @@ func TestFormatChatBodySeparatesParagraphAndList(t *testing.T) {
 	}
 
 	got := formatChatBody(item, 80)
-	if !strings.Contains(got, "Explanation\n\n- first") {
+	if !strings.Contains(got, "Explanation\n\n• first") {
 		t.Fatalf("expected list to be separated from paragraph, got %q", got)
 	}
 }
@@ -1808,6 +1904,41 @@ func TestFormatChatBodyRendersCodeBlockWithoutFences(t *testing.T) {
 	}
 	if !strings.Contains(got, "fmt.Println(\"hi\")") {
 		t.Fatalf("expected code contents to remain, got %q", got)
+	}
+}
+
+func TestFormatChatBodyPreservesMarkdownWhenRequested(t *testing.T) {
+	item := chatEntry{
+		Kind:           "assistant",
+		Body:           "## 标题\n- **问题**：内容",
+		PreserveFormat: true,
+		Status:         "final",
+	}
+
+	got := formatChatBody(item, 80)
+	for _, want := range []string{"## 标题", "- **问题**：内容"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected requested format to be preserved for %q, got %q", want, got)
+		}
+	}
+}
+
+func TestShouldPreserveRequestedFormat(t *testing.T) {
+	cases := []struct {
+		input string
+		want  bool
+	}{
+		{input: "请用 markdown 输出", want: true},
+		{input: "返回 json 格式", want: true},
+		{input: "请用表格展示", want: true},
+		{input: "不要 markdown，纯文本即可", want: false},
+		{input: "总结一下项目结构", want: false},
+	}
+	for _, tc := range cases {
+		got := shouldPreserveRequestedFormat(tc.input)
+		if got != tc.want {
+			t.Fatalf("shouldPreserveRequestedFormat(%q)=%v, want %v", tc.input, got, tc.want)
+		}
 	}
 }
 

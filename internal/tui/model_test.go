@@ -647,6 +647,35 @@ func TestRenderFooterOnlyShowsInputRegion(t *testing.T) {
 	}
 }
 
+func TestRenderFooterInfoLineCombinesModeAndHints(t *testing.T) {
+	input := textarea.New()
+	m := model{
+		width: 160,
+		input: input,
+		cfg: config.Config{
+			Provider: config.ProviderConfig{Model: "deepseek-chat"},
+		},
+	}
+
+	footer := m.renderFooter()
+	lines := strings.Split(footer, "\n")
+	infoLine := ""
+	for _, line := range lines {
+		if strings.Contains(line, "tab agents") {
+			infoLine = line
+			break
+		}
+	}
+	if infoLine == "" {
+		t.Fatalf("expected footer to contain a quick-hint info line")
+	}
+	for _, want := range []string{"Build", "Plan", "deepseek-chat", "tab agents"} {
+		if !strings.Contains(infoLine, want) {
+			t.Fatalf("expected combined info line to contain %q, got %q", want, infoLine)
+		}
+	}
+}
+
 func TestRenderStatusBarShowsCurrentRuntimeState(t *testing.T) {
 	m := model{
 		width:          200,
@@ -1173,6 +1202,50 @@ func TestToolStartWithoutAssistantDeltaDoesNotInjectThinkingCard(t *testing.T) {
 	}
 	if m.chatItems[1].Kind != "tool" || !strings.Contains(m.chatItems[1].Title, "Tool Call | list_files") {
 		t.Fatalf("expected tool call entry, got %+v", m.chatItems[1])
+	}
+}
+
+func TestToolStartWithGenericToolIntentDoesNotShowThinkingCard(t *testing.T) {
+	m := model{
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "list files", Status: "final"},
+			{Kind: "assistant", Title: assistantLabel, Body: "I will call `list_files` to inspect the relevant context first.", Status: "streaming"},
+		},
+		streamingIndex: 1,
+	}
+
+	m.handleAgentEvent(agent.Event{
+		Type:          agent.EventToolCallStarted,
+		ToolName:      "list_files",
+		ToolArguments: `{"path":"."}`,
+	})
+
+	if len(m.chatItems) != 2 {
+		t.Fatalf("expected generic tool-intent placeholder to be removed, got %d items", len(m.chatItems))
+	}
+	if m.chatItems[1].Kind != "tool" || !strings.Contains(m.chatItems[1].Title, "Tool Call | list_files") {
+		t.Fatalf("expected tool call entry after removing placeholder, got %+v", m.chatItems[1])
+	}
+}
+
+func TestAssistantDeltaPlanningTextRendersAsThinking(t *testing.T) {
+	m := model{
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "请检查项目", Status: "final"},
+		},
+		streamingIndex: -1,
+	}
+
+	m.handleAgentEvent(agent.Event{
+		Type:    agent.EventAssistantDelta,
+		Content: "我会先了解项目结构和配置，然后检查代码组织和依赖关系，最后通过构建和测试来验证功能。",
+	})
+
+	if len(m.chatItems) != 2 {
+		t.Fatalf("expected assistant delta to append one assistant item, got %d", len(m.chatItems))
+	}
+	if m.chatItems[1].Title != thinkingLabel || m.chatItems[1].Status != "thinking" {
+		t.Fatalf("expected planning delta to render as thinking, got %+v", m.chatItems[1])
 	}
 }
 

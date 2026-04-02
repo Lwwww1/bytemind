@@ -52,6 +52,7 @@ const (
 type chatEntry struct {
 	Kind   string
 	Title  string
+	Meta   string
 	Body   string
 	Status string
 }
@@ -411,19 +412,21 @@ func (m model) mouseOverPlan(x, y int) bool {
 }
 
 func (m model) mouseOverChatInput(y int) bool {
-	if m.height <= 0 {
+	if m.width <= 0 {
 		return false
 	}
-	footerHeight := lipgloss.Height(m.renderFooter())
-	footerTop := max(0, m.height-footerHeight)
+	footerTop := panelStyle.GetVerticalFrameSize()/2 + lipgloss.Height(m.renderMainPanel())
 	inputHeight := lipgloss.Height(
 		m.inputBorderStyle().
 			Width(m.chatPanelInnerWidth()).
 			Render(m.input.View()),
 	)
-	inputTop := footerTop + panelStyle.GetVerticalFrameSize()/2
+	inputTop := footerTop
 	if m.approval != nil {
 		inputTop += lipgloss.Height(m.renderApprovalBanner())
+	}
+	if m.commandOpen {
+		inputTop += lipgloss.Height(m.renderCommandPalette())
 	}
 	inputBottom := inputTop + max(1, inputHeight) - 1
 	return y >= inputTop && y <= inputBottom
@@ -785,6 +788,7 @@ func (m model) submitPrompt(value string) (tea.Model, tea.Cmd) {
 	m.appendChat(chatEntry{
 		Kind:   "user",
 		Title:  "You",
+		Meta:   formatUserMeta(m.currentModelLabel(), time.Now()),
 		Body:   value,
 		Status: "final",
 	})
@@ -867,7 +871,6 @@ func (m *model) appendAssistantDelta(delta string) {
 		if m.chatItems[m.streamingIndex].Status == "pending" ||
 			m.chatItems[m.streamingIndex].Status == "thinking" ||
 			current == m.thinkingText() {
-			m.chatItems[m.streamingIndex].Title = assistantLabel
 			m.chatItems[m.streamingIndex].Body = delta
 		} else if strings.HasPrefix(delta, current) {
 			m.chatItems[m.streamingIndex].Body = delta
@@ -876,7 +879,7 @@ func (m *model) appendAssistantDelta(delta string) {
 		} else {
 			m.chatItems[m.streamingIndex].Body += delta
 		}
-		m.chatItems[m.streamingIndex].Status = "streaming"
+		m.applyAssistantDeltaPresentation(&m.chatItems[m.streamingIndex])
 		return
 	}
 	m.chatItems = append(m.chatItems, chatEntry{
@@ -886,6 +889,20 @@ func (m *model) appendAssistantDelta(delta string) {
 		Status: "streaming",
 	})
 	m.streamingIndex = len(m.chatItems) - 1
+	m.applyAssistantDeltaPresentation(&m.chatItems[m.streamingIndex])
+}
+
+func (m *model) applyAssistantDeltaPresentation(item *chatEntry) {
+	if item == nil || item.Kind != "assistant" {
+		return
+	}
+	if shouldRenderThinkingFromDelta(item.Body) {
+		item.Title = thinkingLabel
+		item.Status = "thinking"
+		return
+	}
+	item.Title = assistantLabel
+	item.Status = "streaming"
 }
 
 func (m *model) finishAssistantMessage(content string) {
@@ -932,15 +949,27 @@ func (m *model) finalizeAssistantTurnForTool(toolName string) {
 	if m.streamingIndex >= 0 && m.streamingIndex < len(m.chatItems) {
 		item := &m.chatItems[m.streamingIndex]
 		if item.Kind == "assistant" {
+			if !isMeaningfulThinking(item.Body, toolName) {
+				m.removeStreamingAssistantPlaceholder()
+				return
+			}
 			item.Title = thinkingLabel
 			item.Status = "thinking"
-			if strings.TrimSpace(item.Body) == "" || item.Body == m.thinkingText() {
-				item.Body = assistantToolIntro(toolName)
-			}
 			m.streamingIndex = -1
 			return
 		}
 	}
+}
+
+func (m *model) removeStreamingAssistantPlaceholder() {
+	if m.streamingIndex < 0 || m.streamingIndex >= len(m.chatItems) {
+		m.streamingIndex = -1
+		return
+	}
+	if m.chatItems[m.streamingIndex].Kind == "assistant" {
+		m.chatItems = append(m.chatItems[:m.streamingIndex], m.chatItems[m.streamingIndex+1:]...)
+	}
+	m.streamingIndex = -1
 }
 
 func (m *model) appendAssistantToolFollowUp(toolName, summary, status string) {
@@ -1076,12 +1105,8 @@ func (m model) View() string {
 	}
 	base := m.renderLanding()
 	if m.screen == screenChat {
-		mainPanel := panelStyle.Width(m.chatPanelWidth()).Render(m.renderMainPanel())
-		base = lipgloss.JoinVertical(
-			lipgloss.Left,
-			mainPanel,
-			m.renderFooter(),
-		)
+		chatContent := lipgloss.JoinVertical(lipgloss.Left, m.renderMainPanel(), m.renderFooter())
+		base = panelStyle.Width(m.chatPanelWidth()).Render(chatContent)
 	}
 
 	switch {
@@ -1168,11 +1193,6 @@ func (m model) renderLanding() string {
 }
 
 func (m model) renderFooter() string {
-	hint := lipgloss.NewStyle().
-		Width(m.chatPanelInnerWidth()).
-		Align(lipgloss.Right).
-		Foreground(colorMuted).
-		Render(footerHintText)
 	inputBorder := m.inputBorderStyle().
 		Width(m.chatPanelInnerWidth()).
 		Render(m.input.View())
@@ -1183,9 +1203,8 @@ func (m model) renderFooter() string {
 	if m.commandOpen {
 		parts = append(parts, m.renderCommandPalette())
 	}
-	parts = append(parts, lipgloss.NewStyle().Width(m.chatPanelInnerWidth()).Render(m.renderModeTabs()), inputBorder, hint)
-	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
-	return panelStyle.Width(m.chatPanelWidth()).Render(content)
+	parts = append(parts, inputBorder, m.renderFooterInfoLine())
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m model) renderModeTabs() string {
@@ -1200,10 +1219,33 @@ func (m model) renderModeTabs() string {
 		buildStyle.Render("Build"),
 		planStyle.Render("Plan"),
 	}
-	if modelName := strings.TrimSpace(m.cfg.Provider.Model); modelName != "" {
-		parts = append(parts, mutedStyle.Render(modelName))
-	}
 	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
+}
+
+func (m model) renderFooterInfoLine() string {
+	width := max(24, m.chatPanelInnerWidth())
+	left := m.renderModeTabs()
+	rightParts := []string{footerHintText}
+	if modelName := strings.TrimSpace(m.currentModelLabel()); modelName != "" && modelName != "-" {
+		rightParts = append([]string{modelName}, rightParts...)
+	}
+	rightRaw := strings.Join(rightParts, "  |  ")
+	right := mutedStyle.Render(rightRaw)
+
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(right)
+	gap := width - leftW - rightW
+	if gap < 2 {
+		available := max(10, width-leftW-2)
+		if available <= 10 {
+			return lipgloss.NewStyle().Width(width).Render(mutedStyle.Render(compact(rightRaw, width)))
+		}
+		compacted := mutedStyle.Render(compact(rightRaw, available))
+		gap = width - leftW - lipgloss.Width(compacted)
+		return lipgloss.NewStyle().Width(width).Render(left + strings.Repeat(" ", max(2, gap)) + compacted)
+	}
+
+	return lipgloss.NewStyle().Width(width).Render(left + strings.Repeat(" ", gap) + right)
 }
 func (m model) renderSessionsModal() string {
 	lines := []string{modalTitleStyle.Render("Recent Sessions"), mutedStyle.Render("Up/Down to select, Enter to resume, Esc to close"), ""}
@@ -1253,16 +1295,36 @@ func (m model) renderStatusBar() string {
 	if stepTitle == "" {
 		stepTitle = "-"
 	}
-	items := []string{
+	left := strings.Join([]string{
 		"Mode: " + strings.ToUpper(string(m.mode)),
 		"Phase: " + m.currentPhaseLabel(),
-		"Session: " + m.currentSessionLabel(),
 		"Step: " + stepTitle,
+	}, "  |  ")
+	right := strings.Join([]string{
+		fmt.Sprintf("%d msgs", len(m.chatItems)),
+		"Session: " + m.currentSessionLabel(),
 		"Follow: " + m.autoFollowLabel(),
 		"Model: " + m.currentModelLabel(),
-	}
-	line := compact(strings.Join(items, "  |  "), width)
+	}, "  |  ")
+
+	line := m.renderTopInfoLine(left, right, width)
 	return statusBarStyle.Width(width).Render(line)
+}
+
+func (m model) renderTopInfoLine(left, right string, width int) string {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if width <= 0 {
+		return strings.TrimSpace(left + " | " + right)
+	}
+
+	leftW := runewidth.StringWidth(left)
+	rightW := runewidth.StringWidth(right)
+	if leftW+rightW+2 > width {
+		return compact(left+"  |  "+right, width)
+	}
+	gap := width - leftW - rightW
+	return left + strings.Repeat(" ", max(2, gap)) + right
 }
 
 func (m model) renderCommandPalette() string {
@@ -1310,7 +1372,13 @@ func (m *model) handleSlashCommand(input string) error {
 	switch fields[0] {
 	case "/help":
 		m.screen = screenChat
-		m.appendChat(chatEntry{Kind: "user", Title: "You", Body: input, Status: "final"})
+		m.appendChat(chatEntry{
+			Kind:   "user",
+			Title:  "You",
+			Meta:   formatUserMeta(m.currentModelLabel(), time.Now()),
+			Body:   input,
+			Status: "final",
+		})
 		m.appendChat(chatEntry{Kind: "assistant", Title: assistantLabel, Body: m.helpText(), Status: "final"})
 		m.statusNote = "Help opened in the conversation view."
 		return nil
@@ -1468,7 +1536,7 @@ func renderChatSection(item chatEntry, width int) string {
 	case "user":
 		title = cardTitleStyle.Foreground(colorUser)
 	case "tool":
-		title = cardTitleStyle.Foreground(colorMuted)
+		title = cardTitleStyle.Foreground(colorMuted).Faint(true)
 		bodyStyle = toolBodyStyle
 	case "system":
 		title = cardTitleStyle.Foreground(colorMuted)
@@ -1481,6 +1549,9 @@ func renderChatSection(item chatEntry, width int) string {
 		}
 	}
 	headContent := title.Render(displayTitle)
+	if item.Kind == "user" && strings.TrimSpace(item.Meta) != "" {
+		headContent = mutedStyle.Copy().Faint(true).Render(item.Meta)
+	}
 	if status != "" {
 		headContent = lipgloss.JoinHorizontal(lipgloss.Left, headContent, mutedStyle.Render("  "+status))
 	}
@@ -1944,6 +2015,101 @@ func assistantToolFollowUp(toolName, summary, status string) string {
 	default:
 		return fmt.Sprintf("`%s` finished successfully. I will keep using the result.", toolName)
 	}
+}
+
+func isMeaningfulThinking(body, toolName string) bool {
+	raw := strings.TrimSpace(body)
+	if raw == "" {
+		return false
+	}
+	normalized := strings.ToLower(strings.ReplaceAll(raw, "`", ""))
+	toolName = strings.ToLower(strings.TrimSpace(toolName))
+
+	genericPrefixes := []string{
+		"i will call ",
+		"i'll call ",
+		"let me call ",
+		"i am going to call ",
+		"i'm going to call ",
+		"i will use ",
+		"i'll use ",
+		"let me use ",
+		"i will run ",
+		"let me run ",
+		"i will check the relevant context first",
+		"i have the tool result. let me organize the next step.",
+	}
+	for _, prefix := range genericPrefixes {
+		if strings.HasPrefix(normalized, prefix) {
+			return false
+		}
+	}
+
+	if toolName != "" {
+		toolIntentPhrases := []string{
+			fmt.Sprintf("call %s", toolName),
+			fmt.Sprintf("use %s", toolName),
+			fmt.Sprintf("run %s", toolName),
+		}
+		for _, phrase := range toolIntentPhrases {
+			if strings.Contains(normalized, phrase) && strings.Contains(normalized, "inspect") {
+				return false
+			}
+		}
+	}
+
+	cnPrefixes := []string{
+		"我将调用",
+		"我会调用",
+		"我先调用",
+		"我要调用",
+		"先调用",
+		"我将使用",
+		"我会使用",
+		"我先使用",
+		"我将运行",
+		"我会运行",
+		"先检查相关上下文",
+	}
+	for _, prefix := range cnPrefixes {
+		if strings.HasPrefix(raw, prefix) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func shouldRenderThinkingFromDelta(body string) bool {
+	text := strings.TrimSpace(body)
+	if text == "" {
+		return false
+	}
+	if !isMeaningfulThinking(text, "") {
+		return false
+	}
+	lower := strings.ToLower(text)
+	reasoningMarkers := []string{
+		"i will first",
+		"first,",
+		"then",
+		"finally",
+		"approach",
+		"systematically",
+		"through build and test",
+		"我会先",
+		"先了解",
+		"然后",
+		"最后",
+		"通过构建和测试",
+		"系统性",
+	}
+	for _, marker := range reasoningMarkers {
+		if strings.Contains(lower, marker) || strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m model) thinkingText() string {
@@ -2419,6 +2585,14 @@ func statusGlyph(status string) string {
 			return mutedStyle.Render("-")
 		}
 	}
+}
+
+func formatUserMeta(model string, at time.Time) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "-"
+	}
+	return fmt.Sprintf("> you @ %s [%s]", model, at.Format("15:04:05"))
 }
 
 func shortID(id string) string {

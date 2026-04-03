@@ -1,0 +1,30 @@
+{
+  "name": "write-rfc",
+  "version": "0.1.0",
+  "title": "Write RFC",
+  "description": "输出结构化设计文档，明确 trade-off、风险与 rollout 计划。",
+  "entry": {
+    "slash": "/write-rfc"
+  },
+  "tools": {
+    "policy": "allowlist",
+    "items": [
+      "list_files",
+      "read_file",
+      "search_text",
+      "write_file",
+      "replace_in_file",
+      "apply_patch",
+      "update_plan"
+    ]
+  },
+  "args": [
+    {
+      "name": "path",
+      "type": "string",
+      "required": false,
+      "description": "RFC 输出路径，例如 docs/rfc/xxx.md"
+    }
+  ]
+}
+

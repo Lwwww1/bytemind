@@ -7,15 +7,22 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"bytemind/internal/config"
 	"bytemind/internal/llm"
 	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
+	"bytemind/internal/skills"
 	"bytemind/internal/tools"
 )
 
 const repeatedToolSequenceThreshold = 3
+const (
+	maxActiveSkillDescriptionChars  = 320
+	maxActiveSkillInstructionsChars = 3600
+	emptyAllowlistSentinel          = "__bytemind__no_tools__"
+)
 
 const (
 	ansiReset   = "\x1b[0m"
@@ -29,40 +36,47 @@ const (
 )
 
 type Options struct {
-	Workspace string
-	Config    config.Config
-	Client    llm.Client
-	Store     *session.Store
-	Registry  *tools.Registry
-	Observer  Observer
-	Approval  tools.ApprovalHandler
-	Stdin     io.Reader
-	Stdout    io.Writer
+	Workspace    string
+	Config       config.Config
+	Client       llm.Client
+	Store        *session.Store
+	Registry     *tools.Registry
+	SkillManager *skills.Manager
+	Observer     Observer
+	Approval     tools.ApprovalHandler
+	Stdin        io.Reader
+	Stdout       io.Writer
 }
 
 type Runner struct {
-	workspace string
-	config    config.Config
-	client    llm.Client
-	store     *session.Store
-	registry  *tools.Registry
-	observer  Observer
-	approval  tools.ApprovalHandler
-	stdin     io.Reader
-	stdout    io.Writer
+	workspace    string
+	config       config.Config
+	client       llm.Client
+	store        *session.Store
+	registry     *tools.Registry
+	skillManager *skills.Manager
+	observer     Observer
+	approval     tools.ApprovalHandler
+	stdin        io.Reader
+	stdout       io.Writer
 }
 
 func NewRunner(opts Options) *Runner {
+	manager := opts.SkillManager
+	if manager == nil {
+		manager = skills.NewManager(opts.Workspace)
+	}
 	return &Runner{
-		workspace: opts.Workspace,
-		config:    opts.Config,
-		client:    opts.Client,
-		store:     opts.Store,
-		registry:  opts.Registry,
-		observer:  opts.Observer,
-		approval:  opts.Approval,
-		stdin:     opts.Stdin,
-		stdout:    opts.Stdout,
+		workspace:    opts.Workspace,
+		config:       opts.Config,
+		client:       opts.Client,
+		store:        opts.Store,
+		registry:     opts.Registry,
+		skillManager: manager,
+		observer:     opts.Observer,
+		approval:     opts.Approval,
+		stdin:        opts.Stdin,
+		stdout:       opts.Stdout,
 	}
 }
 
@@ -72,6 +86,69 @@ func (r *Runner) SetObserver(observer Observer) {
 
 func (r *Runner) SetApprovalHandler(handler tools.ApprovalHandler) {
 	r.approval = handler
+}
+
+func (r *Runner) ListSkills() ([]skills.Skill, []skills.Diagnostic) {
+	if r.skillManager == nil {
+		return nil, nil
+	}
+	return r.skillManager.List()
+}
+
+func (r *Runner) ActivateSkill(sess *session.Session, name string, args map[string]string) (skills.Skill, error) {
+	if sess == nil {
+		return skills.Skill{}, fmt.Errorf("session is required")
+	}
+	if r.skillManager == nil {
+		return skills.Skill{}, fmt.Errorf("skill manager is unavailable")
+	}
+	skill, ok := r.skillManager.Find(name)
+	if !ok {
+		return skills.Skill{}, fmt.Errorf("skill not found: %s", strings.TrimSpace(name))
+	}
+
+	normalizedArgs := normalizeSkillArgs(args)
+	for _, arg := range skill.Args {
+		if _, exists := normalizedArgs[arg.Name]; !exists && strings.TrimSpace(arg.Default) != "" {
+			normalizedArgs[arg.Name] = strings.TrimSpace(arg.Default)
+		}
+		if arg.Required && strings.TrimSpace(normalizedArgs[arg.Name]) == "" {
+			return skills.Skill{}, fmt.Errorf("missing required skill arg: %s", arg.Name)
+		}
+	}
+	if len(normalizedArgs) == 0 {
+		normalizedArgs = nil
+	}
+
+	sess.ActiveSkill = &session.ActiveSkill{
+		Name:        skill.Name,
+		Args:        normalizedArgs,
+		ActivatedAt: time.Now().UTC(),
+	}
+	if r.store != nil {
+		if err := r.store.Save(sess); err != nil {
+			return skills.Skill{}, err
+		}
+	}
+	return skill, nil
+}
+
+func (r *Runner) ClearActiveSkill(sess *session.Session) error {
+	if sess == nil {
+		return fmt.Errorf("session is required")
+	}
+	sess.ActiveSkill = nil
+	if r.store != nil {
+		return r.store.Save(sess)
+	}
+	return nil
+}
+
+func (r *Runner) GetActiveSkill(sess *session.Session) (skills.Skill, bool) {
+	if sess == nil || sess.ActiveSkill == nil || r.skillManager == nil {
+		return skills.Skill{}, false
+	}
+	return r.skillManager.Find(sess.ActiveSkill.Name)
 }
 
 func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput, mode string, out io.Writer) (string, error) {
@@ -105,6 +182,11 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 		UserInput: userInput,
 	})
 
+	activeSkill := r.resolveActiveSkill(sess)
+	allowedTools, deniedTools := policySets(activeSkill)
+	allowedToolNames := sortedToolNames(allowedTools)
+	deniedToolNames := sortedToolNames(deniedTools)
+
 	lastToolSequenceSignature := ""
 	repeatedToolSequenceCount := 0
 	executedToolNames := make([]string, 0, 16)
@@ -121,6 +203,7 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				Model:          r.config.Provider.Model,
 				Mode:           mode,
 				Tools:          availableTools,
+				ActiveSkill:    promptActiveSkill(activeSkill),
 				Instruction:    instructionText,
 			}),
 		})
@@ -129,7 +212,7 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 		request := llm.ChatRequest{
 			Model:       r.config.Provider.Model,
 			Messages:    messages,
-			Tools:       r.registry.DefinitionsForMode(runMode),
+			Tools:       r.registry.DefinitionsForModeWithFilters(runMode, allowedToolNames, deniedToolNames),
 			Temperature: 0.2,
 		}
 
@@ -220,6 +303,8 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				Mode:           runMode,
 				Stdin:          r.stdin,
 				Stdout:         r.stdout,
+				AllowedTools:   allowedTools,
+				DeniedTools:    deniedTools,
 			})
 			if execErr != nil {
 				result = marshalToolResult(map[string]any{
@@ -579,6 +664,140 @@ func compactWhitespace(text string, limit int) string {
 		return string(runes[:limit])
 	}
 	return string(runes[:limit-3]) + "..."
+}
+
+type activeSkillRuntime struct {
+	Skill skills.Skill
+	Args  map[string]string
+}
+
+func (r *Runner) resolveActiveSkill(sess *session.Session) *activeSkillRuntime {
+	if sess == nil || sess.ActiveSkill == nil || r.skillManager == nil {
+		return nil
+	}
+
+	skill, ok := r.skillManager.Find(sess.ActiveSkill.Name)
+	if !ok {
+		sess.ActiveSkill = nil
+		if r.store != nil {
+			_ = r.store.Save(sess)
+		}
+		return nil
+	}
+
+	return &activeSkillRuntime{
+		Skill: skill,
+		Args:  normalizeSkillArgs(sess.ActiveSkill.Args),
+	}
+}
+
+func policySets(active *activeSkillRuntime) (map[string]struct{}, map[string]struct{}) {
+	if active == nil {
+		return nil, nil
+	}
+	items := active.Skill.ToolPolicy.Items
+	switch active.Skill.ToolPolicy.Policy {
+	case skills.ToolPolicyAllowlist:
+		if len(items) == 0 {
+			return map[string]struct{}{emptyAllowlistSentinel: {}}, nil
+		}
+		allow := toToolSet(items)
+		if allow == nil {
+			return map[string]struct{}{emptyAllowlistSentinel: {}}, nil
+		}
+		return allow, nil
+	case skills.ToolPolicyDenylist:
+		return nil, toToolSet(items)
+	default:
+		return nil, nil
+	}
+}
+
+func toToolSet(items []string) map[string]struct{} {
+	if len(items) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		set[item] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+func sortedToolNames(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func promptActiveSkill(active *activeSkillRuntime) *PromptActiveSkill {
+	if active == nil {
+		return nil
+	}
+
+	instruction := strings.TrimSpace(active.Skill.Instruction)
+	if instruction != "" {
+		instruction = trimTextWithEllipsis(instruction, maxActiveSkillInstructionsChars)
+	}
+	description := trimTextWithEllipsis(strings.TrimSpace(active.Skill.Description), maxActiveSkillDescriptionChars)
+	whenToUse := trimTextWithEllipsis(strings.TrimSpace(active.Skill.WhenToUse), maxActiveSkillDescriptionChars)
+
+	return &PromptActiveSkill{
+		Name:         active.Skill.Name,
+		Description:  description,
+		WhenToUse:    whenToUse,
+		Instructions: instruction,
+		Args:         normalizeSkillArgs(active.Args),
+		ToolPolicy:   string(active.Skill.ToolPolicy.Policy),
+		Tools:        append([]string(nil), active.Skill.ToolPolicy.Items...),
+	}
+}
+
+func trimTextWithEllipsis(text string, maxRunes int) string {
+	text = strings.TrimSpace(text)
+	if maxRunes <= 0 || text == "" {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	if maxRunes <= 3 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-3]) + "..."
+}
+
+func normalizeSkillArgs(args map[string]string) map[string]string {
+	if len(args) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(args))
+	for key, value := range args {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		result[key] = value
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func (r *Runner) emit(event Event) {

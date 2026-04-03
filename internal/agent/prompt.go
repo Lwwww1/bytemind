@@ -20,10 +20,23 @@ var buildModePromptSource string
 //go:embed prompts/mode/plan.md
 var planModePromptSource string
 
+//go:embed prompts/block-active-skill.md
+var activeSkillPromptSource string
+
 type PromptSkill struct {
 	Name        string
 	Description string
 	Enabled     bool
+}
+
+type PromptActiveSkill struct {
+	Name         string
+	Description  string
+	WhenToUse    string
+	Instructions string
+	Args         map[string]string
+	ToolPolicy   string
+	Tools        []string
 }
 
 type PromptInput struct {
@@ -35,6 +48,7 @@ type PromptInput struct {
 	Now            time.Time
 	Skills         []PromptSkill
 	Tools          []string
+	ActiveSkill    *PromptActiveSkill
 	Instruction    string
 }
 
@@ -43,6 +57,7 @@ func systemPrompt(input PromptInput) string {
 		strings.TrimSpace(mainPromptSource),
 		strings.TrimSpace(modePrompt(input.Mode)),
 		renderSystemBlock(input),
+		renderActiveSkillPrompt(input.ActiveSkill),
 		renderInstructionBlock(input.Instruction),
 	}
 	return strings.Join(filterPromptParts(parts), "\n\n")
@@ -179,6 +194,76 @@ func formatTools(tools []string) string {
 	}
 	sort.Strings(lines)
 	return strings.Join(lines, "\n")
+}
+
+func renderActiveSkillPrompt(skill *PromptActiveSkill) string {
+	if skill == nil {
+		return ""
+	}
+
+	name := strings.TrimSpace(skill.Name)
+	description := strings.TrimSpace(skill.Description)
+	whenToUse := strings.TrimSpace(skill.WhenToUse)
+	instructions := strings.TrimSpace(skill.Instructions)
+	toolPolicy := strings.TrimSpace(skill.ToolPolicy)
+	if name == "" && description == "" && whenToUse == "" && instructions == "" && toolPolicy == "" {
+		return ""
+	}
+
+	lines := make([]string, 0, 16)
+	if name != "" {
+		lines = append(lines, "Name: "+name)
+	}
+	if description != "" {
+		lines = append(lines, "Description: "+description)
+	}
+	if whenToUse != "" {
+		lines = append(lines, "When To Use: "+whenToUse)
+	}
+	if len(skill.Args) > 0 {
+		keys := make([]string, 0, len(skill.Args))
+		for key := range skill.Args {
+			if strings.TrimSpace(key) != "" {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		if len(keys) > 0 {
+			lines = append(lines, "Args:")
+			for _, key := range keys {
+				value := strings.TrimSpace(skill.Args[key])
+				if value == "" {
+					continue
+				}
+				lines = append(lines, fmt.Sprintf("- %s=%s", key, value))
+			}
+		}
+	}
+	if toolPolicy != "" {
+		lines = append(lines, "Tool Policy: "+toolPolicy)
+	}
+	if len(skill.Tools) > 0 {
+		tools := make([]string, 0, len(skill.Tools))
+		for _, tool := range skill.Tools {
+			tool = strings.TrimSpace(tool)
+			if tool != "" {
+				tools = append(tools, tool)
+			}
+		}
+		if len(tools) > 0 {
+			sort.Strings(tools)
+			lines = append(lines, "Tool Items: "+strings.Join(tools, ", "))
+		}
+	}
+	if instructions != "" {
+		lines = append(lines, "", "Instructions:", instructions)
+	}
+
+	if len(lines) == 0 {
+		return ""
+	}
+
+	return strings.ReplaceAll(strings.TrimSpace(activeSkillPromptSource), "{{ACTIVE_SKILL_BLOCK}}", strings.Join(lines, "\n"))
 }
 
 func renderInstructionBlock(instruction string) string {

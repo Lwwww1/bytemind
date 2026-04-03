@@ -1,0 +1,28 @@
+{
+  "name": "review",
+  "version": "0.1.0",
+  "title": "Code Review",
+  "description": "面向代码审查任务，优先关注 correctness、风险与测试缺口。",
+  "entry": {
+    "slash": "/review"
+  },
+  "tools": {
+    "policy": "allowlist",
+    "items": [
+      "list_files",
+      "read_file",
+      "search_text",
+      "run_shell",
+      "update_plan"
+    ]
+  },
+  "args": [
+    {
+      "name": "base_ref",
+      "type": "string",
+      "required": false,
+      "description": "可选的对比分支，例如 main"
+    }
+  ]
+}
+

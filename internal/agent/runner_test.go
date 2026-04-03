@@ -3,6 +3,10 @@ package agent
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -13,11 +17,13 @@ import (
 )
 
 type fakeClient struct {
-	replies []llm.Message
-	index   int
+	replies  []llm.Message
+	requests []llm.ChatRequest
+	index    int
 }
 
 func (f *fakeClient) CreateMessage(ctx context.Context, req llm.ChatRequest) (llm.Message, error) {
+	f.requests = append(f.requests, req)
 	if len(f.replies) == 0 {
 		return llm.Message{}, nil
 	}
@@ -250,5 +256,201 @@ func TestCompactWhitespacePreservesUTF8WhenTruncating(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "...") {
 		t.Fatalf("expected truncated preview to end with ellipsis, got %q", got)
+	}
+}
+
+func TestRunPromptAppliesActiveSkillToolAllowlist(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "internal", "skills", "review"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "internal", "skills", "review", "skill.json"), []byte(`{
+  "name":"review",
+  "description":"Review changes",
+  "tools":{"policy":"allowlist","items":["read_file","search_text","list_files"]}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "internal", "skills", "review", "SKILL.md"), []byte("# review\nCheck correctness."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	sess.ActiveSkill = &session.ActiveSkill{Name: "review"}
+
+	client := &fakeClient{replies: []llm.Message{{
+		Role:    "assistant",
+		Content: "reviewed",
+	}}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:      config.ProviderConfig{Model: "test-model"},
+			MaxIterations: 2,
+			Stream:        false,
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "review this", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "reviewed" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+	if len(client.requests) == 0 {
+		t.Fatal("expected at least one request")
+	}
+	names := make([]string, 0, len(client.requests[0].Tools))
+	for _, def := range client.requests[0].Tools {
+		names = append(names, def.Function.Name)
+	}
+	sort.Strings(names)
+	want := []string{"list_files", "read_file", "search_text"}
+	if !slices.Equal(names, want) {
+		t.Fatalf("unexpected tool list after allowlist filter: got=%v want=%v", names, want)
+	}
+}
+
+func TestRunPromptBlocksToolCallOutsideActiveSkillPolicy(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "internal", "skills", "review"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "internal", "skills", "review", "skill.json"), []byte(`{
+  "name":"review",
+  "description":"Review changes",
+  "tools":{"policy":"allowlist","items":["read_file","search_text"]}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	sess.ActiveSkill = &session.ActiveSkill{Name: "review"}
+
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-1",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name:      "write_file",
+					Arguments: `{"path":"x.txt","content":"x"}`,
+				},
+			}},
+		},
+		{
+			Role:    "assistant",
+			Content: "recovered",
+		},
+	}}
+
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:      config.ProviderConfig{Model: "test-model"},
+			MaxIterations: 4,
+			Stream:        false,
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "review this", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "recovered" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+	if len(sess.Messages) < 3 {
+		t.Fatalf("expected tool result message, got %#v", sess.Messages)
+	}
+	toolMsg := sess.Messages[2]
+	if toolMsg.Role != "tool" || !strings.Contains(toolMsg.Content, "active skill policy") {
+		t.Fatalf("expected policy rejection in tool message, got %#v", toolMsg)
+	}
+}
+
+func TestActivateAndClearSkillPersistsSessionState(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "internal", "skills", "review"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "internal", "skills", "review", "skill.json"), []byte(`{
+  "name":"review",
+  "description":"Review changes",
+  "tools":{"policy":"allowlist","items":["read_file","search_text"]},
+  "args":[{"name":"base_ref","required":true,"type":"string"}]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	if err := store.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:      config.ProviderConfig{Model: "test-model"},
+			MaxIterations: 2,
+			Stream:        false,
+		},
+		Client:   &fakeClient{},
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	if _, err := runner.ActivateSkill(sess, "review", nil); err == nil {
+		t.Fatal("expected missing required args to fail")
+	}
+	skill, err := runner.ActivateSkill(sess, "review", map[string]string{"base_ref": "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skill.Name != "review" {
+		t.Fatalf("unexpected activated skill: %#v", skill)
+	}
+	if sess.ActiveSkill == nil || sess.ActiveSkill.Name != "review" {
+		t.Fatalf("expected session active skill to be set, got %#v", sess.ActiveSkill)
+	}
+
+	loaded, err := store.Load(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ActiveSkill == nil || loaded.ActiveSkill.Args["base_ref"] != "main" {
+		t.Fatalf("expected persisted active skill args, got %#v", loaded.ActiveSkill)
+	}
+
+	if err := runner.ClearActiveSkill(sess); err != nil {
+		t.Fatal(err)
+	}
+	if sess.ActiveSkill != nil {
+		t.Fatalf("expected active skill to be cleared, got %#v", sess.ActiveSkill)
 	}
 }

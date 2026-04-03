@@ -1,0 +1,34 @@
+{
+  "name": "github-pr",
+  "version": "0.1.0",
+  "title": "GitHub PR Analysis",
+  "description": "分析 PR 变更、review 评论和 CI 风险（优先使用本地 git 证据）。",
+  "entry": {
+    "slash": "/github-pr"
+  },
+  "tools": {
+    "policy": "allowlist",
+    "items": [
+      "list_files",
+      "read_file",
+      "search_text",
+      "run_shell",
+      "update_plan"
+    ]
+  },
+  "args": [
+    {
+      "name": "pr_number",
+      "type": "string",
+      "required": false,
+      "description": "可选 PR 编号"
+    },
+    {
+      "name": "base_ref",
+      "type": "string",
+      "required": false,
+      "description": "对比分支，默认 main"
+    }
+  ]
+}
+

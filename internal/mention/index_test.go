@@ -1,4 +1,4 @@
-package tui
+package mention
 
 import (
 	"os"
@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-func TestFindActiveMentionToken(t *testing.T) {
+func TestFindActiveToken(t *testing.T) {
 	t.Run("detects trailing mention", func(t *testing.T) {
-		token, ok := findActiveMentionToken("please check @model")
+		token, ok := FindActiveToken("please check @model")
 		if !ok {
 			t.Fatalf("expected trailing mention to be detected")
 		}
@@ -19,7 +19,7 @@ func TestFindActiveMentionToken(t *testing.T) {
 	})
 
 	t.Run("supports empty query", func(t *testing.T) {
-		token, ok := findActiveMentionToken("@")
+		token, ok := FindActiveToken("@")
 		if !ok {
 			t.Fatalf("expected single @ to open mention mode")
 		}
@@ -29,25 +29,25 @@ func TestFindActiveMentionToken(t *testing.T) {
 	})
 
 	t.Run("ignores whitespace tail", func(t *testing.T) {
-		if _, ok := findActiveMentionToken("@model "); ok {
+		if _, ok := FindActiveToken("@model "); ok {
 			t.Fatalf("did not expect mention detection when trailing whitespace exists")
 		}
 	})
 
 	t.Run("ignores email-like token", func(t *testing.T) {
-		if _, ok := findActiveMentionToken("mail a@b.com"); ok {
+		if _, ok := FindActiveToken("mail a@b.com"); ok {
 			t.Fatalf("did not expect mention detection for email token")
 		}
 	})
 }
 
-func TestInsertMentionIntoInput(t *testing.T) {
-	token := mentionToken{
+func TestInsertIntoInput(t *testing.T) {
+	token := Token{
 		Query: "mod",
 		Start: len([]rune("open ")),
 		End:   len([]rune("open @mod")),
 	}
-	got := insertMentionIntoInput("open @mod", token, "internal/tui/model.go")
+	got := InsertIntoInput("open @mod", token, "internal/tui/model.go")
 	want := "open @internal/tui/model.go "
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
@@ -57,14 +57,14 @@ func TestInsertMentionIntoInput(t *testing.T) {
 func TestWorkspaceFileIndexSearchSkipsIgnoredDirectories(t *testing.T) {
 	workspace := t.TempDir()
 	mustWriteMentionFile(t, filepath.Join(workspace, "README.md"), "hello")
-	mustWriteMentionFile(t, filepath.Join(workspace, "internal", "tui", "model.go"), "package tui")
+	mustWriteMentionFile(t, filepath.Join(workspace, "internal", "tui", "model.go"), "package mention")
 	mustWriteMentionFile(t, filepath.Join(workspace, ".git", "config"), "ignored")
 	mustWriteMentionFile(t, filepath.Join(workspace, "node_modules", "pkg", "index.js"), "ignored")
 	mustWriteMentionFile(t, filepath.Join(workspace, "vendor", "pkg", "a.go"), "ignored")
 	mustWriteMentionFile(t, filepath.Join(workspace, "dist", "bundle.js"), "ignored")
 	mustWriteMentionFile(t, filepath.Join(workspace, "build", "artifact.txt"), "ignored")
 
-	index := newWorkspaceFileIndex(workspace)
+	index := NewWorkspaceFileIndex(workspace)
 	all := index.Search("", 100)
 	paths := make([]string, 0, len(all))
 	for _, item := range all {
@@ -104,7 +104,7 @@ func TestWorkspaceFileIndexSearchWithRecencyPrioritizesRecent(t *testing.T) {
 	mustWriteMentionFile(t, filepath.Join(workspace, "alpha.go"), "package main")
 	mustWriteMentionFile(t, filepath.Join(workspace, "beta.go"), "package main")
 
-	index := newWorkspaceFileIndex(workspace)
+	index := NewWorkspaceFileIndex(workspace)
 	results := index.SearchWithRecency("", 10, map[string]int{
 		"beta.go":  20,
 		"alpha.go": 1,
@@ -126,7 +126,7 @@ func TestWorkspaceFileIndexSupportsConfigurableIgnoreRules(t *testing.T) {
 	mustWriteMentionFile(t, filepath.Join(workspace, ".bytemindignore"), "custom/*\n")
 	t.Setenv("BYTEMIND_MENTION_IGNORE", "envskip.go,logs/*")
 
-	index := newWorkspaceFileIndex(workspace)
+	index := NewWorkspaceFileIndex(workspace)
 	results := index.Search("", 50)
 	paths := make([]string, 0, len(results))
 	for _, item := range results {
@@ -150,7 +150,7 @@ func TestWorkspaceFileIndexRespectsMaxFilesLimitFromEnv(t *testing.T) {
 	mustWriteMentionFile(t, filepath.Join(workspace, "c.go"), "package main")
 	t.Setenv("BYTEMIND_MENTION_MAX_FILES", "2")
 
-	index := newWorkspaceFileIndex(workspace)
+	index := NewWorkspaceFileIndex(workspace)
 	results := index.Search("", 50)
 	if len(results) != 2 {
 		t.Fatalf("expected max-files limited result count 2, got %d", len(results))
@@ -167,7 +167,7 @@ func TestWorkspaceFileIndexRespectsMaxFilesLimitFromEnv(t *testing.T) {
 func TestWorkspaceFileIndexRebuildsAfterRefreshInterval(t *testing.T) {
 	workspace := t.TempDir()
 	mustWriteMentionFile(t, filepath.Join(workspace, "a.txt"), "a")
-	index := newWorkspaceFileIndex(workspace)
+	index := NewWorkspaceFileIndex(workspace)
 	first := index.Search("", 10)
 	if len(first) != 1 {
 		t.Fatalf("expected initial index size 1, got %d", len(first))
@@ -214,4 +214,13 @@ func mustWriteMentionFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }

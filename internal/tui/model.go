@@ -11,6 +11,7 @@ import (
 
 	"bytemind/internal/agent"
 	"bytemind/internal/config"
+	"bytemind/internal/mention"
 	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 	"bytemind/internal/tools"
@@ -150,9 +151,9 @@ type model struct {
 	llmConnected   bool
 	approval       *approvalPrompt
 	mentionQuery   string
-	mentionToken   mentionToken
-	mentionResults []mentionCandidate
-	mentionIndex   *workspaceFileIndex
+	mentionToken   mention.Token
+	mentionResults []mention.Candidate
+	mentionIndex   *mention.WorkspaceFileIndex
 	mentionRecent  map[string]int
 	mentionSeq     int
 	lastPasteAt    time.Time
@@ -223,7 +224,7 @@ func newModel(opts Options) model {
 		phase:          "idle",
 		llmConnected:   true,
 		chatAutoFollow: true,
-		mentionIndex:   newWorkspaceFileIndex(opts.Workspace),
+		mentionIndex:   mention.NewWorkspaceFileIndex(opts.Workspace),
 	}
 	m.syncInputStyle()
 	m.syncInputOverlays()
@@ -758,7 +759,7 @@ func (m model) handleMentionPaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.recordRecentMention(selected.Path)
-		nextValue := insertMentionIntoInput(m.input.Value(), m.mentionToken, selected.Path)
+		nextValue := mention.InsertIntoInput(m.input.Value(), m.mentionToken, selected.Path)
 		m.setInputValue(nextValue)
 		m.statusNote = "Inserted mention: " + selected.Path
 		m.closeMentionPalette()
@@ -771,7 +772,7 @@ func (m model) handleMentionPaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.handleKey(msg)
 		}
 		m.recordRecentMention(selected.Path)
-		nextValue := insertMentionIntoInput(m.input.Value(), m.mentionToken, selected.Path)
+		nextValue := mention.InsertIntoInput(m.input.Value(), m.mentionToken, selected.Path)
 		m.setInputValue(nextValue)
 		m.statusNote = "Inserted mention: " + selected.Path
 		m.closeMentionPalette()
@@ -2290,14 +2291,14 @@ func (m *model) syncMentionPalette() {
 		m.closeMentionPalette()
 		return
 	}
-	token, ok := findActiveMentionToken(m.input.Value())
+	token, ok := mention.FindActiveToken(m.input.Value())
 	if !ok {
 		m.closeMentionPalette()
 		return
 	}
 
 	if m.mentionIndex == nil {
-		m.mentionIndex = newWorkspaceFileIndex(m.workspace)
+		m.mentionIndex = mention.NewWorkspaceFileIndex(m.workspace)
 	}
 	results := m.mentionIndex.SearchWithRecency(token.Query, mentionPageSize*3, m.mentionRecent)
 	m.mentionOpen = true
@@ -2318,7 +2319,7 @@ func (m *model) closeMentionPalette() {
 	m.mentionOpen = false
 	m.mentionCursor = 0
 	m.mentionQuery = ""
-	m.mentionToken = mentionToken{}
+	m.mentionToken = mention.Token{}
 	m.mentionResults = nil
 }
 
@@ -2378,15 +2379,15 @@ func (m model) visibleCommandItemsPage() []commandItem {
 	return items[start:end]
 }
 
-func (m model) selectedMentionCandidate() (mentionCandidate, bool) {
+func (m model) selectedMentionCandidate() (mention.Candidate, bool) {
 	if len(m.mentionResults) == 0 {
-		return mentionCandidate{}, false
+		return mention.Candidate{}, false
 	}
 	index := clamp(m.mentionCursor, 0, len(m.mentionResults)-1)
 	return m.mentionResults[index], true
 }
 
-func (m model) visibleMentionItemsPage() []mentionCandidate {
+func (m model) visibleMentionItemsPage() []mention.Candidate {
 	if len(m.mentionResults) == 0 {
 		return nil
 	}

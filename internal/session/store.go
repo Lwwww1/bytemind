@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -348,9 +347,8 @@ func projectID(workspace string) string {
 		value = abs
 	}
 	value = filepath.Clean(value)
-	if runtime.GOOS == "windows" {
-		value = strings.ToLower(value)
-	}
+	// Keep project-id normalization stable across CI/OS by lowercasing paths.
+	value = strings.ToLower(value)
 	value = filepath.ToSlash(value)
 
 	var builder strings.Builder

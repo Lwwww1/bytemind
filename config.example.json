@@ -1,8 +1,9 @@
 {
   "provider": {
-    "type": "",
-    "base_url": "",
-    "model": "",
+    "type": "openai-compatible",
+    "auto_detect_type": false,
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-5.4-mini",
     "api_key": ""
   },
   "approval_policy": "on-request",

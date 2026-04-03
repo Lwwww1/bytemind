@@ -183,66 +183,6 @@ func TestHandleMouseWheelScrollsLandingInputWhenPointerIsOverInput(t *testing.T)
 	}
 }
 
-func TestHandleMouseWheelScrollsPlanPanel(t *testing.T) {
-	input := textarea.New()
-	input.Focus()
-	m := model{
-		screen:    screenChat,
-		width:     140,
-		height:    24,
-		input:     input,
-		viewport:  viewport.New(0, 0),
-		planView:  viewport.New(0, 0),
-		mode:      modeBuild,
-		sess:      session.New("E:\\bytemind"),
-		workspace: "E:\\bytemind",
-		plan: planpkg.State{
-			Phase: planpkg.PhaseReady,
-			Steps: []planpkg.Step{
-				{Title: "Step 1", Status: planpkg.StepCompleted},
-				{Title: "Step 2", Status: planpkg.StepCompleted},
-				{Title: "Step 3", Status: planpkg.StepInProgress, Description: strings.Repeat("detail ", 10)},
-				{Title: "Step 4", Status: planpkg.StepPending, Description: strings.Repeat("detail ", 10)},
-				{Title: "Step 5", Status: planpkg.StepPending, Description: strings.Repeat("detail ", 10)},
-				{Title: "Step 6", Status: planpkg.StepPending, Description: strings.Repeat("detail ", 10)},
-				{Title: "Step 7", Status: planpkg.StepPending, Description: strings.Repeat("detail ", 10)},
-			},
-		},
-	}
-
-	m.refreshViewport()
-	if m.planView.Height <= 0 {
-		t.Fatalf("expected plan viewport height to be initialized")
-	}
-
-	planX, planY := -1, -1
-	for y := 0; y < m.height; y++ {
-		for x := 0; x < m.width; x++ {
-			if m.mouseOverPlan(x, y) {
-				planX, planY = x, y
-				break
-			}
-		}
-		if planX >= 0 {
-			break
-		}
-	}
-	if planX < 0 || planY < 0 {
-		t.Fatalf("expected to find a mouse-active plan panel region")
-	}
-
-	got, _ := m.handleMouse(tea.MouseMsg{
-		Button: tea.MouseButtonWheelDown,
-		Action: tea.MouseActionPress,
-		X:      planX,
-		Y:      planY,
-	})
-	updated := got.(model)
-	if updated.planView.YOffset == 0 {
-		t.Fatalf("expected plan viewport to scroll down, got offset %d", updated.planView.YOffset)
-	}
-}
-
 func TestPlanModeDoesNotShowDetailedPlanPanel(t *testing.T) {
 	input := textarea.New()
 	m := model{
@@ -381,7 +321,7 @@ func TestContinueExecutionInputPreparesPlanAndSubmitsPrompt(t *testing.T) {
 	input.Focus()
 	input.SetWidth(40)
 	input.SetHeight(3)
-	input.SetValue("继续执行")
+	input.SetValue("\u7ee7\u7eed\u6267\u884c")
 	input.CursorEnd()
 	m := model{
 		screen:    screenChat,
@@ -412,10 +352,10 @@ func TestContinueExecutionInputPreparesPlanAndSubmitsPrompt(t *testing.T) {
 	if updated.plan.Phase != planpkg.PhaseExecuting {
 		t.Fatalf("expected plan phase to become executing, got %q", updated.plan.Phase)
 	}
-	if len(updated.chatItems) < 2 {
+	if len(updated.chatItems) < 1 {
 		t.Fatalf("expected continue execution to submit a prompt")
 	}
-	if updated.chatItems[0].Body != "继续执行" {
+	if updated.chatItems[0].Body != "\u7ee7\u7eed\u6267\u884c" {
 		t.Fatalf("expected original continue input to be appended, got %q", updated.chatItems[0].Body)
 	}
 	if updated.plan.Steps[0].Status != planpkg.StepInProgress {
@@ -559,7 +499,7 @@ func TestEnterSubmitsPrompt(t *testing.T) {
 	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	updated := got.(model)
 
-	if len(updated.chatItems) < 2 {
+	if len(updated.chatItems) < 1 {
 		t.Fatalf("expected enter to submit prompt, got %d chat items", len(updated.chatItems))
 	}
 	if updated.chatItems[0].Body != "ship this prompt" {
@@ -639,7 +579,7 @@ func TestEnterSubmitsAfterPasteGuardExpires(t *testing.T) {
 	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	updated := got.(model)
 
-	if len(updated.chatItems) < 2 {
+	if len(updated.chatItems) < 1 {
 		t.Fatalf("expected enter to submit after paste guard expires, got %d chat items", len(updated.chatItems))
 	}
 }
@@ -704,6 +644,35 @@ func TestRenderFooterOnlyShowsInputRegion(t *testing.T) {
 	}
 	if strings.Contains(footer, "PgUp/PgDn") {
 		t.Fatalf("footer should not advertise PgUp/PgDn anymore")
+	}
+}
+
+func TestRenderFooterInfoLineCombinesModeAndHints(t *testing.T) {
+	input := textarea.New()
+	m := model{
+		width: 160,
+		input: input,
+		cfg: config.Config{
+			Provider: config.ProviderConfig{Model: "deepseek-chat"},
+		},
+	}
+
+	footer := m.renderFooter()
+	lines := strings.Split(footer, "\n")
+	infoLine := ""
+	for _, line := range lines {
+		if strings.Contains(line, "tab agents") {
+			infoLine = line
+			break
+		}
+	}
+	if infoLine == "" {
+		t.Fatalf("expected footer to contain a quick-hint info line")
+	}
+	for _, want := range []string{"Build", "Plan", "deepseek-chat", "tab agents"} {
+		if !strings.Contains(infoLine, want) {
+			t.Fatalf("expected combined info line to contain %q, got %q", want, infoLine)
+		}
 	}
 }
 
@@ -1342,7 +1311,7 @@ func TestHandleAgentEventShowsToolProgressInChat(t *testing.T) {
 	if len(m.chatItems) != 3 {
 		t.Fatalf("expected tool start to keep assistant step then append tool call, got %d items", len(m.chatItems))
 	}
-	if m.chatItems[1].Kind != "assistant" || m.chatItems[1].Title != thinkingLabel || m.chatItems[1].Status != "thinking" || !strings.Contains(m.chatItems[1].Body, "read_file") {
+	if m.chatItems[1].Kind != "assistant" || m.chatItems[1].Title != thinkingLabel || m.chatItems[1].Status != "thinking" || strings.TrimSpace(m.chatItems[1].Body) == "" {
 		t.Fatalf("expected assistant step before tool call, got %+v", m.chatItems[1])
 	}
 	if m.chatItems[2].Kind != "tool" || m.chatItems[2].Status != "running" || !strings.Contains(m.chatItems[2].Title, "Tool Call | read_file") {
@@ -1423,7 +1392,7 @@ func TestHandleAgentEventTracksRunLifecyclePhases(t *testing.T) {
 	}
 }
 
-func TestToolStartReplacesStreamedAssistantTurnWithStableToolIntro(t *testing.T) {
+func TestToolStartKeepsStreamedAssistantReasoning(t *testing.T) {
 	m := model{
 		chatItems: []chatEntry{
 			{Kind: "user", Title: "You", Body: "what project is this", Status: "final"},
@@ -1441,11 +1410,77 @@ func TestToolStartReplacesStreamedAssistantTurnWithStableToolIntro(t *testing.T)
 	if len(m.chatItems) != 3 {
 		t.Fatalf("expected tool start to append only tool call after streamed assistant turn, got %d items", len(m.chatItems))
 	}
-	if !strings.Contains(m.chatItems[1].Body, "`list_files`") || m.chatItems[1].Status != "thinking" || m.chatItems[1].Title != thinkingLabel {
-		t.Fatalf("expected streamed assistant turn to be replaced with stable tool intro, got %+v", m.chatItems[1])
+	if !strings.Contains(m.chatItems[1].Body, "inspect the repo structure first") || m.chatItems[1].Status != "thinking" || m.chatItems[1].Title != thinkingLabel {
+		t.Fatalf("expected streamed assistant turn to preserve reasoning content, got %+v", m.chatItems[1])
 	}
 	if !strings.Contains(m.chatItems[2].Title, "Tool Call | list_files") {
 		t.Fatalf("expected tool call entry, got %+v", m.chatItems[2])
+	}
+}
+
+func TestToolStartWithoutAssistantDeltaDoesNotInjectThinkingCard(t *testing.T) {
+	m := model{
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "list files", Status: "final"},
+		},
+		streamingIndex: -1,
+	}
+
+	m.handleAgentEvent(agent.Event{
+		Type:          agent.EventToolCallStarted,
+		ToolName:      "list_files",
+		ToolArguments: `{"path":"."}`,
+	})
+
+	if len(m.chatItems) != 2 {
+		t.Fatalf("expected only tool call entry to be appended, got %d items", len(m.chatItems))
+	}
+	if m.chatItems[1].Kind != "tool" || !strings.Contains(m.chatItems[1].Title, "Tool Call | list_files") {
+		t.Fatalf("expected tool call entry, got %+v", m.chatItems[1])
+	}
+}
+
+func TestToolStartWithGenericToolIntentDoesNotShowThinkingCard(t *testing.T) {
+	m := model{
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "list files", Status: "final"},
+			{Kind: "assistant", Title: assistantLabel, Body: "I will call `list_files` to inspect the relevant context first.", Status: "streaming"},
+		},
+		streamingIndex: 1,
+	}
+
+	m.handleAgentEvent(agent.Event{
+		Type:          agent.EventToolCallStarted,
+		ToolName:      "list_files",
+		ToolArguments: `{"path":"."}`,
+	})
+
+	if len(m.chatItems) != 2 {
+		t.Fatalf("expected generic tool-intent placeholder to be removed, got %d items", len(m.chatItems))
+	}
+	if m.chatItems[1].Kind != "tool" || !strings.Contains(m.chatItems[1].Title, "Tool Call | list_files") {
+		t.Fatalf("expected tool call entry after removing placeholder, got %+v", m.chatItems[1])
+	}
+}
+
+func TestAssistantDeltaPlanningTextRendersAsThinking(t *testing.T) {
+	m := model{
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "请检查项目", Status: "final"},
+		},
+		streamingIndex: -1,
+	}
+
+	m.handleAgentEvent(agent.Event{
+		Type:    agent.EventAssistantDelta,
+		Content: "我会先了解项目结构和配置，然后检查代码组织和依赖关系，最后通过构建和测试来验证功能。",
+	})
+
+	if len(m.chatItems) != 2 {
+		t.Fatalf("expected assistant delta to append one assistant item, got %d", len(m.chatItems))
+	}
+	if m.chatItems[1].Title != thinkingLabel || m.chatItems[1].Status != "thinking" {
+		t.Fatalf("expected planning delta to render as thinking, got %+v", m.chatItems[1])
 	}
 }
 

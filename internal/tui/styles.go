@@ -18,7 +18,6 @@ var (
 
 var (
 	panelStyle = lipgloss.NewStyle().
-			Background(colorPanel).
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(colorBorder).
 			Padding(0, 1)
@@ -35,14 +34,12 @@ var (
 	landingInputStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.NormalBorder()).
 				BorderForeground(colorAccent).
-				Padding(0, 1).
-				Background(colorPanel)
+				Padding(0, 1)
 
 	inputStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(colorBorder).
-			Padding(0, 1).
-			Background(colorPanel)
+			Padding(0, 1)
 
 	modeTabStyle = lipgloss.NewStyle().
 			Foreground(colorMuted).
@@ -81,34 +78,27 @@ var (
 			Background(lipgloss.Color("#101923"))
 
 	chatAssistantStyle = lipgloss.NewStyle().
-				Background(colorCard).
 				Padding(1, 1)
 
 	chatThinkingStyle = lipgloss.NewStyle().
-				Background(colorCard).
 				Padding(1, 1)
 
 	thinkingBodyStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#A695C4")).
+				Foreground(lipgloss.Color("#7F758F")).
 				Faint(true)
 
 	chatUserStyle = lipgloss.NewStyle().
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderLeft(true).
-			BorderForeground(colorAccent).
-			Background(colorCard).
+			Background(lipgloss.Color("#2A2A2A")).
 			Padding(1, 1)
 
 	chatToolStyle = lipgloss.NewStyle().
-			Background(colorCard).
 			Padding(1, 1)
 
 	toolBodyStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#A89671")).
+			Foreground(lipgloss.Color("#8893A1")).
 			Faint(true)
 
 	chatSystemStyle = lipgloss.NewStyle().
-			Background(colorCard).
 			Padding(1, 1)
 
 	approvalBannerStyle = lipgloss.NewStyle().
@@ -118,12 +108,10 @@ var (
 				Padding(0, 1)
 
 	statusBarStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#DCE7F5")).
-			Background(lipgloss.Color("#111A24")).
-			Padding(0, 1)
+			Foreground(colorMuted).
+			Faint(true)
 
 	commandPaletteStyle = lipgloss.NewStyle().
-				Background(colorPanel).
 				BorderStyle(lipgloss.NormalBorder()).
 				BorderTop(true).
 				BorderLeft(true).

@@ -15,6 +15,7 @@ func TestLoadUsesEnvOverrides(t *testing.T) {
 	t.Setenv("BYTEMIND_MODEL", "override-model")
 	t.Setenv("BYTEMIND_API_KEY", "secret")
 	t.Setenv("BYTEMIND_PROVIDER_TYPE", "anthropic")
+	t.Setenv("BYTEMIND_PROVIDER_AUTO_DETECT_TYPE", "true")
 	t.Setenv("BYTEMIND_STREAM", "false")
 
 	cfg, err := Load(workspace, "")
@@ -26,6 +27,9 @@ func TestLoadUsesEnvOverrides(t *testing.T) {
 	}
 	if cfg.Provider.Type != "anthropic" {
 		t.Fatalf("expected anthropic provider, got %q", cfg.Provider.Type)
+	}
+	if !cfg.Provider.AutoDetectType {
+		t.Fatalf("expected auto detect provider type from env")
 	}
 	if cfg.Stream {
 		t.Fatalf("expected stream override to disable streaming")

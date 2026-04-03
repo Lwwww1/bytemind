@@ -23,12 +23,17 @@ type Config struct {
 }
 
 type ProviderConfig struct {
-	Type             string `json:"type"`
-	BaseURL          string `json:"base_url"`
-	Model            string `json:"model"`
-	APIKey           string `json:"api_key"`
-	APIKeyEnv        string `json:"api_key_env"`
-	AnthropicVersion string `json:"anthropic_version"`
+	Type             string            `json:"type"`
+	AutoDetectType   bool              `json:"auto_detect_type"`
+	BaseURL          string            `json:"base_url"`
+	APIPath          string            `json:"api_path"`
+	Model            string            `json:"model"`
+	APIKey           string            `json:"api_key"`
+	APIKeyEnv        string            `json:"api_key_env"`
+	AuthHeader       string            `json:"auth_header"`
+	AuthScheme       string            `json:"auth_scheme"`
+	ExtraHeaders     map[string]string `json:"extra_headers"`
+	AnthropicVersion string            `json:"anthropic_version"`
 }
 
 func Default(workspace string) Config {
@@ -39,11 +44,10 @@ func Default(workspace string) Config {
 
 	return Config{
 		Provider: ProviderConfig{
-			Type:             "openai-compatible",
-			BaseURL:          "https://api.openai.com/v1",
-			Model:            "GPT-5.4",
-			APIKeyEnv:        "BYTEMIND_API_KEY",
-			AnthropicVersion: "2023-06-01",
+			Type:      "openai-compatible",
+			BaseURL:   "https://api.openai.com/v1",
+			Model:     "GPT-5.4",
+			APIKeyEnv: "BYTEMIND_API_KEY",
 		},
 		ApprovalPolicy: "on-request",
 		MaxIterations:  32,
@@ -221,6 +225,11 @@ func applyEnv(cfg *Config) {
 	if value := strings.TrimSpace(os.Getenv("BYTEMIND_PROVIDER_TYPE")); value != "" {
 		cfg.Provider.Type = value
 	}
+	if value := strings.TrimSpace(os.Getenv("BYTEMIND_PROVIDER_AUTO_DETECT_TYPE")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Provider.AutoDetectType = parsed
+		}
+	}
 	if value := strings.TrimSpace(os.Getenv("BYTEMIND_BASE_URL")); value != "" {
 		cfg.Provider.BaseURL = value
 	}
@@ -248,6 +257,13 @@ func applyEnv(cfg *Config) {
 
 func normalize(workspace string, cfg *Config) error {
 	cfg.Provider.Type = normalizeProviderType(cfg.Provider.Type)
+	if cfg.Provider.Type == "" {
+		if cfg.Provider.AutoDetectType {
+			cfg.Provider.Type = detectProviderType(cfg.Provider)
+		} else {
+			cfg.Provider.Type = "openai-compatible"
+		}
+	}
 	if cfg.Provider.BaseURL == "" {
 		cfg.Provider.BaseURL = defaultBaseURL(cfg.Provider.Type)
 	}
@@ -260,14 +276,35 @@ func normalize(workspace string, cfg *Config) error {
 	if cfg.Provider.APIKeyEnv == "" {
 		cfg.Provider.APIKeyEnv = "BYTEMIND_API_KEY"
 	}
-	if cfg.Provider.AnthropicVersion == "" {
+	cfg.Provider.APIPath = strings.TrimSpace(cfg.Provider.APIPath)
+	cfg.Provider.AuthHeader = strings.TrimSpace(cfg.Provider.AuthHeader)
+	cfg.Provider.AuthScheme = strings.TrimSpace(cfg.Provider.AuthScheme)
+	cfg.Provider.AnthropicVersion = strings.TrimSpace(cfg.Provider.AnthropicVersion)
+	if cfg.Provider.Type == "anthropic" && cfg.Provider.AnthropicVersion == "" {
 		cfg.Provider.AnthropicVersion = "2023-06-01"
+	}
+	if cfg.Provider.ExtraHeaders == nil {
+		cfg.Provider.ExtraHeaders = map[string]string{}
+	}
+	for key, value := range cfg.Provider.ExtraHeaders {
+		trimmedKey := strings.TrimSpace(key)
+		trimmedValue := strings.TrimSpace(value)
+		if trimmedKey == "" || trimmedValue == "" {
+			delete(cfg.Provider.ExtraHeaders, key)
+			continue
+		}
+		if trimmedKey != key {
+			delete(cfg.Provider.ExtraHeaders, key)
+			cfg.Provider.ExtraHeaders[trimmedKey] = trimmedValue
+			continue
+		}
+		cfg.Provider.ExtraHeaders[key] = trimmedValue
 	}
 	if cfg.MaxIterations <= 0 {
 		cfg.MaxIterations = 32
 	}
 	if !isSupportedProviderType(cfg.Provider.Type) {
-		return errors.New("provider.type must be one of openai-compatible, openai, anthropic")
+		return errors.New("provider.type must be one of openai-compatible, openai, anthropic (or leave it empty with provider.auto_detect_type=true)")
 	}
 	switch cfg.ApprovalPolicy {
 	case "", "on-request":
@@ -292,16 +329,46 @@ func normalize(workspace string, cfg *Config) error {
 
 func normalizeProviderType(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "openai-compatible", "openai_compatible", "openai":
-		if strings.EqualFold(strings.TrimSpace(value), "openai") {
-			return "openai"
-		}
+	case "":
+		return ""
+	case "openai-compatible", "openai_compatible":
 		return "openai-compatible"
+	case "openai":
+		return "openai"
 	case "anthropic":
 		return "anthropic"
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}
+}
+
+func detectProviderType(cfg ProviderConfig) string {
+	baseURL := strings.ToLower(strings.TrimSpace(cfg.BaseURL))
+	apiPath := strings.ToLower(strings.TrimSpace(cfg.APIPath))
+	authHeader := strings.ToLower(strings.TrimSpace(cfg.AuthHeader))
+
+	if strings.Contains(apiPath, "/v1/messages") || strings.HasSuffix(strings.TrimRight(apiPath, "/"), "messages") {
+		return "anthropic"
+	}
+	if strings.Contains(baseURL, "/v1/messages") || strings.HasSuffix(strings.TrimRight(baseURL, "/"), "/messages") {
+		return "anthropic"
+	}
+	if hasHeaderName(cfg.ExtraHeaders, "anthropic-version") {
+		return "anthropic"
+	}
+	if authHeader == "x-api-key" && strings.Contains(apiPath, "messages") {
+		return "anthropic"
+	}
+	return "openai-compatible"
+}
+
+func hasHeaderName(headers map[string]string, target string) bool {
+	for key := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), target) {
+			return true
+		}
+	}
+	return false
 }
 
 func isSupportedProviderType(value string) bool {

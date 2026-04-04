@@ -116,13 +116,16 @@ func (s *FileAssetStore) GetImageByAssetID(ctx context.Context, sessionID string
 	if err := ctx.Err(); err != nil {
 		return ImageBlob{}, err
 	}
-	imageID, err := parseImageIDFromAssetID(assetID)
+	assetSessionID, imageID, err := parseAssetID(assetID)
 	if err != nil {
 		return ImageBlob{}, llm.WrapError("asset_store", llm.ErrorCodeAssetNotFound, err)
 	}
 	sanitized := sanitizeSessionID(sessionID)
 	if sanitized == "" {
 		return ImageBlob{}, llm.WrapError("asset_store", llm.ErrorCodeUnknown, fmt.Errorf("session id is required"))
+	}
+	if sanitizeSessionID(assetSessionID) != sanitized {
+		return ImageBlob{}, llm.WrapError("asset_store", llm.ErrorCodeAssetNotFound, fmt.Errorf("asset %q does not belong to session %q", assetID, sessionID))
 	}
 	sessionDir := filepath.Join(s.root, sanitized)
 	if err := ensureWithinRoot(s.root, sessionDir); err != nil {
@@ -172,20 +175,24 @@ func (s *FileAssetStore) GetImageByAssetID(ctx context.Context, sessionID string
 	}, nil
 }
 
-func parseImageIDFromAssetID(assetID llm.AssetID) (int, error) {
+func parseAssetID(assetID llm.AssetID) (string, int, error) {
 	raw := strings.TrimSpace(string(assetID))
 	if raw == "" {
-		return 0, fmt.Errorf("asset id is empty")
+		return "", 0, fmt.Errorf("asset id is empty")
 	}
 	idx := strings.LastIndex(raw, ":")
 	if idx < 0 || idx == len(raw)-1 {
-		return 0, fmt.Errorf("invalid asset id %q", raw)
+		return "", 0, fmt.Errorf("invalid asset id %q", raw)
+	}
+	sessionID := strings.TrimSpace(raw[:idx])
+	if sessionID == "" {
+		return "", 0, fmt.Errorf("invalid asset id %q", raw)
 	}
 	id, err := strconv.Atoi(raw[idx+1:])
 	if err != nil || id < 0 {
-		return 0, fmt.Errorf("invalid asset id %q", raw)
+		return "", 0, fmt.Errorf("invalid asset id %q", raw)
 	}
-	return id, nil
+	return sessionID, id, nil
 }
 
 func (s *FileAssetStore) DeleteSessionImages(ctx context.Context, sessionID string) error {

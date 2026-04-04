@@ -107,6 +107,57 @@ func TestFileAssetStoreGetImageByAssetIDRejectsInvalidAssetID(t *testing.T) {
 	}
 }
 
+func TestFileAssetStoreRejectsCrossSessionAssetRead(t *testing.T) {
+	store, err := NewFileAssetStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	meta, err := store.PutImage(context.Background(), PutImageInput{
+		SessionID: "sess-a",
+		ImageID:   7,
+		MediaType: "image/png",
+		Data:      []byte("png"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = store.GetImageByAssetID(context.Background(), "sess-b", meta.AssetID)
+	if err == nil {
+		t.Fatal("expected cross-session read to be blocked")
+	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Code != llm.ErrorCodeAssetNotFound {
+		t.Fatalf("unexpected error %#v", err)
+	}
+}
+
+func TestFileAssetStoreRejectsMalformedSessionPrefixInAssetID(t *testing.T) {
+	store, err := NewFileAssetStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.PutImage(context.Background(), PutImageInput{
+		SessionID: "sess-a",
+		ImageID:   1,
+		MediaType: "image/png",
+		Data:      []byte("png"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = store.GetImageByAssetID(context.Background(), "sess-a", llm.AssetID(":1"))
+	if err == nil {
+		t.Fatal("expected malformed asset id to be blocked")
+	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Code != llm.ErrorCodeAssetNotFound {
+		t.Fatalf("unexpected error %#v", err)
+	}
+}
+
 func TestFileAssetStoreGC(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewFileAssetStore(root)

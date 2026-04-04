@@ -443,6 +443,47 @@ func TestRunPromptBlocksToolCallOutsideActiveSkillPolicy(t *testing.T) {
 	}
 }
 
+func TestRunPromptDropsToolDefinitionsForNoToolModels(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+
+	client := &fakeClient{replies: []llm.Message{{
+		Role:    "assistant",
+		Content: "done",
+	}}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:      config.ProviderConfig{Model: "gpt-5.4-no-tool"},
+			MaxIterations: 2,
+			Stream:        false,
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "hello", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+	if len(client.requests) == 0 {
+		t.Fatal("expected request captured")
+	}
+	if len(client.requests[0].Tools) != 0 {
+		t.Fatalf("expected no tool definitions for no-tool model, got %#v", client.requests[0].Tools)
+	}
+}
+
 func TestActivateAndClearSkillPersistsSessionState(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(workspace, "internal", "skills", "review"), 0o755); err != nil {

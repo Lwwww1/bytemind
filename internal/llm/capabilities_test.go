@@ -49,3 +49,37 @@ func TestApplyCapabilitiesDegradesThinkingAndImage(t *testing.T) {
 		t.Fatalf("unexpected text: %q", out[0].Text())
 	}
 }
+
+func TestCapabilityRegistryResolveUsesInferenceFallback(t *testing.T) {
+	registry := NewCapabilityRegistry(nil)
+	caps := registry.Resolve("gpt-5.4-no-tool")
+	if !caps.SupportsVision || caps.SupportsToolUse {
+		t.Fatalf("unexpected inferred caps: %#v", caps)
+	}
+
+	empty := registry.Resolve("   ")
+	if empty.SupportsVision || !empty.SupportsToolUse || !empty.SupportsThinking {
+		t.Fatalf("unexpected default caps: %#v", empty)
+	}
+}
+
+func TestApplyCapabilitiesAddsFallbackTextWhenAllPartsDropped(t *testing.T) {
+	out := ApplyCapabilities([]Message{{
+		Role: RoleUser,
+		Parts: []Part{{
+			Type:  PartImageRef,
+			Image: &ImagePartRef{AssetID: "asset-1"},
+		}},
+	}}, ModelCapabilities{
+		SupportsVision:   false,
+		SupportsToolUse:  true,
+		SupportsThinking: true,
+	})
+
+	if len(out) != 1 || len(out[0].Parts) != 1 || out[0].Parts[0].Type != PartText {
+		t.Fatalf("expected fallback text part, got %#v", out)
+	}
+	if out[0].Text() == "" {
+		t.Fatalf("expected non-empty fallback text, got %#v", out[0])
+	}
+}

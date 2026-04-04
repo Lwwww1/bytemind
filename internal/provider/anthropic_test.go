@@ -182,3 +182,48 @@ func TestParseJSONObjectFallsBackToRawValue(t *testing.T) {
 		t.Fatalf("unexpected fallback payload %#v", value)
 	}
 }
+
+func TestAnthropicMessagesRejectsMissingImageAsset(t *testing.T) {
+	_, _, err := anthropicMessages(llm.ChatRequest{
+		Messages: []llm.Message{{
+			Role: llm.RoleUser,
+			Parts: []llm.Part{{
+				Type:  llm.PartImageRef,
+				Image: &llm.ImagePartRef{AssetID: "asset-1"},
+			}},
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected missing image asset error")
+	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Code != llm.ErrorCodeAssetNotFound {
+		t.Fatalf("unexpected error: %#v", err)
+	}
+}
+
+func TestAnthropicMessagesPreservesToolResultErrorFlag(t *testing.T) {
+	_, converted, err := anthropicMessages(llm.ChatRequest{
+		Messages: []llm.Message{{
+			Role: llm.RoleUser,
+			Parts: []llm.Part{{
+				Type: llm.PartToolResult,
+				ToolResult: &llm.ToolResultPart{
+					ToolUseID: "call-1",
+					Content:   "{\"ok\":false}",
+					IsError:   true,
+				},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(converted) != 1 {
+		t.Fatalf("unexpected converted messages: %#v", converted)
+	}
+	blocks := converted[0]["content"].([]map[string]any)
+	if len(blocks) != 1 || blocks[0]["is_error"] != true {
+		t.Fatalf("expected is_error propagated, got %#v", blocks)
+	}
+}

@@ -18,23 +18,78 @@ var (
 
 var (
 	panelStyle = lipgloss.NewStyle().
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(colorBorder).
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("237")).
+			Background(lipgloss.Color("#000000")).
 			Padding(0, 1)
 
-	landingLogoStyle = lipgloss.NewStyle().
-				Foreground(colorAccent).
+	landingCanvasStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#000000"))
+
+	landingLogoByteStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.AdaptiveColor{Light: "#7A7A7A", Dark: "#8A8A8A"}).
+				Bold(false).
+				Align(lipgloss.Center)
+
+	landingLogoMindStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFFFFF")).
 				Bold(true).
 				Align(lipgloss.Center)
 
-	landingTitleStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#E2E8F0")).
-				Bold(true)
+	landingLogoStyle = landingLogoMindStyle
 
 	landingInputStyle = lipgloss.NewStyle().
-				BorderStyle(lipgloss.NormalBorder()).
-				BorderForeground(colorAccent).
-				Padding(0, 1)
+				Background(lipgloss.Color("#1A1A1A")).
+				Padding(1, 4)
+
+	landingPlaceholderStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#7C7C7C"))
+
+	landingInputValueStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#EAEAEA"))
+
+	landingModeStyle = lipgloss.NewStyle().
+				Foreground(colorAccent).
+				Bold(true)
+
+	landingModelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#B9B9B9"))
+
+	landingHintStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.AdaptiveColor{Light: "#6C6C6C", Dark: "#565656"})
+
+	landingTipDotStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F59E0B"))
+
+	landingTipLabelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#BEBEBE")).
+				Bold(true)
+
+	landingTipTextStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#A4A4A4"))
+
+	footerHintStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "246", Dark: "240"})
+
+	modeBuildActiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#6CB6FF")).
+				Bold(true)
+
+	modePlanActiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#A78BFA")).
+				Bold(true)
+
+	modeInactiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#6B7280"))
+
+	helpHeadingStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#D9E6F2")).
+				Bold(true)
+
+	helpCodeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#F1F5F9")).
+			Background(lipgloss.Color("#101010")).
+			Padding(0, 1)
 
 	inputStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).
@@ -149,6 +204,15 @@ var (
 
 	commandPaletteMetaStyle = lipgloss.NewStyle().
 				Foreground(colorMuted)
+
+	scrollbarTrackStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#1F1F1F"))
+
+	scrollbarThumbIdleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#262626"))
+
+	scrollbarThumbActiveStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#4D4D4D"))
 
 	modalBoxStyle = lipgloss.NewStyle().
 			Background(colorPanel).

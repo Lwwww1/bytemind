@@ -2,7 +2,6 @@ package tui
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -184,90 +183,7 @@ func TestHandleMouseWheelScrollsLandingInputWhenPointerIsOverInput(t *testing.T)
 	}
 }
 
-func TestRenderScrollbarHiddenWhenContentFits(t *testing.T) {
-	m := model{
-		screen:                screenChat,
-		viewportContentHeight: 8,
-	}
-	if got := m.renderScrollbar(0.2, 8); got != "" {
-		t.Fatalf("expected hidden scrollbar when content fits viewport, got %q", got)
-	}
-}
-
-func TestRenderScrollbarUsesRoundedEndsWhenScrollable(t *testing.T) {
-	m := model{
-		screen:                screenChat,
-		scrollbarHover:        true,
-		viewportContentHeight: 40,
-	}
-	got := m.renderScrollbar(0.5, 10)
-	if !strings.Contains(got, "╭") {
-		t.Fatalf("expected top rounded thumb edge, got %q", got)
-	}
-	if !strings.Contains(got, "╰") {
-		t.Fatalf("expected bottom rounded thumb edge, got %q", got)
-	}
-}
-
-func TestHandleMouseDragScrollbarUpdatesViewport(t *testing.T) {
-	input := textarea.New()
-	m := model{
-		screen:   screenChat,
-		width:    120,
-		height:   30,
-		input:    input,
-		viewport: viewport.New(0, 0),
-	}
-	m.syncViewportSize()
-	lines := make([]string, m.viewport.Height*5)
-	for i := range lines {
-		lines[i] = fmt.Sprintf("line %d", i+1)
-	}
-	m.viewport.SetContent(strings.Join(lines, "\n"))
-	m.viewportContentHeight = len(lines)
-
-	x, top, bottom, _, ok := m.scrollbarThumbBounds()
-	if !ok {
-		t.Fatalf("expected scrollbar thumb bounds to be available")
-	}
-	startY := (top + bottom) / 2
-	targetY := top + (m.viewport.Height*4)/5
-	if targetY <= startY {
-		targetY = startY + 2
-	}
-
-	pressed, _ := m.handleMouse(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      x,
-		Y:      startY,
-	})
-	dragging := pressed.(model)
-	before := dragging.viewport.ScrollPercent()
-
-	moved, _ := dragging.handleMouse(tea.MouseMsg{
-		Action: tea.MouseActionMotion,
-		X:      x,
-		Y:      targetY,
-	})
-	updated := moved.(model)
-	after := updated.viewport.ScrollPercent()
-	if after <= before {
-		t.Fatalf("expected scrollbar drag to increase scroll percent, got %.2f -> %.2f", before, after)
-	}
-
-	released, _ := updated.handleMouse(tea.MouseMsg{
-		Action: tea.MouseActionRelease,
-		X:      x,
-		Y:      targetY,
-	})
-	finalModel := released.(model)
-	if finalModel.scrollbarDragging {
-		t.Fatalf("expected dragging state to reset on release")
-	}
-}
-
-func TestPlanModeShowsDetailedPlanPanel(t *testing.T) {
+func TestPlanModeDoesNotShowDetailedPlanPanel(t *testing.T) {
 	input := textarea.New()
 	m := model{
 		screen:    screenChat,
@@ -292,23 +208,14 @@ func TestPlanModeShowsDetailedPlanPanel(t *testing.T) {
 	m.refreshViewport()
 
 	if m.hasPlanPanel() {
-		t.Fatalf("did not expect plan panel to be enabled in plan mode")
+		t.Fatalf("expected detailed plan panel to stay hidden in plan mode")
 	}
-	if m.showPlanSidebar() {
-		t.Fatalf("did not expect plan sidebar to render when disabled")
-	}
-
-	foundPlanRegion := false
-	for y := 0; y < m.height && !foundPlanRegion; y++ {
+	for y := 0; y < m.height; y++ {
 		for x := 0; x < m.width; x++ {
 			if m.mouseOverPlan(x, y) {
-				foundPlanRegion = true
-				break
+				t.Fatalf("did not expect a mouse-active plan panel region in plan mode")
 			}
 		}
-	}
-	if foundPlanRegion {
-		t.Fatalf("did not expect a mouse-active plan panel region in plan mode")
 	}
 }
 
@@ -498,8 +405,8 @@ func TestSubmitPromptRecomputesInputWidthWhenEnteringChat(t *testing.T) {
 	if updated.screen != screenChat {
 		t.Fatalf("expected submit prompt to switch to chat screen")
 	}
-	if afterWidth < beforeWidth {
-		t.Fatalf("expected chat input width to be at least as wide after screen switch, got %d -> %d", beforeWidth, afterWidth)
+	if afterWidth <= beforeWidth {
+		t.Fatalf("expected chat input width to expand after screen switch, got %d -> %d", beforeWidth, afterWidth)
 	}
 }
 
@@ -531,7 +438,8 @@ func TestChatViewOmitsRedundantChrome(t *testing.T) {
 		"/ commands",
 		"Ctrl+L sessions",
 		"Ctrl+C quit",
-		"bytemind chat",
+		"Build",
+		"Plan",
 	} {
 		if !strings.Contains(view, wanted) {
 			t.Fatalf("expected chat view to contain %q", wanted)
@@ -739,7 +647,7 @@ func TestRenderFooterOnlyShowsInputRegion(t *testing.T) {
 	}
 }
 
-func TestRenderInputRegionShowsPrefixAndHints(t *testing.T) {
+func TestRenderFooterInfoLineCombinesModeAndHints(t *testing.T) {
 	input := textarea.New()
 	m := model{
 		width: 160,
@@ -749,12 +657,22 @@ func TestRenderInputRegionShowsPrefixAndHints(t *testing.T) {
 		},
 	}
 
-	region := m.renderFooter()
-	if !strings.Contains(region, inputPrefix) {
-		t.Fatalf("expected input region to contain input prefix, got %q", region)
+	footer := m.renderFooter()
+	lines := strings.Split(footer, "\n")
+	infoLine := ""
+	for _, line := range lines {
+		if strings.Contains(line, "tab agents") {
+			infoLine = line
+			break
+		}
 	}
-	if !strings.Contains(region, "tab agents") {
-		t.Fatalf("expected input region to contain quick-hint text, got %q", region)
+	if infoLine == "" {
+		t.Fatalf("expected footer to contain a quick-hint info line")
+	}
+	for _, want := range []string{"Build", "Plan", "deepseek-chat", "tab agents"} {
+		if !strings.Contains(infoLine, want) {
+			t.Fatalf("expected combined info line to contain %q, got %q", want, infoLine)
+		}
 	}
 }
 
@@ -778,24 +696,15 @@ func TestRenderStatusBarShowsCurrentRuntimeState(t *testing.T) {
 
 	bar := m.renderStatusBar()
 	for _, want := range []string{
-		"bytemind chat",
-		"phase: executing",
-		"0 msgs",
-		"deepseek-chat",
+		"Mode: BUILD",
+		"Phase: executing",
+		"Session: 1234567890ab",
+		"Step: Implement plan resumption",
+		"Follow: manual",
+		"Model: deepseek-chat",
 	} {
 		if !strings.Contains(bar, want) {
 			t.Fatalf("expected status bar to contain %q", want)
-		}
-	}
-	for _, unwanted := range []string{
-		"Mode:",
-		"Step:",
-		"Session:",
-		"Follow:",
-		"Model:",
-	} {
-		if strings.Contains(bar, unwanted) {
-			t.Fatalf("expected simplified top info to omit %q", unwanted)
 		}
 	}
 }
@@ -812,7 +721,7 @@ func TestSyncInputStyleUsesSingleLineSearchField(t *testing.T) {
 	if m.input.Prompt != "" {
 		t.Fatalf("expected empty prompt, got %q", m.input.Prompt)
 	}
-	if m.input.Placeholder != "请输入你的问题……" {
+	if m.input.Placeholder != "Ask Bytemind to inspect, change, or verify this workspace..." {
 		t.Fatalf("unexpected placeholder: %q", m.input.Placeholder)
 	}
 }
@@ -987,7 +896,7 @@ func TestLandingViewRendersCommandPaletteAboveInput(t *testing.T) {
 	m.syncCommandPalette()
 
 	view := m.View()
-	if !strings.Contains(strings.ToLower(view), "bytemind") {
+	if !strings.Contains(view, "Build") || !strings.Contains(view, "Plan") {
 		t.Fatalf("expected landing view to remain visible, got %q", view)
 	}
 	if !strings.Contains(view, "/help") {
@@ -1048,6 +957,241 @@ func TestCommandPaletteSupportsPageNavigation(t *testing.T) {
 	upModel := afterUp.(model)
 	if upModel.commandCursor != 0 {
 		t.Fatalf("expected pgup to move back to first command page, got cursor %d", upModel.commandCursor)
+	}
+}
+
+func TestAtOpensMentionPaletteWithPrefilledToken(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	m := model{
+		screen: screenChat,
+		input:  input,
+		mentionIndex: &workspaceFileIndex{
+			ready: true,
+			files: []mentionCandidate{
+				{Path: "internal/tui/model.go", BaseName: "model.go"},
+			},
+		},
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("@")})
+	updated := got.(model)
+
+	if !updated.mentionOpen {
+		t.Fatalf("expected @ to open mention palette")
+	}
+	if updated.input.Value() != "@" {
+		t.Fatalf("expected main input to keep @ token, got %q", updated.input.Value())
+	}
+	if len(updated.mentionResults) == 0 {
+		t.Fatalf("expected mention palette to return candidates")
+	}
+}
+
+func TestMentionPaletteFiltersAsUserTypes(t *testing.T) {
+	input := textarea.New()
+	input.SetValue("@mod")
+	m := model{
+		input: input,
+		mentionIndex: &workspaceFileIndex{
+			ready: true,
+			files: []mentionCandidate{
+				{Path: "internal/tui/model.go", BaseName: "model.go"},
+				{Path: "README.md", BaseName: "README.md"},
+			},
+		},
+	}
+
+	m.syncInputOverlays()
+
+	if !m.mentionOpen {
+		t.Fatalf("expected mention palette to stay open for @mod")
+	}
+	if len(m.mentionResults) != 1 || m.mentionResults[0].Path != "internal/tui/model.go" {
+		t.Fatalf("expected @mod to only match internal/tui/model.go, got %+v", m.mentionResults)
+	}
+}
+
+func TestMentionPaletteEnterInsertsMentionInsteadOfSubmitting(t *testing.T) {
+	input := textarea.New()
+	input.SetValue("@mod")
+	m := model{
+		screen: screenLanding,
+		input:  input,
+		mentionIndex: &workspaceFileIndex{
+			ready: true,
+			files: []mentionCandidate{
+				{Path: "internal/tui/model.go", BaseName: "model.go"},
+				{Path: "README.md", BaseName: "README.md"},
+			},
+		},
+	}
+	m.syncInputOverlays()
+
+	got, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := got.(model)
+
+	if cmd != nil {
+		t.Fatalf("expected Enter on mention selection to avoid submit command")
+	}
+	if updated.input.Value() != "@internal/tui/model.go " {
+		t.Fatalf("expected mention selection to rewrite input, got %q", updated.input.Value())
+	}
+	if updated.mentionOpen {
+		t.Fatalf("expected mention palette to close after inserting a file")
+	}
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected mention insertion to avoid sending message")
+	}
+	if updated.mentionRecent["internal/tui/model.go"] <= 0 {
+		t.Fatalf("expected selected mention to be recorded as recent")
+	}
+}
+
+func TestMentionPaletteEscClosesWithoutResettingInput(t *testing.T) {
+	input := textarea.New()
+	input.SetValue("@mod")
+	m := model{
+		screen: screenChat,
+		input:  input,
+		mentionIndex: &workspaceFileIndex{
+			ready: true,
+			files: []mentionCandidate{
+				{Path: "internal/tui/model.go", BaseName: "model.go"},
+			},
+		},
+	}
+	m.syncInputOverlays()
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	updated := got.(model)
+
+	if updated.mentionOpen {
+		t.Fatalf("expected Esc to close mention palette")
+	}
+	if updated.input.Value() != "@mod" {
+		t.Fatalf("expected Esc to keep typed mention token, got %q", updated.input.Value())
+	}
+}
+
+func TestMentionPaletteEnterWithoutCandidatesFallsBackToSubmit(t *testing.T) {
+	input := textarea.New()
+	input.SetValue("@unknown")
+	m := model{
+		screen: screenLanding,
+		input:  input,
+		mentionIndex: &workspaceFileIndex{
+			ready: true,
+			files: []mentionCandidate{
+				{Path: "README.md", BaseName: "README.md"},
+			},
+		},
+	}
+	m.syncInputOverlays()
+	if !m.mentionOpen {
+		t.Fatalf("expected mention palette to open for unmatched query")
+	}
+	if len(m.mentionResults) != 0 {
+		t.Fatalf("expected no candidates for @unknown, got %+v", m.mentionResults)
+	}
+
+	got, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := got.(model)
+
+	if cmd == nil {
+		t.Fatalf("expected Enter with no mention candidates to submit prompt")
+	}
+	if updated.screen != screenChat {
+		t.Fatalf("expected fallback Enter flow to switch to chat screen")
+	}
+	if updated.mentionOpen {
+		t.Fatalf("expected mention palette to close during fallback submit")
+	}
+}
+
+func TestMentionPaletteTabInsertsMentionWithoutTogglingMode(t *testing.T) {
+	input := textarea.New()
+	input.SetValue("@mod")
+	m := model{
+		screen: screenChat,
+		mode:   modeBuild,
+		input:  input,
+		mentionIndex: &workspaceFileIndex{
+			ready: true,
+			files: []mentionCandidate{
+				{Path: "internal/tui/model.go", BaseName: "model.go", TypeTag: "go"},
+			},
+		},
+	}
+	m.syncInputOverlays()
+	if !m.mentionOpen {
+		t.Fatalf("expected mention palette to open")
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	updated := got.(model)
+
+	if updated.mode != modeBuild {
+		t.Fatalf("expected tab in mention palette not to toggle mode, got %q", updated.mode)
+	}
+	if updated.input.Value() != "@internal/tui/model.go " {
+		t.Fatalf("expected Tab to insert mention, got %q", updated.input.Value())
+	}
+}
+
+func TestMentionPaletteRecentSelectionRanksFirstOnEmptyQuery(t *testing.T) {
+	input := textarea.New()
+	input.SetValue("@")
+	m := model{
+		screen: screenChat,
+		input:  input,
+		mentionIndex: &workspaceFileIndex{
+			ready: true,
+			files: []mentionCandidate{
+				{Path: "alpha.go", BaseName: "alpha.go", TypeTag: "go"},
+				{Path: "beta.go", BaseName: "beta.go", TypeTag: "go"},
+			},
+		},
+		mentionRecent: map[string]int{"beta.go": 99},
+	}
+	m.syncInputOverlays()
+	if !m.mentionOpen {
+		t.Fatalf("expected mention palette for empty query")
+	}
+	if len(m.mentionResults) < 2 {
+		t.Fatalf("expected at least two mention results")
+	}
+	if m.mentionResults[0].Path != "beta.go" {
+		t.Fatalf("expected recent file beta.go first, got %q", m.mentionResults[0].Path)
+	}
+}
+
+func TestRenderMentionPaletteShowsTruncatedMeta(t *testing.T) {
+	index := newWorkspaceFileIndex("")
+	index.mu.Lock()
+	index.ready = true
+	index.maxFiles = 2
+	index.truncated = true
+	index.files = []mentionCandidate{
+		{Path: "a.go", BaseName: "a.go", TypeTag: "go"},
+		{Path: "b.go", BaseName: "b.go", TypeTag: "go"},
+	}
+	index.mu.Unlock()
+
+	m := model{
+		screen:      screenChat,
+		width:       100,
+		mentionOpen: true,
+		mentionResults: []mentionCandidate{
+			{Path: "a.go", BaseName: "a.go", TypeTag: "go"},
+			{Path: "b.go", BaseName: "b.go", TypeTag: "go"},
+		},
+		mentionIndex: index,
+	}
+
+	view := m.renderMentionPalette()
+	if !strings.Contains(view, "indexed first 2 files") {
+		t.Fatalf("expected mention palette to show truncation hint, got %q", view)
 	}
 }
 
@@ -1147,124 +1291,6 @@ func TestRenderConversationIncludesToolEntries(t *testing.T) {
 	}
 	if !strings.Contains(got, "Read internal/tui/model.go lines 1-20") {
 		t.Fatalf("expected conversation to show tool summary, got %q", got)
-	}
-}
-
-func TestRenderAssistantFinalTextOmitsAssistantHeaderLabel(t *testing.T) {
-	row := renderChatRow(chatEntry{
-		Kind:   "assistant",
-		Title:  assistantLabel,
-		Body:   "This is the final answer body.",
-		Status: "final",
-	}, 80)
-
-	if strings.Contains(strings.ToLower(row), strings.ToLower(assistantLabel)) {
-		t.Fatalf("expected final assistant row to omit assistant title label, got %q", row)
-	}
-	if !strings.Contains(row, "This is the final answer body.") {
-		t.Fatalf("expected final assistant row to keep body text, got %q", row)
-	}
-}
-
-func TestRenderAssistantBodyNormalizesLooseMarkdownSyntax(t *testing.T) {
-	row := renderChatRow(chatEntry{
-		Kind:   "assistant",
-		Title:  assistantLabel,
-		Body:   "####2. 执行工具超控制时不足-\n-**建议所有**：添加工具超时上下文支持，输出统计####",
-		Status: "final",
-	}, 100)
-
-	for _, unwanted := range []string{"####2.", "-**", "**", "####"} {
-		if strings.Contains(row, unwanted) {
-			t.Fatalf("expected rendered assistant text to avoid raw markdown token %q, got %q", unwanted, row)
-		}
-	}
-	for _, wanted := range []string{"2. 执行工具超控制时不足-", "建议所有", "输出统计"} {
-		if !strings.Contains(row, wanted) {
-			t.Fatalf("expected rendered assistant text to keep content %q, got %q", wanted, row)
-		}
-	}
-}
-
-func TestRenderAssistantBodyStripsBoldMarkersInListAndParagraph(t *testing.T) {
-	row := renderChatRow(chatEntry{
-		Kind:   "assistant",
-		Title:  assistantLabel,
-		Body:   "- **问题**：**配置在启动运行时加载，不能修改**\n建议 **: **添加 SIGHUP 信号处理重新加载配置",
-		Status: "thinking",
-	}, 110)
-
-	for _, unwanted := range []string{"**问题**", "**配置", "**: **", "**"} {
-		if strings.Contains(row, unwanted) {
-			t.Fatalf("expected rendered thinking text to strip markdown bold token %q, got %q", unwanted, row)
-		}
-	}
-	for _, wanted := range []string{"问题：配置在启动运行时加载，不能修改", "建议 : 添加 SIGHUP 信号处理重新加载配置"} {
-		if !strings.Contains(row, wanted) {
-			t.Fatalf("expected rendered text to keep readable content %q, got %q", wanted, row)
-		}
-	}
-}
-
-func TestCleanInlineMarkdownKeepsWordBoundariesAroundBackticks(t *testing.T) {
-	got := cleanInlineMarkdown("Agent `Runner`internal (`agent/runner/`).go")
-	if strings.Contains(got, "`") {
-		t.Fatalf("expected cleaned markdown to remove backticks, got %q", got)
-	}
-	if strings.Contains(got, "Runnerinternal") {
-		t.Fatalf("expected cleaned markdown to preserve spacing around inline code, got %q", got)
-	}
-}
-
-func TestRenderAssistantBodyUsesPlainModeOnNarrowWidth(t *testing.T) {
-	got := renderAssistantBody("####1. 标题\n- **问题**：内容", 48)
-	for _, unwanted := range []string{"####", "**"} {
-		if strings.Contains(got, unwanted) {
-			t.Fatalf("expected narrow plain mode to strip token %q, got %q", unwanted, got)
-		}
-	}
-}
-
-func TestNormalizeAssistantLineCleansMixedMarkdownScaffold(t *testing.T) {
-	cases := map[string]string{
-		"####1. 缺少配置热加载":                                 "1. 缺少配置热加载",
-		"- **问题**：**配置在启动时加载**":                          "• 问题：配置在启动时加载",
-		"2. **依赖**：`github.com/charmbracelet/bubbletea`": "2) 依赖： github.com/charmbracelet/bubbletea",
-		"> **建议**：优化输出":                                  "建议：优化输出",
-	}
-	for in, want := range cases {
-		got := normalizeAssistantLine(in)
-		if got != want {
-			t.Fatalf("normalizeAssistantLine(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestNormalizeAssistantLineFlattensMarkdownTableToPlainText(t *testing.T) {
-	got := normalizeAssistantLine("| 列A | 列B |")
-	if got != "列A / 列B" {
-		t.Fatalf("expected markdown table row to be flattened, got %q", got)
-	}
-}
-
-func TestRenderAssistantBodyRemovesRawMarkdownTokens(t *testing.T) {
-	body := strings.Join([]string{
-		"####1. 缺少配置热加载",
-		"- **问题**：**配置在启动运行时加载，不能修改**",
-		"- **建议**：添加 `SIGHUP` 信号处理重新加载配置",
-		"> **备注**：先别改 API",
-	}, "\n")
-	got := renderAssistantBody(body, 90)
-
-	for _, unwanted := range []string{"####", "**", "`"} {
-		if strings.Contains(got, unwanted) {
-			t.Fatalf("expected rendered body to remove raw token %q, got %q", unwanted, got)
-		}
-	}
-	for _, wanted := range []string{"1. 缺少配置热加载", "问题：配置在启动运行时加载，不能修改", "建议：添加 SIGHUP 信号处理重新加载配置"} {
-		if !strings.Contains(got, wanted) {
-			t.Fatalf("expected rendered body to keep content %q, got %q", wanted, got)
-		}
 	}
 }
 
@@ -1392,7 +1418,7 @@ func TestToolStartKeepsStreamedAssistantReasoning(t *testing.T) {
 	}
 }
 
-func TestToolStartWithoutAssistantDeltaInjectsThinkingCard(t *testing.T) {
+func TestToolStartWithoutAssistantDeltaDoesNotInjectThinkingCard(t *testing.T) {
 	m := model{
 		chatItems: []chatEntry{
 			{Kind: "user", Title: "You", Body: "list files", Status: "final"},
@@ -1406,185 +1432,11 @@ func TestToolStartWithoutAssistantDeltaInjectsThinkingCard(t *testing.T) {
 		ToolArguments: `{"path":"."}`,
 	})
 
-	if len(m.chatItems) != 3 {
-		t.Fatalf("expected thinking and tool entries to be appended, got %d items", len(m.chatItems))
+	if len(m.chatItems) != 2 {
+		t.Fatalf("expected only tool call entry to be appended, got %d items", len(m.chatItems))
 	}
-	if m.chatItems[1].Kind != "assistant" || m.chatItems[1].Title != thinkingLabel || m.chatItems[1].Status != "thinking" {
-		t.Fatalf("expected injected thinking entry, got %+v", m.chatItems[1])
-	}
-	if !strings.Contains(m.chatItems[1].Body, "call `list_files`") {
-		t.Fatalf("expected thinking entry to explain upcoming tool, got %+v", m.chatItems[1])
-	}
-	if m.chatItems[2].Kind != "tool" || !strings.Contains(m.chatItems[2].Title, "Tool Call | list_files") {
-		t.Fatalf("expected tool call entry, got %+v", m.chatItems[2])
-	}
-}
-
-func TestBuildModeKeepsPlanPanelDisabled(t *testing.T) {
-	input := textarea.New()
-	m := model{
-		screen: screenChat,
-		width:  140,
-		height: 24,
-		input:  input,
-		mode:   modeBuild,
-	}
-	m.syncViewportSize()
-	if m.hasPlanPanel() {
-		t.Fatalf("expected plan panel to stay disabled in build mode")
-	}
-	if m.showPlanSidebar() {
-		t.Fatalf("expected build mode to avoid sidebar")
-	}
-	if m.planView.Width != 0 || m.planView.Height != 0 {
-		t.Fatalf("expected plan viewport to stay zero-sized in build mode, got %dx%d", m.planView.Width, m.planView.Height)
-	}
-}
-
-func TestStylesForChatItemThinkingHidesStatusAndShowsHeader(t *testing.T) {
-	styles := stylesForChatItem(chatEntry{
-		Kind:   "assistant",
-		Title:  assistantLabel,
-		Body:   "thinking",
-		Status: "thinking",
-	})
-	if !styles.showHeader {
-		t.Fatalf("expected thinking item to keep header")
-	}
-	if styles.status != "" {
-		t.Fatalf("expected thinking item status to be hidden, got %q", styles.status)
-	}
-	if styles.displayTitle != "thinking" {
-		t.Fatalf("expected thinking display title, got %q", styles.displayTitle)
-	}
-}
-
-func TestStylesForChatItemAssistantFinalHidesHeader(t *testing.T) {
-	styles := stylesForChatItem(chatEntry{
-		Kind:   "assistant",
-		Title:  assistantLabel,
-		Body:   "done",
-		Status: "final",
-	})
-	if styles.showHeader {
-		t.Fatalf("expected final assistant output to hide header")
-	}
-	if styles.status != "" {
-		t.Fatalf("expected final status to be hidden, got %q", styles.status)
-	}
-}
-
-func TestMouseOverPlanOutsideSidebarReturnsFalse(t *testing.T) {
-	input := textarea.New()
-	m := model{
-		screen: screenChat,
-		width:  90,
-		height: 24,
-		input:  input,
-		mode:   modePlan,
-	}
-	m.syncViewportSize()
-	if m.showPlanSidebar() {
-		t.Fatalf("expected narrow layout to hide sidebar")
-	}
-	if m.mouseOverPlan(10, 10) {
-		t.Fatalf("expected mouse position outside plan area to return false")
-	}
-}
-
-func TestShowPlanSidebarThresholdBoundary(t *testing.T) {
-	input := textarea.New()
-	m := model{
-		screen: screenChat,
-		height: 24,
-		input:  input,
-		mode:   modePlan,
-	}
-
-	innerThreshold := planSidebarMinWidth
-	frame := panelStyle.GetHorizontalFrameSize()
-
-	m.width = innerThreshold + frame - 1
-	if m.showPlanSidebar() {
-		t.Fatalf("expected width below threshold to hide sidebar")
-	}
-
-	m.width = innerThreshold + frame
-	if m.showPlanSidebar() {
-		t.Fatalf("did not expect plan sidebar to show when disabled")
-	}
-}
-
-func TestRenderMainPanelIncludesPlanSidebarInPlanMode(t *testing.T) {
-	input := textarea.New()
-	m := model{
-		screen:    screenChat,
-		width:     140,
-		height:    24,
-		input:     input,
-		viewport:  viewport.New(0, 0),
-		planView:  viewport.New(0, 0),
-		mode:      modePlan,
-		workspace: "E:\\bytemind",
-		plan: planpkg.State{
-			Phase: planpkg.PhaseReady,
-			Goal:  "Ship panel rendering",
-			Steps: []planpkg.Step{{Title: "Step 1", Status: planpkg.StepInProgress}},
-		},
-	}
-
-	m.refreshViewport()
-	panel := m.renderMainPanel()
-	if strings.Contains(panel, "PLAN") || strings.Contains(panel, "Phase: ready") {
-		t.Fatalf("did not expect plan sidebar content, got %q", panel)
-	}
-}
-
-func TestRefreshViewportClearsPlanViewWhenPanelDisabled(t *testing.T) {
-	input := textarea.New()
-	m := model{
-		screen:    screenChat,
-		width:     140,
-		height:    24,
-		input:     input,
-		viewport:  viewport.New(0, 0),
-		planView:  viewport.New(0, 0),
-		mode:      modeBuild,
-		workspace: "E:\\bytemind",
-	}
-	m.planView.SetContent("stale plan")
-	m.planView.SetYOffset(3)
-
-	m.refreshViewport()
-
-	if m.planView.View() != "" {
-		t.Fatalf("expected plan viewport content to be cleared in build mode")
-	}
-	if m.planView.YOffset != 0 {
-		t.Fatalf("expected plan viewport offset reset, got %d", m.planView.YOffset)
-	}
-}
-
-func TestMouseOverPlanRespectsComputedBounds(t *testing.T) {
-	input := textarea.New()
-	m := model{
-		screen:   screenChat,
-		width:    140,
-		height:   24,
-		input:    input,
-		viewport: viewport.New(0, 0),
-		planView: viewport.New(0, 0),
-		mode:     modePlan,
-	}
-	m.syncViewportSize()
-	if m.planView.Width != 0 || m.planView.Height != 0 {
-		t.Fatalf("expected plan viewport to remain disabled, got %dx%d", m.planView.Width, m.planView.Height)
-	}
-	contentLeft := panelStyle.GetHorizontalFrameSize() / 2
-	planLeft := contentLeft + m.conversationPanelWidth() + 1
-	contentTop := panelStyle.GetVerticalFrameSize()/2 + lipgloss.Height(m.renderStatusBar()) + 1
-	if m.mouseOverPlan(planLeft, contentTop) {
-		t.Fatalf("did not expect plan panel hit when disabled")
+	if m.chatItems[1].Kind != "tool" || !strings.Contains(m.chatItems[1].Title, "Tool Call | list_files") {
+		t.Fatalf("expected tool call entry, got %+v", m.chatItems[1])
 	}
 }
 
@@ -1608,20 +1460,6 @@ func TestToolStartWithGenericToolIntentDoesNotShowThinkingCard(t *testing.T) {
 	}
 	if m.chatItems[1].Kind != "tool" || !strings.Contains(m.chatItems[1].Title, "Tool Call | list_files") {
 		t.Fatalf("expected tool call entry after removing placeholder, got %+v", m.chatItems[1])
-	}
-}
-
-func TestRenderBytemindRunCardSkipsGenericToolIntentThinking(t *testing.T) {
-	card := renderBytemindRunCard([]chatEntry{
-		{Kind: "assistant", Title: thinkingLabel, Body: "I will call read_file to inspect the relevant context first.", Status: "thinking"},
-		{Kind: "tool", Title: "Tool Call | read_file", Body: `params: {"path":"config.json"}`, Status: "running"},
-	}, 100)
-
-	if strings.Contains(card, "I will call read_file to inspect the relevant context first.") {
-		t.Fatalf("expected generic tool-intent thinking to be hidden, got %q", card)
-	}
-	if !strings.Contains(card, "Tool Call | read_file") {
-		t.Fatalf("expected tool call section to remain visible, got %q", card)
 	}
 }
 
@@ -1936,7 +1774,7 @@ func TestFormatChatBodySeparatesParagraphAndList(t *testing.T) {
 	}
 
 	got := formatChatBody(item, 80)
-	if !strings.Contains(got, "Explanation\n\n• first") {
+	if !strings.Contains(got, "Explanation\n\n- first") {
 		t.Fatalf("expected list to be separated from paragraph, got %q", got)
 	}
 }
@@ -1968,41 +1806,6 @@ func TestFormatChatBodyRendersCodeBlockWithoutFences(t *testing.T) {
 	}
 	if !strings.Contains(got, "fmt.Println(\"hi\")") {
 		t.Fatalf("expected code contents to remain, got %q", got)
-	}
-}
-
-func TestFormatChatBodyPreservesMarkdownWhenRequested(t *testing.T) {
-	item := chatEntry{
-		Kind:           "assistant",
-		Body:           "## 标题\n- **问题**：内容",
-		PreserveFormat: true,
-		Status:         "final",
-	}
-
-	got := formatChatBody(item, 80)
-	for _, want := range []string{"## 标题", "- **问题**：内容"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("expected requested format to be preserved for %q, got %q", want, got)
-		}
-	}
-}
-
-func TestShouldPreserveRequestedFormat(t *testing.T) {
-	cases := []struct {
-		input string
-		want  bool
-	}{
-		{input: "请用 markdown 输出", want: true},
-		{input: "返回 json 格式", want: true},
-		{input: "请用表格展示", want: true},
-		{input: "不要 markdown，纯文本即可", want: false},
-		{input: "总结一下项目结构", want: false},
-	}
-	for _, tc := range cases {
-		got := shouldPreserveRequestedFormat(tc.input)
-		if got != tc.want {
-			t.Fatalf("shouldPreserveRequestedFormat(%q)=%v, want %v", tc.input, got, tc.want)
-		}
 	}
 }
 

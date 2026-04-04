@@ -115,3 +115,7 @@ Anthropic 示例：
 - `internal/agent/prompts/system.md`
 
 运行时由 `internal/agent/prompt.go` 通过 `go:embed` 内嵌 Markdown 文档，并替换 `{{WORKSPACE}}`、`{{APPROVAL_POLICY}}` 占位符，因此修改提示词时不需要再直接编辑 Go 字符串常量。
+
+## 开源
+
+本项目采用MIT开源协议。

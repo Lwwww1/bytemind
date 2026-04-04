@@ -92,10 +92,11 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 		}
 	}
 
-	sess.Messages = append(sess.Messages, llm.Message{
-		Role:    "user",
-		Content: userInput,
-	})
+	userMessage := llm.NewUserTextMessage(userInput)
+	if err := llm.ValidateMessage(userMessage); err != nil {
+		return "", err
+	}
+	sess.Messages = append(sess.Messages, userMessage)
 	if err := r.store.Save(sess); err != nil {
 		return "", err
 	}
@@ -113,29 +114,41 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 
 	for step := 0; step < r.config.MaxIterations; step++ {
 		messages := make([]llm.Message, 0, len(sess.Messages)+1)
-		messages = append(messages, llm.Message{
-			Role: "system",
-			Content: systemPrompt(PromptInput{
-				Workspace:      r.workspace,
-				ApprovalPolicy: r.config.ApprovalPolicy,
-				Model:          r.config.Provider.Model,
-				Mode:           mode,
-				Tools:          availableTools,
-				Instruction:    instructionText,
-			}),
-		})
+		systemMessage := llm.NewTextMessage(llm.RoleSystem, systemPrompt(PromptInput{
+			Workspace:      r.workspace,
+			ApprovalPolicy: r.config.ApprovalPolicy,
+			Model:          r.config.Provider.Model,
+			Mode:           mode,
+			Tools:          availableTools,
+			Instruction:    instructionText,
+		}))
+		if err := llm.ValidateMessage(systemMessage); err != nil {
+			return "", err
+		}
+		messages = append(messages, systemMessage)
 		messages = append(messages, sess.Messages...)
+
+		caps := llm.DefaultModelCapabilities.Resolve(r.config.Provider.Model)
+		requestMessages := llm.ApplyCapabilities(messages, caps)
+		requestTools := r.registry.DefinitionsForMode(runMode)
+		if !caps.SupportsToolUse {
+			requestTools = nil
+		}
 
 		request := llm.ChatRequest{
 			Model:       r.config.Provider.Model,
-			Messages:    messages,
-			Tools:       r.registry.DefinitionsForMode(runMode),
+			Messages:    requestMessages,
+			Tools:       requestTools,
 			Temperature: 0.2,
 		}
 
 		streamedText := false
 		reply, err := r.completeTurn(ctx, request, out, &streamedText)
 		if err != nil {
+			return "", err
+		}
+		reply.Normalize()
+		if err := llm.ValidateMessage(reply); err != nil {
 			return "", err
 		}
 
@@ -148,7 +161,7 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				} else {
 					answer = reminder
 				}
-				reply.Content = answer
+				reply = llm.NewAssistantTextMessage(answer)
 			}
 			sess.Messages = append(sess.Messages, reply)
 			if err := r.store.Save(sess); err != nil {
@@ -242,11 +255,11 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				Error:      errText,
 			})
 
-			sess.Messages = append(sess.Messages, llm.Message{
-				Role:       "tool",
-				ToolCallID: call.ID,
-				Content:    result,
-			})
+			toolMessage := llm.NewToolResultMessage(call.ID, result)
+			if err := llm.ValidateMessage(toolMessage); err != nil {
+				return "", err
+			}
+			sess.Messages = append(sess.Messages, toolMessage)
 			if err := r.store.Save(sess); err != nil {
 				return "", err
 			}
@@ -401,10 +414,11 @@ func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 }
 
 func (r *Runner) finishWithSummary(sess *session.Session, summary string, out io.Writer, streamedText bool) (string, error) {
-	sess.Messages = append(sess.Messages, llm.Message{
-		Role:    "assistant",
-		Content: summary,
-	})
+	summaryMessage := llm.NewAssistantTextMessage(summary)
+	if err := llm.ValidateMessage(summaryMessage); err != nil {
+		return "", err
+	}
+	sess.Messages = append(sess.Messages, summaryMessage)
 	if err := r.store.Save(sess); err != nil {
 		return "", err
 	}

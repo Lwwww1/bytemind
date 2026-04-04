@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -89,8 +90,12 @@ func TestOpenAICompatibleCreateMessageReturnsProviderError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected provider error")
 	}
-	if !strings.Contains(err.Error(), "provider error 429") {
-		t.Fatalf("unexpected error: %v", err)
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("expected provider error type, got %T", err)
+	}
+	if providerErr.Code != llm.ErrorCodeRateLimited || providerErr.Status != http.StatusTooManyRequests {
+		t.Fatalf("unexpected provider error: %#v", providerErr)
 	}
 }
 
@@ -155,7 +160,7 @@ func TestOpenAICompatibleStreamMessageRejectsInvalidChunk(t *testing.T) {
 
 func TestOpenAICompatibleChatPayloadUsesFallbackModelAndTools(t *testing.T) {
 	client := NewOpenAICompatible(Config{BaseURL: "https://example.com", APIKey: "test-key", Model: "fallback-model"})
-	payload := client.chatPayload(llm.ChatRequest{
+	payload, err := client.chatPayload(llm.ChatRequest{
 		Messages: []llm.Message{{Role: "user", Content: "hello"}},
 		Tools: []llm.ToolDefinition{{
 			Type: "function",
@@ -165,6 +170,9 @@ func TestOpenAICompatibleChatPayloadUsesFallbackModelAndTools(t *testing.T) {
 		}},
 		Temperature: 0.4,
 	}, true)
+	if err != nil {
+		t.Fatalf("chat payload: %v", err)
+	}
 
 	if got := payload["model"]; got != "fallback-model" {
 		t.Fatalf("expected fallback model, got %#v", got)
@@ -176,4 +184,3 @@ func TestOpenAICompatibleChatPayloadUsesFallbackModelAndTools(t *testing.T) {
 		t.Fatalf("expected tool_choice auto, got %#v", got)
 	}
 }
-

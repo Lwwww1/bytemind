@@ -8,6 +8,7 @@ import (
 
 	"bytemind/internal/agent"
 	"bytemind/internal/config"
+	"bytemind/internal/mention"
 	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 	"bytemind/internal/tools"
@@ -360,6 +361,14 @@ func TestContinueExecutionInputPreparesPlanAndSubmitsPrompt(t *testing.T) {
 	}
 	if updated.plan.Steps[0].Status != planpkg.StepInProgress {
 		t.Fatalf("expected first pending step to become in progress, got %q", updated.plan.Steps[0].Status)
+	}
+}
+
+func TestIsContinueExecutionInputSupportsPlanAlias(t *testing.T) {
+	for _, input := range []string{"continue plan", "继续做"} {
+		if !isContinueExecutionInput(input) {
+			t.Fatalf("expected %q to be treated as continue input", input)
+		}
 	}
 }
 
@@ -966,12 +975,9 @@ func TestAtOpensMentionPaletteWithPrefilledToken(t *testing.T) {
 	m := model{
 		screen: screenChat,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "internal/tui/model.go", BaseName: "model.go"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "internal/tui/model.go", BaseName: "model.go"},
+		}, 0, false),
 	}
 
 	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("@")})
@@ -993,13 +999,10 @@ func TestMentionPaletteFiltersAsUserTypes(t *testing.T) {
 	input.SetValue("@mod")
 	m := model{
 		input: input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "internal/tui/model.go", BaseName: "model.go"},
-				{Path: "README.md", BaseName: "README.md"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "internal/tui/model.go", BaseName: "model.go"},
+			{Path: "README.md", BaseName: "README.md"},
+		}, 0, false),
 	}
 
 	m.syncInputOverlays()
@@ -1018,13 +1021,10 @@ func TestMentionPaletteEnterInsertsMentionInsteadOfSubmitting(t *testing.T) {
 	m := model{
 		screen: screenLanding,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "internal/tui/model.go", BaseName: "model.go"},
-				{Path: "README.md", BaseName: "README.md"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "internal/tui/model.go", BaseName: "model.go"},
+			{Path: "README.md", BaseName: "README.md"},
+		}, 0, false),
 	}
 	m.syncInputOverlays()
 
@@ -1054,12 +1054,9 @@ func TestMentionPaletteEscClosesWithoutResettingInput(t *testing.T) {
 	m := model{
 		screen: screenChat,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "internal/tui/model.go", BaseName: "model.go"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "internal/tui/model.go", BaseName: "model.go"},
+		}, 0, false),
 	}
 	m.syncInputOverlays()
 
@@ -1080,12 +1077,9 @@ func TestMentionPaletteEnterWithoutCandidatesFallsBackToSubmit(t *testing.T) {
 	m := model{
 		screen: screenLanding,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "README.md", BaseName: "README.md"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "README.md", BaseName: "README.md"},
+		}, 0, false),
 	}
 	m.syncInputOverlays()
 	if !m.mentionOpen {
@@ -1116,12 +1110,9 @@ func TestMentionPaletteTabInsertsMentionWithoutTogglingMode(t *testing.T) {
 		screen: screenChat,
 		mode:   modeBuild,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "internal/tui/model.go", BaseName: "model.go", TypeTag: "go"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "internal/tui/model.go", BaseName: "model.go", TypeTag: "go"},
+		}, 0, false),
 	}
 	m.syncInputOverlays()
 	if !m.mentionOpen {
@@ -1145,13 +1136,10 @@ func TestMentionPaletteRecentSelectionRanksFirstOnEmptyQuery(t *testing.T) {
 	m := model{
 		screen: screenChat,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "alpha.go", BaseName: "alpha.go", TypeTag: "go"},
-				{Path: "beta.go", BaseName: "beta.go", TypeTag: "go"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "alpha.go", BaseName: "alpha.go", TypeTag: "go"},
+			{Path: "beta.go", BaseName: "beta.go", TypeTag: "go"},
+		}, 0, false),
 		mentionRecent: map[string]int{"beta.go": 99},
 	}
 	m.syncInputOverlays()
@@ -1167,22 +1155,16 @@ func TestMentionPaletteRecentSelectionRanksFirstOnEmptyQuery(t *testing.T) {
 }
 
 func TestRenderMentionPaletteShowsTruncatedMeta(t *testing.T) {
-	index := newWorkspaceFileIndex("")
-	index.mu.Lock()
-	index.ready = true
-	index.maxFiles = 2
-	index.truncated = true
-	index.files = []mentionCandidate{
+	index := mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
 		{Path: "a.go", BaseName: "a.go", TypeTag: "go"},
 		{Path: "b.go", BaseName: "b.go", TypeTag: "go"},
-	}
-	index.mu.Unlock()
+	}, 2, true)
 
 	m := model{
 		screen:      screenChat,
 		width:       100,
 		mentionOpen: true,
-		mentionResults: []mentionCandidate{
+		mentionResults: []mention.Candidate{
 			{Path: "a.go", BaseName: "a.go", TypeTag: "go"},
 			{Path: "b.go", BaseName: "b.go", TypeTag: "go"},
 		},

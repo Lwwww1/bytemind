@@ -322,7 +322,6 @@ run_shell
 - `provider.anthropic_version`
 - `approval_policy`
 - `max_iterations`
-- `session_dir`
 - `stream`
 
 按当前实现，ByteMind 会从以下位置查找配置：

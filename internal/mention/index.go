@@ -1,4 +1,4 @@
-package tui
+package mention
 
 import (
 	"bufio"
@@ -14,24 +14,26 @@ import (
 	"unicode"
 )
 
+const defaultSearchLimit = 15
+
 var (
 	mentionIndexRefreshInterval = 10 * time.Second
 	mentionIndexDefaultMaxFiles = 6000
 )
 
-type mentionToken struct {
+type Token struct {
 	Query string
 	Start int
 	End   int
 }
 
-type mentionCandidate struct {
+type Candidate struct {
 	Path     string
 	BaseName string
 	TypeTag  string
 }
 
-type mentionIndexStats struct {
+type IndexStats struct {
 	Count     int
 	MaxFiles  int
 	Truncated bool
@@ -43,34 +45,65 @@ type mentionIgnoreMatcher struct {
 	globs []string
 }
 
-type workspaceFileIndex struct {
+type WorkspaceFileIndex struct {
 	mu        sync.RWMutex
 	root      string
 	ready     bool
 	building  bool
 	lastBuild time.Time
-	files     []mentionCandidate
+	files     []Candidate
 	truncated bool
 	maxFiles  int
 }
 
-func newWorkspaceFileIndex(workspace string) *workspaceFileIndex {
-	return &workspaceFileIndex{
+func NewWorkspaceFileIndex(workspace string) *WorkspaceFileIndex {
+	return &WorkspaceFileIndex{
 		root:     strings.TrimSpace(workspace),
 		maxFiles: mentionMaxFilesFromEnv(),
 	}
 }
 
-func (idx *workspaceFileIndex) Search(query string, limit int) []mentionCandidate {
+func NewStaticWorkspaceFileIndex(candidates []Candidate, maxFiles int, truncated bool) *WorkspaceFileIndex {
+	defaultMax := maxFiles <= 0
+	copied := make([]Candidate, 0, len(candidates))
+	for _, item := range candidates {
+		candidate := item
+		candidate.Path = filepath.ToSlash(strings.TrimSpace(candidate.Path))
+		if candidate.Path == "" {
+			continue
+		}
+		if strings.TrimSpace(candidate.BaseName) == "" {
+			candidate.BaseName = filepath.Base(candidate.Path)
+		}
+		if strings.TrimSpace(candidate.TypeTag) == "" {
+			candidate.TypeTag = mentionTypeTag(candidate.Path)
+		}
+		copied = append(copied, candidate)
+	}
+	if defaultMax {
+		maxFiles = len(copied)
+	}
+	sort.Slice(copied, func(i, j int) bool {
+		return copied[i].Path < copied[j].Path
+	})
+	return &WorkspaceFileIndex{
+		ready:     true,
+		files:     copied,
+		truncated: truncated,
+		maxFiles:  maxFiles,
+	}
+}
+
+func (idx *WorkspaceFileIndex) Search(query string, limit int) []Candidate {
 	return idx.SearchWithRecency(query, limit, nil)
 }
 
-func (idx *workspaceFileIndex) SearchWithRecency(query string, limit int, recency map[string]int) []mentionCandidate {
+func (idx *WorkspaceFileIndex) SearchWithRecency(query string, limit int, recency map[string]int) []Candidate {
 	if idx == nil {
 		return nil
 	}
 	if limit <= 0 {
-		limit = mentionPageSize * 3
+		limit = defaultSearchLimit
 	}
 
 	idx.ensureInitialBuild()
@@ -82,13 +115,13 @@ func (idx *workspaceFileIndex) SearchWithRecency(query string, limit int, recenc
 
 	q := strings.ToLower(filepath.ToSlash(strings.TrimSpace(query)))
 	type rankedMention struct {
-		candidate mentionCandidate
+		candidate Candidate
 		score     int
 		recency   int
 	}
 	ranked := make([]rankedMention, 0, len(files))
 	for _, file := range files {
-		score, ok := scoreMentionCandidate(file, q)
+		score, ok := scoreCandidate(file, q)
 		if !ok {
 			continue
 		}
@@ -115,27 +148,27 @@ func (idx *workspaceFileIndex) SearchWithRecency(query string, limit int, recenc
 		ranked = ranked[:limit]
 	}
 
-	out := make([]mentionCandidate, 0, len(ranked))
+	out := make([]Candidate, 0, len(ranked))
 	for _, item := range ranked {
 		out = append(out, item.candidate)
 	}
 	return out
 }
 
-func (idx *workspaceFileIndex) Prewarm() {
+func (idx *WorkspaceFileIndex) Prewarm() {
 	if idx == nil {
 		return
 	}
 	idx.ensureInitialBuild()
 }
 
-func (idx *workspaceFileIndex) Stats() mentionIndexStats {
+func (idx *WorkspaceFileIndex) Stats() IndexStats {
 	if idx == nil {
-		return mentionIndexStats{}
+		return IndexStats{}
 	}
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	return mentionIndexStats{
+	return IndexStats{
 		Count:     len(idx.files),
 		MaxFiles:  idx.maxFiles,
 		Truncated: idx.truncated,
@@ -143,18 +176,18 @@ func (idx *workspaceFileIndex) Stats() mentionIndexStats {
 	}
 }
 
-func (idx *workspaceFileIndex) snapshotFiles() []mentionCandidate {
+func (idx *WorkspaceFileIndex) snapshotFiles() []Candidate {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	if len(idx.files) == 0 {
 		return nil
 	}
-	out := make([]mentionCandidate, len(idx.files))
+	out := make([]Candidate, len(idx.files))
 	copy(out, idx.files)
 	return out
 }
 
-func (idx *workspaceFileIndex) ensureInitialBuild() {
+func (idx *WorkspaceFileIndex) ensureInitialBuild() {
 	if idx == nil {
 		return
 	}
@@ -167,7 +200,7 @@ func (idx *workspaceFileIndex) ensureInitialBuild() {
 	idx.rebuildBlocking()
 }
 
-func (idx *workspaceFileIndex) ensureFreshAsync() {
+func (idx *WorkspaceFileIndex) ensureFreshAsync() {
 	if idx == nil {
 		return
 	}
@@ -186,7 +219,7 @@ func (idx *workspaceFileIndex) ensureFreshAsync() {
 	}
 }
 
-func (idx *workspaceFileIndex) rebuildBlocking() {
+func (idx *WorkspaceFileIndex) rebuildBlocking() {
 	if idx == nil {
 		return
 	}
@@ -212,7 +245,7 @@ func (idx *workspaceFileIndex) rebuildBlocking() {
 	idx.mu.Unlock()
 }
 
-func (idx *workspaceFileIndex) shouldRebuildLocked() bool {
+func (idx *WorkspaceFileIndex) shouldRebuildLocked() bool {
 	if idx == nil {
 		return false
 	}
@@ -225,7 +258,7 @@ func (idx *workspaceFileIndex) shouldRebuildLocked() bool {
 	return time.Since(idx.lastBuild) >= mentionIndexRefreshInterval
 }
 
-func buildMentionIndex(root string, maxFiles int, matcher mentionIgnoreMatcher) ([]mentionCandidate, bool) {
+func buildMentionIndex(root string, maxFiles int, matcher mentionIgnoreMatcher) ([]Candidate, bool) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return nil, false
@@ -234,7 +267,7 @@ func buildMentionIndex(root string, maxFiles int, matcher mentionIgnoreMatcher) 
 		maxFiles = mentionIndexDefaultMaxFiles
 	}
 
-	files := make([]mentionCandidate, 0, min(maxFiles, 512))
+	files := make([]Candidate, 0, minInt(maxFiles, 512))
 	truncated := false
 	_ = filepath.WalkDir(root, func(pathAbs string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -273,7 +306,7 @@ func buildMentionIndex(root string, maxFiles int, matcher mentionIgnoreMatcher) 
 			return nil
 		}
 
-		files = append(files, mentionCandidate{
+		files = append(files, Candidate{
 			Path:     rel,
 			BaseName: filepath.Base(rel),
 			TypeTag:  mentionTypeTag(rel),
@@ -291,7 +324,7 @@ func buildMentionIndex(root string, maxFiles int, matcher mentionIgnoreMatcher) 
 	return files, truncated
 }
 
-func scoreMentionCandidate(file mentionCandidate, query string) (int, bool) {
+func scoreCandidate(file Candidate, query string) (int, bool) {
 	path := strings.ToLower(file.Path)
 	base := strings.ToLower(file.BaseName)
 	switch {
@@ -431,10 +464,10 @@ func mentionMaxFilesFromEnv() int {
 	return n
 }
 
-func findActiveMentionToken(input string) (mentionToken, bool) {
+func FindActiveToken(input string) (Token, bool) {
 	runes := []rune(input)
 	if len(runes) == 0 || unicode.IsSpace(runes[len(runes)-1]) {
-		return mentionToken{}, false
+		return Token{}, false
 	}
 
 	start := len(runes) - 1
@@ -444,16 +477,16 @@ func findActiveMentionToken(input string) (mentionToken, bool) {
 	tokenStart := start + 1
 	token := runes[tokenStart:]
 	if len(token) == 0 || token[0] != '@' {
-		return mentionToken{}, false
+		return Token{}, false
 	}
-	return mentionToken{
+	return Token{
 		Query: string(token[1:]),
 		Start: tokenStart,
 		End:   len(runes),
 	}, true
 }
 
-func insertMentionIntoInput(input string, token mentionToken, path string) string {
+func InsertIntoInput(input string, token Token, path string) string {
 	runes := []rune(input)
 	if token.Start < 0 || token.End < token.Start || token.End > len(runes) {
 		return input
@@ -494,4 +527,11 @@ func mentionTypeTag(path string) string {
 		}
 		return "file"
 	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

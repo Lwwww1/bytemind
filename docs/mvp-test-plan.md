@@ -74,7 +74,7 @@
 | T3 | `run` 接受合法 prompt | 自动化 | 已完成 | 已覆盖 `-prompt` 和尾部 prompt 文本。 |
 | T4 | `run` 拒绝缺失 prompt | 自动化 | 已完成 | 已补测试。 |
 | T5 | Bootstrap 校验 config 和 flags | 自动化 | 已完成 | 已覆盖缺 API key、非法 `-stream`、负数 `-max-iterations`、显式坏 config 路径等。 |
-| T6 | Config 加载优先级与规范化 | 自动化 | 已完成 | 已覆盖 env override、workspace config、非法 provider、非法 `approval_policy`、相对 `session_dir`、配置损坏等场景。 |
+| T6 | Config 加载优先级与规范化 | 自动化 | 已完成 | 已覆盖 env override、workspace config、非法 provider、非法 `approval_policy`、配置损坏等场景。 |
 | T7 | Provider 工厂构造正确 client | 自动化 | 已完成 | `internal/provider/factory_test.go` 已新增。 |
 | T8 | Session 持久化和列表 | 自动化 | 已完成 | `internal/session/store_test.go` 已覆盖，并补了 UTF-8 截断保护。 |
 | T9 | 同 workspace 恢复规则 | 自动化 | 已完成 | 成功恢复与跨 workspace 拒绝均已覆盖。 |

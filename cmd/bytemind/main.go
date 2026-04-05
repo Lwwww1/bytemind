@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -121,11 +120,11 @@ func bootstrap(configPath, modelOverride, sessionID, streamOverride, workspaceOv
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if home, err := config.ResolveHomeDir(); err == nil && pathWithinDir(cfg.SessionDir, home) {
-		if _, err := config.EnsureHomeLayout(); err != nil {
-			return nil, nil, nil, err
-		}
+	home, err := config.EnsureHomeLayout()
+	if err != nil {
+		return nil, nil, nil, err
 	}
+	sessionDir := filepath.Join(home, "sessions")
 	if modelOverride != "" {
 		cfg.Provider.Model = modelOverride
 	}
@@ -148,7 +147,7 @@ func bootstrap(configPath, modelOverride, sessionID, streamOverride, workspaceOv
 		return nil, nil, nil, errors.New("missing API key; configure provider.api_key in the config file")
 	}
 
-	store, err := session.NewStore(cfg.SessionDir)
+	store, err := session.NewStore(sessionDir)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -407,25 +406,4 @@ func resolveWorkspace(workspaceOverride string) (string, error) {
 		return os.Getwd()
 	}
 	return filepath.Abs(workspaceOverride)
-}
-
-func pathWithinDir(path, dir string) bool {
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		absPath = path
-	}
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		absDir = dir
-	}
-	absPath = filepath.Clean(absPath)
-	absDir = filepath.Clean(absDir)
-	if runtime.GOOS == "windows" {
-		absPath = strings.ToLower(absPath)
-		absDir = strings.ToLower(absDir)
-	}
-	if absPath == absDir {
-		return true
-	}
-	return strings.HasPrefix(absPath, absDir+string(os.PathSeparator))
 }

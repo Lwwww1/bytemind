@@ -72,7 +72,6 @@ Copy-Item config.example.json config.json
   },
   "approval_policy": "on-request",
   "max_iterations": 32,
-  "session_dir": ".bytemind/sessions",
   "stream": true
 }
 ```

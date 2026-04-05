@@ -18,7 +18,6 @@ type Config struct {
 	Provider       ProviderConfig `json:"provider"`
 	ApprovalPolicy string         `json:"approval_policy"`
 	MaxIterations  int            `json:"max_iterations"`
-	SessionDir     string         `json:"session_dir"`
 	Stream         bool           `json:"stream"`
 	TokenQuota     int            `json:"token_quota"`
 }
@@ -38,11 +37,6 @@ type ProviderConfig struct {
 }
 
 func Default(workspace string) Config {
-	sessionDir := filepath.Join(workspace, ".bytemind", "sessions")
-	if home, err := ResolveHomeDir(); err == nil {
-		sessionDir = filepath.Join(home, "sessions")
-	}
-
 	return Config{
 		Provider: ProviderConfig{
 			Type:      "openai-compatible",
@@ -52,7 +46,6 @@ func Default(workspace string) Config {
 		},
 		ApprovalPolicy: "on-request",
 		MaxIterations:  32,
-		SessionDir:     sessionDir,
 		Stream:         true,
 		TokenQuota:     5000,
 	}
@@ -86,7 +79,7 @@ func Load(workspace, configPath string) (Config, error) {
 	}
 
 	applyEnv(&cfg)
-	if err := normalize(workspace, &cfg); err != nil {
+	if err := normalize(&cfg); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
@@ -160,7 +153,6 @@ func ensureDefaultConfigFile(home string) error {
 		},
 		ApprovalPolicy: "on-request",
 		MaxIterations:  32,
-		SessionDir:     filepath.Join(home, "sessions"),
 		Stream:         true,
 		TokenQuota:     5000,
 	}
@@ -253,9 +245,6 @@ func applyEnv(cfg *Config) {
 			cfg.Stream = parsed
 		}
 	}
-	if value := strings.TrimSpace(os.Getenv("BYTEMIND_SESSION_DIR")); value != "" {
-		cfg.SessionDir = value
-	}
 	if value := strings.TrimSpace(os.Getenv("BYTEMIND_TOKEN_QUOTA")); value != "" {
 		if parsed, err := strconv.Atoi(value); err == nil {
 			cfg.TokenQuota = parsed
@@ -263,7 +252,7 @@ func applyEnv(cfg *Config) {
 	}
 }
 
-func normalize(workspace string, cfg *Config) error {
+func normalize(cfg *Config) error {
 	cfg.Provider.Type = normalizeProviderType(cfg.Provider.Type)
 	if cfg.Provider.Type == "" {
 		if cfg.Provider.AutoDetectType {
@@ -321,17 +310,6 @@ func normalize(workspace string, cfg *Config) error {
 	default:
 		return errors.New("approval_policy must be one of always, on-request, never")
 	}
-	if cfg.SessionDir == "" {
-		if home, err := ResolveHomeDir(); err == nil {
-			cfg.SessionDir = filepath.Join(home, "sessions")
-		} else {
-			cfg.SessionDir = filepath.Join(workspace, ".bytemind", "sessions")
-		}
-	}
-	if !filepath.IsAbs(cfg.SessionDir) {
-		cfg.SessionDir = filepath.Join(workspace, cfg.SessionDir)
-	}
-	cfg.SessionDir = filepath.Clean(cfg.SessionDir)
 	if cfg.TokenQuota < 1 {
 		cfg.TokenQuota = 5000
 	}

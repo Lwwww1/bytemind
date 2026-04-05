@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -13,6 +14,7 @@ import (
 	"bytemind/internal/agent"
 	"bytemind/internal/config"
 	"bytemind/internal/llm"
+	"bytemind/internal/mention"
 	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 	"bytemind/internal/tools"
@@ -122,6 +124,8 @@ var commandItems = []commandItem{
 	{Name: "/session", Usage: "/session", Description: "Open the recent session list.", Kind: "command"},
 	{Name: "/new", Usage: "/new", Description: "Start a fresh session in this workspace.", Kind: "command"},
 	{Name: "/quit", Usage: "/quit", Description: "Exit the current TUI window.", Kind: "command"},
+	{Name: "/skills", Usage: "/skills", Description: "List available skills and current active skill.", Kind: "command"},
+	{Name: "/skill clear", Usage: "/skill clear", Description: "Clear active skill for this session.", Kind: "command"},
 }
 
 type model struct {
@@ -161,9 +165,9 @@ type model struct {
 	llmConnected        bool
 	approval            *approvalPrompt
 	mentionQuery        string
-	mentionToken        mentionToken
-	mentionResults      []mentionCandidate
-	mentionIndex        *workspaceFileIndex
+	mentionToken        mention.Token
+	mentionResults      []mention.Candidate
+	mentionIndex        *mention.WorkspaceFileIndex
 	mentionRecent       map[string]int
 	mentionSeq          int
 	lastPasteAt         time.Time
@@ -243,7 +247,7 @@ func newModel(opts Options) model {
 		phase:          "idle",
 		llmConnected:   true,
 		chatAutoFollow: true,
-		mentionIndex:   newWorkspaceFileIndex(opts.Workspace),
+		mentionIndex:   mention.NewWorkspaceFileIndex(opts.Workspace),
 		tokenUsage:     newTokenUsageComponent(),
 		tokenBudget:    max(1, opts.Config.TokenQuota),
 		tokenEstimator: newRealtimeTokenEstimator(opts.Config.Provider.Model),
@@ -760,12 +764,12 @@ func (m model) handleCommandPaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.closeCommandPalette()
 		return m, nil
-	case "up", "k":
+	case "up":
 		if len(items) > 0 {
 			m.commandCursor = max(0, m.commandCursor-1)
 		}
 		return m, nil
-	case "down", "j":
+	case "down":
 		if len(items) > 0 {
 			m.commandCursor = min(len(items)-1, m.commandCursor+1)
 		}
@@ -853,7 +857,7 @@ func (m model) handleMentionPaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.recordRecentMention(selected.Path)
-		nextValue := insertMentionIntoInput(m.input.Value(), m.mentionToken, selected.Path)
+		nextValue := mention.InsertIntoInput(m.input.Value(), m.mentionToken, selected.Path)
 		m.setInputValue(nextValue)
 		m.statusNote = "Inserted mention: " + selected.Path
 		m.closeMentionPalette()
@@ -866,7 +870,7 @@ func (m model) handleMentionPaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.handleKey(msg)
 		}
 		m.recordRecentMention(selected.Path)
-		nextValue := insertMentionIntoInput(m.input.Value(), m.mentionToken, selected.Path)
+		nextValue := mention.InsertIntoInput(m.input.Value(), m.mentionToken, selected.Path)
 		m.setInputValue(nextValue)
 		m.statusNote = "Inserted mention: " + selected.Path
 		m.closeMentionPalette()
@@ -1567,6 +1571,9 @@ func (m model) renderFooter() string {
 	} else if m.commandOpen {
 		parts = append(parts, m.renderCommandPalette())
 	}
+	if banner := m.renderActiveSkillBanner(); banner != "" {
+		parts = append(parts, banner)
+	}
 	parts = append(parts, inputBorder, m.renderFooterInfoLine())
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
@@ -1653,6 +1660,33 @@ func (m model) renderApprovalBanner() string {
 	return approvalBannerStyle.Width(width).Render(strings.Join(lines, "\n"))
 }
 
+func (m model) renderActiveSkillBanner() string {
+	if m.sess == nil || m.sess.ActiveSkill == nil {
+		return ""
+	}
+	name := strings.TrimSpace(m.sess.ActiveSkill.Name)
+	if name == "" {
+		return ""
+	}
+
+	line := "Active skill: " + name
+	if len(m.sess.ActiveSkill.Args) > 0 {
+		keys := make([]string, 0, len(m.sess.ActiveSkill.Args))
+		for key := range m.sess.ActiveSkill.Args {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		pairs := make([]string, 0, len(keys))
+		for _, key := range keys {
+			pairs = append(pairs, fmt.Sprintf("%s=%s", key, m.sess.ActiveSkill.Args[key]))
+		}
+		line += " | args: " + strings.Join(pairs, ", ")
+	}
+
+	width := max(24, m.chatPanelInnerWidth())
+	return activeSkillBannerStyle.Width(width).Render(accentStyle.Render(line))
+}
+
 func (m model) renderStatusBar() string {
 	return m.renderStatusBarWithWidth(max(24, m.chatPanelInnerWidth()))
 }
@@ -1666,6 +1700,7 @@ func (m model) renderStatusBarWithWidth(width int) string {
 		"Mode: " + strings.ToUpper(string(m.mode)),
 		"Phase: " + m.currentPhaseLabel(),
 		"Step: " + stepTitle,
+		"Skill: " + m.currentSkillLabel(),
 	}, "  |  ")
 	right := strings.Join([]string{
 		fmt.Sprintf("%d msgs", len(m.chatItems)),
@@ -1806,10 +1841,14 @@ func (m *model) handleSlashCommand(input string) error {
 		m.sessionsOpen = true
 		m.statusNote = "Opened recent sessions."
 		return nil
+	case "/skills":
+		return m.runSkillsListCommand(input)
+	case "/skill":
+		return m.runSkillCommand(input, fields)
 	case "/new":
 		return m.newSession()
 	default:
-		return fmt.Errorf("unknown command: %s", fields[0])
+		return m.runDirectSkillCommand(input, fields)
 	}
 }
 
@@ -1820,6 +1859,138 @@ func (m model) executeCommand(input string) (tea.Model, tea.Cmd, error) {
 	m.refreshViewport()
 	return m, m.loadSessionsCmd(), nil
 }
+
+func (m *model) runSkillsListCommand(input string) error {
+	if m.runner == nil {
+		return fmt.Errorf("runner is unavailable")
+	}
+	skillsList, diagnostics := m.runner.ListSkills()
+	active, hasActive := m.runner.GetActiveSkill(m.sess)
+
+	lines := make([]string, 0, len(skillsList)+8)
+	if hasActive {
+		lines = append(lines, fmt.Sprintf("Active skill: %s (%s)", active.Name, active.Scope))
+	} else {
+		lines = append(lines, "Active skill: none")
+	}
+	lines = append(lines, "")
+	if len(skillsList) == 0 {
+		lines = append(lines, "No skills discovered.")
+	} else {
+		lines = append(lines, "Available skills:")
+		for _, skill := range skillsList {
+			lines = append(lines, fmt.Sprintf("- %s (%s): %s", skill.Name, skill.Scope, skill.Description))
+		}
+	}
+	if len(diagnostics) > 0 {
+		lines = append(lines, "", "Diagnostics:")
+		for _, diag := range diagnostics {
+			lines = append(lines, fmt.Sprintf("- [%s] %s (%s): %s", diag.Level, diag.Skill, diag.Path, diag.Message))
+		}
+	}
+
+	m.appendCommandExchange(input, strings.Join(lines, "\n"))
+	m.statusNote = fmt.Sprintf("Discovered %d skill(s).", len(skillsList))
+	return nil
+}
+
+func (m *model) runSkillCommand(input string, fields []string) error {
+	if m.runner == nil {
+		return fmt.Errorf("runner is unavailable")
+	}
+	if len(fields) != 2 || fields[1] != "clear" {
+		return fmt.Errorf("usage: /skill clear")
+	}
+
+	if err := m.runner.ClearActiveSkill(m.sess); err != nil {
+		return err
+	}
+	m.appendCommandExchange(input, "Active skill cleared.")
+	m.statusNote = "Skill cleared."
+	return nil
+}
+
+func (m *model) runDirectSkillCommand(input string, fields []string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	name := strings.TrimSpace(fields[0])
+	if !strings.HasPrefix(name, "/") || !m.isKnownSkillCommand(name) {
+		return fmt.Errorf("unknown command: %s", fields[0])
+	}
+	args, err := parseSkillArgs(fields[1:])
+	if err != nil {
+		return err
+	}
+	return m.activateSkillCommand(input, name, args)
+}
+
+func (m *model) activateSkillCommand(input, name string, args map[string]string) error {
+	if m.runner == nil {
+		return fmt.Errorf("runner is unavailable")
+	}
+	skill, err := m.runner.ActivateSkill(m.sess, name, args)
+	if err != nil {
+		return err
+	}
+	response := fmt.Sprintf("Activated skill `%s` (%s).\nTool policy: %s\nEntry: %s", skill.Name, skill.Scope, skill.ToolPolicy.Policy, skill.Entry.Slash)
+	if len(args) > 0 {
+		argParts := make([]string, 0, len(args))
+		keys := make([]string, 0, len(args))
+		for key := range args {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			argParts = append(argParts, fmt.Sprintf("%s=%s", key, args[key]))
+		}
+		response += "\nArgs: " + strings.Join(argParts, ", ")
+	}
+	m.appendCommandExchange(input, response)
+	m.statusNote = "Skill activated."
+	return nil
+}
+
+func parseSkillArgs(parts []string) (map[string]string, error) {
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	args := make(map[string]string, len(parts))
+	for _, part := range parts {
+		pieces := strings.SplitN(part, "=", 2)
+		if len(pieces) != 2 {
+			return nil, fmt.Errorf("invalid skill arg %q, expected k=v", part)
+		}
+		key := strings.TrimSpace(pieces[0])
+		value := strings.TrimSpace(pieces[1])
+		if key == "" || value == "" {
+			return nil, fmt.Errorf("invalid skill arg %q, expected k=v", part)
+		}
+		args[key] = value
+	}
+	if len(args) == 0 {
+		return nil, nil
+	}
+	return args, nil
+}
+
+func (m *model) appendCommandExchange(command, response string) {
+	m.screen = screenChat
+	m.appendChat(chatEntry{
+		Kind:   "user",
+		Title:  "You",
+		Meta:   formatUserMeta(m.currentModelLabel(), time.Now()),
+		Body:   command,
+		Status: "final",
+	})
+	m.appendChat(chatEntry{
+		Kind:   "assistant",
+		Title:  assistantLabel,
+		Body:   response,
+		Status: "final",
+	})
+}
+
 func (m *model) newSession() error {
 	next := session.New(m.workspace)
 	if err := m.store.Save(next); err != nil {
@@ -1969,15 +2140,40 @@ func rebuildSessionTimeline(sess *session.Session) ([]chatEntry, []toolRun) {
 	callNames := map[string]string{}
 
 	for _, message := range sess.Messages {
+		message.Normalize()
 		switch message.Role {
 		case "user":
-			items = append(items, chatEntry{Kind: "user", Title: "You", Body: message.Content, Status: "final"})
+			userTextParts := make([]string, 0, len(message.Parts))
+			for _, part := range message.Parts {
+				if part.Text != nil {
+					userTextParts = append(userTextParts, part.Text.Value)
+				}
+				if part.ToolResult == nil {
+					continue
+				}
+				name := callNames[part.ToolResult.ToolUseID]
+				if name == "" {
+					name = "tool"
+				}
+				summary, lines, status := summarizeTool(name, part.ToolResult.Content)
+				items = append(items, chatEntry{
+					Kind:   "tool",
+					Title:  "Tool | " + name,
+					Body:   joinSummary(summary, lines),
+					Status: status,
+				})
+				runs = append(runs, toolRun{Name: name, Summary: summary, Lines: lines, Status: status})
+			}
+			userText := strings.Join(userTextParts, "")
+			if strings.TrimSpace(userText) != "" {
+				items = append(items, chatEntry{Kind: "user", Title: "You", Body: userText, Status: "final"})
+			}
 		case "assistant":
 			for _, call := range message.ToolCalls {
 				callNames[call.ID] = call.Function.Name
 			}
-			if strings.TrimSpace(message.Content) != "" {
-				items = append(items, chatEntry{Kind: "assistant", Title: assistantLabel, Body: message.Content, Status: "final"})
+			if strings.TrimSpace(message.Text()) != "" {
+				items = append(items, chatEntry{Kind: "assistant", Title: assistantLabel, Body: message.Text(), Status: "final"})
 			}
 		case "tool":
 			name := callNames[message.ToolCallID]
@@ -2575,6 +2771,47 @@ func summarizeTool(name, payload string) (string, []string, string) {
 			}
 			return fmt.Sprintf("Found %d match(es) for %q", len(result.Matches), result.Query), lines, "done"
 		}
+	case "web_search":
+		var result struct {
+			Query   string `json:"query"`
+			Results []struct {
+				Title string `json:"title"`
+				URL   string `json:"url"`
+			} `json:"results"`
+		}
+		if json.Unmarshal([]byte(payload), &result) == nil {
+			lines := make([]string, 0, min(3, len(result.Results)))
+			for i := 0; i < min(3, len(result.Results)); i++ {
+				item := result.Results[i]
+				title := compact(item.Title, 56)
+				if strings.TrimSpace(title) == "" {
+					title = item.URL
+				}
+				lines = append(lines, title+" - "+item.URL)
+			}
+			return fmt.Sprintf("Searched web for %q (%d result(s))", result.Query, len(result.Results)), lines, "done"
+		}
+	case "web_fetch":
+		var result struct {
+			URL        string `json:"url"`
+			StatusCode int    `json:"status_code"`
+			Title      string `json:"title"`
+			Content    string `json:"content"`
+			Truncated  bool   `json:"truncated"`
+		}
+		if json.Unmarshal([]byte(payload), &result) == nil {
+			lines := make([]string, 0, 2)
+			if strings.TrimSpace(result.Title) != "" {
+				lines = append(lines, "title: "+compact(result.Title, 72))
+			}
+			if strings.TrimSpace(result.Content) != "" {
+				lines = append(lines, "preview: "+compact(result.Content, 72))
+			}
+			if result.Truncated {
+				lines = append(lines, "content truncated")
+			}
+			return fmt.Sprintf("Fetched %s (HTTP %d)", result.URL, result.StatusCode), lines, "done"
+		}
 	case "write_file":
 		var result struct {
 			Path         string `json:"path"`
@@ -2825,14 +3062,14 @@ func (m *model) syncMentionPalette() {
 		m.closeMentionPalette()
 		return
 	}
-	token, ok := findActiveMentionToken(m.input.Value())
+	token, ok := mention.FindActiveToken(m.input.Value())
 	if !ok {
 		m.closeMentionPalette()
 		return
 	}
 
 	if m.mentionIndex == nil {
-		m.mentionIndex = newWorkspaceFileIndex(m.workspace)
+		m.mentionIndex = mention.NewWorkspaceFileIndex(m.workspace)
 	}
 	results := m.mentionIndex.SearchWithRecency(token.Query, mentionPageSize*3, m.mentionRecent)
 	m.mentionOpen = true
@@ -2853,7 +3090,7 @@ func (m *model) closeMentionPalette() {
 	m.mentionOpen = false
 	m.mentionCursor = 0
 	m.mentionQuery = ""
-	m.mentionToken = mentionToken{}
+	m.mentionToken = mention.Token{}
 	m.mentionResults = nil
 }
 
@@ -2879,7 +3116,7 @@ func (m model) hasRecentMention(path string) bool {
 func (m model) filteredCommands() []commandItem {
 	value := strings.TrimSpace(m.input.Value())
 	query := commandFilterQuery(value, "")
-	items := visibleCommandItems("")
+	items := m.commandPaletteItems()
 	if query == "" {
 		return items
 	}
@@ -2891,6 +3128,76 @@ func (m model) filteredCommands() []commandItem {
 		}
 	}
 	return result
+}
+
+func (m model) commandPaletteItems() []commandItem {
+	base := visibleCommandItems("")
+	skillItems := m.skillCommandItems()
+	if len(skillItems) == 0 {
+		return base
+	}
+
+	items := make([]commandItem, 0, len(base)+len(skillItems))
+	seen := make(map[string]struct{}, len(base)+len(skillItems))
+	items = append(items, base...)
+	for _, item := range base {
+		seen[strings.ToLower(strings.TrimSpace(item.Usage))] = struct{}{}
+	}
+	for _, item := range skillItems {
+		key := strings.ToLower(strings.TrimSpace(item.Usage))
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		items = append(items, item)
+	}
+	return items
+}
+
+func (m model) skillCommandItems() []commandItem {
+	if m.runner == nil {
+		return nil
+	}
+	skillsList, _ := m.runner.ListSkills()
+	if len(skillsList) == 0 {
+		return nil
+	}
+
+	items := make([]commandItem, 0, len(skillsList))
+	seen := make(map[string]struct{}, len(skillsList))
+	for _, skill := range skillsList {
+		name := strings.TrimSpace(skill.Entry.Slash)
+		if name == "" {
+			name = "/" + strings.TrimSpace(skill.Name)
+		}
+		if name == "" {
+			continue
+		}
+		if !strings.HasPrefix(name, "/") {
+			name = "/" + name
+		}
+		name = "/" + strings.TrimLeft(strings.TrimSpace(name), "/")
+		key := strings.ToLower(name)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		description := strings.TrimSpace(skill.Description)
+		if description == "" {
+			description = fmt.Sprintf("Activate %s for this session.", skill.Name)
+		}
+		items = append(items, commandItem{
+			Name:        name,
+			Usage:       name,
+			Description: description,
+			Kind:        "skill",
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Usage < items[j].Usage
+	})
+	return items
 }
 
 func (m model) commandPaletteWidth() int {
@@ -2913,15 +3220,15 @@ func (m model) visibleCommandItemsPage() []commandItem {
 	return items[start:end]
 }
 
-func (m model) selectedMentionCandidate() (mentionCandidate, bool) {
+func (m model) selectedMentionCandidate() (mention.Candidate, bool) {
 	if len(m.mentionResults) == 0 {
-		return mentionCandidate{}, false
+		return mention.Candidate{}, false
 	}
 	index := clamp(m.mentionCursor, 0, len(m.mentionResults)-1)
 	return m.mentionResults[index], true
 }
 
-func (m model) visibleMentionItemsPage() []mentionCandidate {
+func (m model) visibleMentionItemsPage() []mention.Candidate {
 	if len(m.mentionResults) == 0 {
 		return nil
 	}
@@ -2937,8 +3244,11 @@ func (m *model) setInputValue(value string) {
 }
 
 func shouldExecuteFromPalette(item commandItem) bool {
+	if item.Kind == "skill" {
+		return true
+	}
 	switch item.Name {
-	case "/help", "/session", "/new", "/quit":
+	case "/help", "/session", "/skills", "/skill clear", "/new", "/quit":
 		return true
 	default:
 		return false
@@ -2955,6 +3265,9 @@ func (m model) helpText() string {
 		"Slash commands",
 		"/help: show this help inside the conversation.",
 		"/session: open recent sessions.",
+		"/skills: list discovered skills and diagnostics.",
+		"/<skill-name> [k=v...]: activate a skill for this session.",
+		"/skill clear: clear the active skill.",
 		"/new: start a fresh session.",
 		"/quit: exit the TUI.",
 		"",
@@ -2981,6 +3294,37 @@ func visibleCommandItems(group string) []commandItem {
 		}
 	}
 	return items
+}
+
+func (m model) isKnownSkillCommand(command string) bool {
+	if m.runner == nil {
+		return false
+	}
+	normalized := normalizeSkillCommand(command)
+	if normalized == "" {
+		return false
+	}
+	skillsList, _ := m.runner.ListSkills()
+	for _, skill := range skillsList {
+		if normalizeSkillCommand(skill.Name) == normalized {
+			return true
+		}
+		if normalizeSkillCommand(skill.Entry.Slash) == normalized {
+			return true
+		}
+		for _, alias := range skill.Aliases {
+			if normalizeSkillCommand(alias) == normalized {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeSkillCommand(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = strings.TrimLeft(name, "/")
+	return strings.TrimSpace(name)
 }
 
 func commandFilterQuery(value, group string) string {
@@ -3165,6 +3509,17 @@ func (m model) currentModelLabel() string {
 		return model
 	}
 	return "-"
+}
+
+func (m model) currentSkillLabel() string {
+	if m.sess == nil || m.sess.ActiveSkill == nil {
+		return "none"
+	}
+	name := strings.TrimSpace(m.sess.ActiveSkill.Name)
+	if name == "" {
+		return "none"
+	}
+	return name
 }
 
 func preparePlanForContinuation(state planpkg.State) (planpkg.State, error) {

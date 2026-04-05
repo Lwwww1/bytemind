@@ -7,15 +7,23 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"bytemind/internal/config"
 	"bytemind/internal/llm"
 	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
+	"bytemind/internal/skills"
 	"bytemind/internal/tools"
 )
 
 const repeatedToolSequenceThreshold = 3
+const (
+	maxActiveSkillDescriptionChars  = 320
+	maxActiveSkillInstructionsChars = 3600
+	emptyAllowlistSentinel          = "__bytemind__no_tools__"
+	emptyReplyFallback              = "Model returned an empty response (no text and no tool calls). Retry the request or switch model if this persists."
+)
 
 const (
 	ansiReset   = "\x1b[0m"
@@ -29,40 +37,47 @@ const (
 )
 
 type Options struct {
-	Workspace string
-	Config    config.Config
-	Client    llm.Client
-	Store     *session.Store
-	Registry  *tools.Registry
-	Observer  Observer
-	Approval  tools.ApprovalHandler
-	Stdin     io.Reader
-	Stdout    io.Writer
+	Workspace    string
+	Config       config.Config
+	Client       llm.Client
+	Store        *session.Store
+	Registry     *tools.Registry
+	SkillManager *skills.Manager
+	Observer     Observer
+	Approval     tools.ApprovalHandler
+	Stdin        io.Reader
+	Stdout       io.Writer
 }
 
 type Runner struct {
-	workspace string
-	config    config.Config
-	client    llm.Client
-	store     *session.Store
-	registry  *tools.Registry
-	observer  Observer
-	approval  tools.ApprovalHandler
-	stdin     io.Reader
-	stdout    io.Writer
+	workspace    string
+	config       config.Config
+	client       llm.Client
+	store        *session.Store
+	registry     *tools.Registry
+	skillManager *skills.Manager
+	observer     Observer
+	approval     tools.ApprovalHandler
+	stdin        io.Reader
+	stdout       io.Writer
 }
 
 func NewRunner(opts Options) *Runner {
+	manager := opts.SkillManager
+	if manager == nil {
+		manager = skills.NewManager(opts.Workspace)
+	}
 	return &Runner{
-		workspace: opts.Workspace,
-		config:    opts.Config,
-		client:    opts.Client,
-		store:     opts.Store,
-		registry:  opts.Registry,
-		observer:  opts.Observer,
-		approval:  opts.Approval,
-		stdin:     opts.Stdin,
-		stdout:    opts.Stdout,
+		workspace:    opts.Workspace,
+		config:       opts.Config,
+		client:       opts.Client,
+		store:        opts.Store,
+		registry:     opts.Registry,
+		skillManager: manager,
+		observer:     opts.Observer,
+		approval:     opts.Approval,
+		stdin:        opts.Stdin,
+		stdout:       opts.Stdout,
 	}
 }
 
@@ -72,6 +87,69 @@ func (r *Runner) SetObserver(observer Observer) {
 
 func (r *Runner) SetApprovalHandler(handler tools.ApprovalHandler) {
 	r.approval = handler
+}
+
+func (r *Runner) ListSkills() ([]skills.Skill, []skills.Diagnostic) {
+	if r.skillManager == nil {
+		return nil, nil
+	}
+	return r.skillManager.List()
+}
+
+func (r *Runner) ActivateSkill(sess *session.Session, name string, args map[string]string) (skills.Skill, error) {
+	if sess == nil {
+		return skills.Skill{}, fmt.Errorf("session is required")
+	}
+	if r.skillManager == nil {
+		return skills.Skill{}, fmt.Errorf("skill manager is unavailable")
+	}
+	skill, ok := r.skillManager.Find(name)
+	if !ok {
+		return skills.Skill{}, fmt.Errorf("skill not found: %s", strings.TrimSpace(name))
+	}
+
+	normalizedArgs := normalizeSkillArgs(args)
+	for _, arg := range skill.Args {
+		if _, exists := normalizedArgs[arg.Name]; !exists && strings.TrimSpace(arg.Default) != "" {
+			normalizedArgs[arg.Name] = strings.TrimSpace(arg.Default)
+		}
+		if arg.Required && strings.TrimSpace(normalizedArgs[arg.Name]) == "" {
+			return skills.Skill{}, fmt.Errorf("missing required skill arg: %s", arg.Name)
+		}
+	}
+	if len(normalizedArgs) == 0 {
+		normalizedArgs = nil
+	}
+
+	sess.ActiveSkill = &session.ActiveSkill{
+		Name:        skill.Name,
+		Args:        normalizedArgs,
+		ActivatedAt: time.Now().UTC(),
+	}
+	if r.store != nil {
+		if err := r.store.Save(sess); err != nil {
+			return skills.Skill{}, err
+		}
+	}
+	return skill, nil
+}
+
+func (r *Runner) ClearActiveSkill(sess *session.Session) error {
+	if sess == nil {
+		return fmt.Errorf("session is required")
+	}
+	sess.ActiveSkill = nil
+	if r.store != nil {
+		return r.store.Save(sess)
+	}
+	return nil
+}
+
+func (r *Runner) GetActiveSkill(sess *session.Session) (skills.Skill, bool) {
+	if sess == nil || sess.ActiveSkill == nil || r.skillManager == nil {
+		return skills.Skill{}, false
+	}
+	return r.skillManager.Find(sess.ActiveSkill.Name)
 }
 
 func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput, mode string, out io.Writer) (string, error) {
@@ -92,10 +170,11 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 		}
 	}
 
-	sess.Messages = append(sess.Messages, llm.Message{
-		Role:    "user",
-		Content: userInput,
-	})
+	userMessage := llm.NewUserTextMessage(userInput)
+	if err := llm.ValidateMessage(userMessage); err != nil {
+		return "", err
+	}
+	sess.Messages = append(sess.Messages, userMessage)
 	if err := r.store.Save(sess); err != nil {
 		return "", err
 	}
@@ -105,31 +184,56 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 		UserInput: userInput,
 	})
 
+	activeSkill := r.resolveActiveSkill(sess)
+	allowedTools, deniedTools := policySets(activeSkill)
+	allowedToolNames := sortedToolNames(allowedTools)
+	deniedToolNames := sortedToolNames(deniedTools)
+
 	lastToolSequenceSignature := ""
 	repeatedToolSequenceCount := 0
 	executedToolNames := make([]string, 0, 16)
+	availableSkills := r.promptSkills()
 	availableTools := toolNames(r.registry.DefinitionsForMode(runMode))
 	instructionText := loadAGENTSInstruction(r.workspace)
+	webLookupInstruction := explicitWebLookupInstruction(userInput)
 
 	for step := 0; step < r.config.MaxIterations; step++ {
-		messages := make([]llm.Message, 0, len(sess.Messages)+1)
-		messages = append(messages, llm.Message{
-			Role: "system",
-			Content: systemPrompt(PromptInput{
-				Workspace:      r.workspace,
-				ApprovalPolicy: r.config.ApprovalPolicy,
-				Model:          r.config.Provider.Model,
-				Mode:           mode,
-				Tools:          availableTools,
-				Instruction:    instructionText,
-			}),
-		})
+		messages := make([]llm.Message, 0, len(sess.Messages)+2)
+		systemMessage := llm.NewTextMessage(llm.RoleSystem, systemPrompt(PromptInput{
+			Workspace:      r.workspace,
+			ApprovalPolicy: r.config.ApprovalPolicy,
+			Model:          r.config.Provider.Model,
+			Mode:           mode,
+			Skills:         availableSkills,
+			Tools:          availableTools,
+			ActiveSkill:    promptActiveSkill(activeSkill),
+			Instruction:    instructionText,
+		}))
+		if err := llm.ValidateMessage(systemMessage); err != nil {
+			return "", err
+		}
+		messages = append(messages, systemMessage)
+		if webLookupInstruction != "" {
+			webLookupMessage := llm.NewTextMessage(llm.RoleSystem, webLookupInstruction)
+			if err := llm.ValidateMessage(webLookupMessage); err != nil {
+				return "", err
+			}
+			messages = append(messages, webLookupMessage)
+		}
 		messages = append(messages, sess.Messages...)
+
+		filteredTools := r.registry.DefinitionsForModeWithFilters(runMode, allowedToolNames, deniedToolNames)
+		caps := llm.DefaultModelCapabilities.Resolve(r.config.Provider.Model)
+		requestMessages := llm.ApplyCapabilities(messages, caps)
+		requestTools := filteredTools
+		if !caps.SupportsToolUse {
+			requestTools = nil
+		}
 
 		request := llm.ChatRequest{
 			Model:       r.config.Provider.Model,
-			Messages:    messages,
-			Tools:       r.registry.DefinitionsForMode(runMode),
+			Messages:    requestMessages,
+			Tools:       requestTools,
 			Temperature: 0.2,
 		}
 
@@ -138,9 +242,14 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 		if err != nil {
 			return "", err
 		}
+		reply.Normalize()
 
 		if len(reply.ToolCalls) == 0 {
 			answer := strings.TrimSpace(reply.Content)
+			if answer == "" {
+				reply.Content = emptyReplyFallback
+				answer = emptyReplyFallback
+			}
 			if runMode == planpkg.ModePlan && !planpkg.HasStructuredPlan(sess.Plan) {
 				reminder := "Plan mode requires a structured plan before finishing. Please restate the plan using update_plan."
 				if answer != "" {
@@ -148,7 +257,10 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				} else {
 					answer = reminder
 				}
-				reply.Content = answer
+				reply = llm.NewAssistantTextMessage(answer)
+			}
+			if err := llm.ValidateMessage(reply); err != nil {
+				return "", err
 			}
 			sess.Messages = append(sess.Messages, reply)
 			if err := r.store.Save(sess); err != nil {
@@ -166,9 +278,6 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 			})
 
 			answer = strings.TrimSpace(reply.Content)
-			if answer == "" {
-				return "", fmt.Errorf("assistant returned neither content nor tool calls")
-			}
 			if out != nil && !streamedText {
 				fmt.Fprintln(out)
 				fmt.Fprintln(out, answer)
@@ -176,6 +285,9 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 			return answer, nil
 		}
 
+		if err := llm.ValidateMessage(reply); err != nil {
+			return "", err
+		}
 		toolSequenceSignature := signatureToolCalls(reply.ToolCalls)
 		if toolSequenceSignature == lastToolSequenceSignature {
 			repeatedToolSequenceCount++
@@ -220,6 +332,8 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				Mode:           runMode,
 				Stdin:          r.stdin,
 				Stdout:         r.stdout,
+				AllowedTools:   allowedTools,
+				DeniedTools:    deniedTools,
 			})
 			if execErr != nil {
 				result = marshalToolResult(map[string]any{
@@ -242,11 +356,11 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 				Error:      errText,
 			})
 
-			sess.Messages = append(sess.Messages, llm.Message{
-				Role:       "tool",
-				ToolCallID: call.ID,
-				Content:    result,
-			})
+			toolMessage := llm.NewToolResultMessage(call.ID, result)
+			if err := llm.ValidateMessage(toolMessage); err != nil {
+				return "", err
+			}
+			sess.Messages = append(sess.Messages, toolMessage)
 			if err := r.store.Save(sess); err != nil {
 				return "", err
 			}
@@ -273,7 +387,7 @@ func (r *Runner) completeTurn(ctx context.Context, request llm.ChatRequest, out 
 		return r.client.CreateMessage(ctx, request)
 	}
 
-	return r.client.StreamMessage(ctx, request, func(delta string) {
+	reply, err := r.client.StreamMessage(ctx, request, func(delta string) {
 		if out == nil || delta == "" {
 			if delta != "" {
 				r.emit(Event{Type: EventAssistantDelta, Content: delta})
@@ -287,6 +401,20 @@ func (r *Runner) completeTurn(ctx context.Context, request llm.ChatRequest, out 
 		fmt.Fprint(out, delta)
 		r.emit(Event{Type: EventAssistantDelta, Content: delta})
 	})
+	if err != nil {
+		return llm.Message{}, err
+	}
+	if strings.TrimSpace(reply.Content) != "" || len(reply.ToolCalls) > 0 {
+		return reply, nil
+	}
+
+	// Some providers/models occasionally return empty streaming payloads while
+	// still producing a valid non-stream completion. Retry once without stream.
+	fallback, fallbackErr := r.client.CreateMessage(ctx, request)
+	if fallbackErr == nil {
+		return fallback, nil
+	}
+	return reply, nil
 }
 
 func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
@@ -342,6 +470,48 @@ func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 			fmt.Fprintf(out, "  %sfound%s %d matches for %q\n", ansiGreen, ansiReset, len(result.Matches), result.Query)
 			for _, match := range previewMatches(result.Matches) {
 				fmt.Fprintf(out, "    %s\n", match)
+			}
+		}
+	case "web_search":
+		var result struct {
+			Query   string `json:"query"`
+			Results []struct {
+				Title string `json:"title"`
+				URL   string `json:"url"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(payload), &result); err == nil {
+			fmt.Fprintf(out, "  %ssearched%s web for %q (%d results)\n", ansiGreen, ansiReset, result.Query, len(result.Results))
+			previewCount := toolPreview
+			if len(result.Results) < previewCount {
+				previewCount = len(result.Results)
+			}
+			for i := 0; i < previewCount; i++ {
+				title := compactWhitespace(result.Results[i].Title, 64)
+				if strings.TrimSpace(title) == "" {
+					title = result.Results[i].URL
+				}
+				fmt.Fprintf(out, "    %s - %s\n", title, result.Results[i].URL)
+			}
+		}
+	case "web_fetch":
+		var result struct {
+			URL        string `json:"url"`
+			StatusCode int    `json:"status_code"`
+			Title      string `json:"title"`
+			Content    string `json:"content"`
+			Truncated  bool   `json:"truncated"`
+		}
+		if err := json.Unmarshal([]byte(payload), &result); err == nil {
+			fmt.Fprintf(out, "  %sfetched%s %s (HTTP %d)\n", ansiGreen, ansiReset, result.URL, result.StatusCode)
+			if strings.TrimSpace(result.Title) != "" {
+				fmt.Fprintf(out, "    title: %s\n", compactWhitespace(result.Title, 80))
+			}
+			if strings.TrimSpace(result.Content) != "" {
+				fmt.Fprintf(out, "    preview: %s\n", compactWhitespace(result.Content, 100))
+			}
+			if result.Truncated {
+				fmt.Fprintf(out, "    %scontent truncated%s\n", ansiDim, ansiReset)
 			}
 		}
 	case "write_file":
@@ -401,10 +571,11 @@ func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 }
 
 func (r *Runner) finishWithSummary(sess *session.Session, summary string, out io.Writer, streamedText bool) (string, error) {
-	sess.Messages = append(sess.Messages, llm.Message{
-		Role:    "assistant",
-		Content: summary,
-	})
+	summaryMessage := llm.NewAssistantTextMessage(summary)
+	if err := llm.ValidateMessage(summaryMessage); err != nil {
+		return "", err
+	}
+	sess.Messages = append(sess.Messages, summaryMessage)
 	if err := r.store.Save(sess); err != nil {
 		return "", err
 	}
@@ -581,11 +752,175 @@ func compactWhitespace(text string, limit int) string {
 	return string(runes[:limit-3]) + "..."
 }
 
+type activeSkillRuntime struct {
+	Skill skills.Skill
+	Args  map[string]string
+}
+
+func (r *Runner) resolveActiveSkill(sess *session.Session) *activeSkillRuntime {
+	if sess == nil || sess.ActiveSkill == nil || r.skillManager == nil {
+		return nil
+	}
+
+	skill, ok := r.skillManager.Find(sess.ActiveSkill.Name)
+	if !ok {
+		sess.ActiveSkill = nil
+		if r.store != nil {
+			_ = r.store.Save(sess)
+		}
+		return nil
+	}
+
+	return &activeSkillRuntime{
+		Skill: skill,
+		Args:  normalizeSkillArgs(sess.ActiveSkill.Args),
+	}
+}
+
+func policySets(active *activeSkillRuntime) (map[string]struct{}, map[string]struct{}) {
+	if active == nil {
+		return nil, nil
+	}
+	items := active.Skill.ToolPolicy.Items
+	switch active.Skill.ToolPolicy.Policy {
+	case skills.ToolPolicyAllowlist:
+		if len(items) == 0 {
+			return map[string]struct{}{emptyAllowlistSentinel: {}}, nil
+		}
+		allow := toToolSet(items)
+		if allow == nil {
+			return map[string]struct{}{emptyAllowlistSentinel: {}}, nil
+		}
+		return allow, nil
+	case skills.ToolPolicyDenylist:
+		return nil, toToolSet(items)
+	default:
+		return nil, nil
+	}
+}
+
+func toToolSet(items []string) map[string]struct{} {
+	if len(items) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		set[item] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+func sortedToolNames(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func promptActiveSkill(active *activeSkillRuntime) *PromptActiveSkill {
+	if active == nil {
+		return nil
+	}
+
+	instruction := strings.TrimSpace(active.Skill.Instruction)
+	if instruction != "" {
+		instruction = trimTextWithEllipsis(instruction, maxActiveSkillInstructionsChars)
+	}
+	description := trimTextWithEllipsis(strings.TrimSpace(active.Skill.Description), maxActiveSkillDescriptionChars)
+	whenToUse := trimTextWithEllipsis(strings.TrimSpace(active.Skill.WhenToUse), maxActiveSkillDescriptionChars)
+
+	return &PromptActiveSkill{
+		Name:         active.Skill.Name,
+		Description:  description,
+		WhenToUse:    whenToUse,
+		Instructions: instruction,
+		Args:         normalizeSkillArgs(active.Args),
+		ToolPolicy:   string(active.Skill.ToolPolicy.Policy),
+		Tools:        append([]string(nil), active.Skill.ToolPolicy.Items...),
+	}
+}
+
+func trimTextWithEllipsis(text string, maxRunes int) string {
+	text = strings.TrimSpace(text)
+	if maxRunes <= 0 || text == "" {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	if maxRunes <= 3 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-3]) + "..."
+}
+
+func normalizeSkillArgs(args map[string]string) map[string]string {
+	if len(args) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(args))
+	for key, value := range args {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		result[key] = value
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func (r *Runner) emit(event Event) {
 	if r.observer == nil {
 		return
 	}
 	r.observer.HandleEvent(event)
+}
+
+func (r *Runner) promptSkills() []PromptSkill {
+	if r.skillManager == nil {
+		return nil
+	}
+	skillList, _ := r.skillManager.List()
+	if len(skillList) == 0 {
+		return nil
+	}
+	out := make([]PromptSkill, 0, len(skillList))
+	for _, skill := range skillList {
+		name := strings.TrimSpace(skill.Name)
+		description := strings.TrimSpace(skill.Description)
+		if name == "" || description == "" {
+			continue
+		}
+		out = append(out, PromptSkill{
+			Name:        name,
+			Description: description,
+			Enabled:     true,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out
 }
 
 func toolNames(definitions []llm.ToolDefinition) []string {
@@ -607,4 +942,30 @@ func toolNames(definitions []llm.ToolDefinition) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func explicitWebLookupInstruction(userInput string) string {
+	text := strings.ToLower(strings.TrimSpace(userInput))
+	if text == "" {
+		return ""
+	}
+
+	webSignals := []string{
+		"github", "gitlab", "bitbucket",
+		"联网", "上网", "互联网", "网上",
+		"源码", "源代码", "repo", "repository",
+		"official website", "官网",
+	}
+	matched := false
+	for _, signal := range webSignals {
+		if strings.Contains(text, signal) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return ""
+	}
+
+	return "The user explicitly requested online or GitHub-source lookup. Use web_search/web_fetch first. Do not substitute local-workspace tools (list_files/read_file/search_text) for this request unless the user explicitly asks to inspect the current workspace repository."
 }

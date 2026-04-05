@@ -248,6 +248,32 @@ func TestBootstrapCreatesSessionInWorkspace(t *testing.T) {
 	}
 }
 
+func TestBootstrapFailsWhenHomeLayoutCannotBeCreated(t *testing.T) {
+	workspace := t.TempDir()
+	t.Chdir(workspace)
+	writeTestConfig(t, workspace, map[string]any{
+		"provider": map[string]any{
+			"type":     "openai-compatible",
+			"base_url": "https://api.openai.com/v1",
+			"model":    "gpt-5.4-mini",
+			"api_key":  "test-key",
+		},
+		"stream": false,
+	})
+
+	blockParent := t.TempDir()
+	blockFile := filepath.Join(blockParent, "not-a-dir")
+	if err := os.WriteFile(blockFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BYTEMIND_HOME", filepath.Join(blockFile, "child"))
+
+	_, _, _, err := bootstrap("", "", "", "", "", 0, strings.NewReader(""), &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected bootstrap to fail when home layout cannot be created")
+	}
+}
+
 func TestRunOneShotRejectsMissingPrompt(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"bytemind/internal/agent"
 	"bytemind/internal/config"
 	"bytemind/internal/llm"
+	"bytemind/internal/mention"
 	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 	"bytemind/internal/tools"
@@ -512,6 +515,14 @@ func TestContinueExecutionInputPreparesPlanAndSubmitsPrompt(t *testing.T) {
 	}
 }
 
+func TestIsContinueExecutionInputSupportsPlanAlias(t *testing.T) {
+	for _, input := range []string{"continue plan", "继续做"} {
+		if !isContinueExecutionInput(input) {
+			t.Fatalf("expected %q to be treated as continue input", input)
+		}
+	}
+}
+
 func TestWindowSizeMsgUpdatesViewportDimensions(t *testing.T) {
 	input := textarea.New()
 	m := model{
@@ -741,6 +752,8 @@ func TestHelpTextOnlyMentionsSupportedEntryPoints(t *testing.T) {
 		"aicoding chat",
 		"aicoding run",
 		"/plan",
+		"/skill use",
+		"/skill show",
 	} {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("help text should not mention %q", unwanted)
@@ -957,6 +970,171 @@ func TestHandleSlashSessionOpensSessionsModal(t *testing.T) {
 	}
 }
 
+func TestHandleSlashSkillsListsDiscoveredSkills(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "internal", "skills", "review"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "internal", "skills", "review", "skill.json"), []byte(`{
+  "name":"review",
+  "description":"review skill"
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	runner := agent.NewRunner(agent.Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider: config.ProviderConfig{Model: "test-model"},
+		},
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+	})
+
+	m := model{
+		runner:    runner,
+		store:     store,
+		sess:      sess,
+		workspace: workspace,
+		screen:    screenChat,
+	}
+	if err := m.handleSlashCommand("/skills"); err != nil {
+		t.Fatalf("expected /skills to succeed, got %v", err)
+	}
+	if len(m.chatItems) < 2 {
+		t.Fatalf("expected /skills command exchange in chat, got %#v", m.chatItems)
+	}
+	if !strings.Contains(m.chatItems[len(m.chatItems)-1].Body, "review") {
+		t.Fatalf("expected skills output to contain review, got %q", m.chatItems[len(m.chatItems)-1].Body)
+	}
+}
+
+func TestHandleSlashSkillActivateAndClear(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "internal", "skills", "bug-investigation"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "internal", "skills", "bug-investigation", "skill.json"), []byte(`{
+  "name":"bug-investigation",
+  "description":"bug skill",
+  "entry":{"slash":"/bug-investigation"},
+  "tools":{"policy":"allowlist","items":["read_file"]}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, "internal", "skills", "review"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "internal", "skills", "review", "skill.json"), []byte(`{
+  "name":"review",
+  "description":"review skill",
+  "tools":{"policy":"allowlist","items":["read_file"]}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	if err := store.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.NewRunner(agent.Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider: config.ProviderConfig{Model: "test-model"},
+		},
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+	})
+
+	m := model{
+		runner:    runner,
+		store:     store,
+		sess:      sess,
+		workspace: workspace,
+		screen:    screenChat,
+	}
+	if err := m.handleSlashCommand("/bug-investigation"); err != nil {
+		t.Fatalf("expected /bug-investigation to succeed, got %v", err)
+	}
+	if m.sess.ActiveSkill == nil || m.sess.ActiveSkill.Name != "bug-investigation" {
+		t.Fatalf("expected bug-investigation active before switch, got %#v", m.sess.ActiveSkill)
+	}
+	if err := m.handleSlashCommand("/review severity=high"); err != nil {
+		t.Fatalf("expected /review to succeed, got %v", err)
+	}
+	if m.sess.ActiveSkill == nil || m.sess.ActiveSkill.Name != "review" {
+		t.Fatalf("expected active skill to be set, got %#v", m.sess.ActiveSkill)
+	}
+	if got := m.sess.ActiveSkill.Args["severity"]; got != "high" {
+		t.Fatalf("expected skill arg severity=high, got %q", got)
+	}
+	if err := m.handleSlashCommand("/skill clear"); err != nil {
+		t.Fatalf("expected /skill clear to succeed, got %v", err)
+	}
+	if m.sess.ActiveSkill != nil {
+		t.Fatalf("expected active skill to be cleared, got %#v", m.sess.ActiveSkill)
+	}
+}
+
+func TestFilteredCommandsIncludeSkillSlashCommands(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "internal", "skills", "review"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "internal", "skills", "review", "skill.json"), []byte(`{
+  "name":"review",
+  "description":"review skill",
+  "entry":{"slash":"/review"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	runner := agent.NewRunner(agent.Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider: config.ProviderConfig{Model: "test-model"},
+		},
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+	})
+
+	input := textarea.New()
+	input.SetValue("/re")
+	m := model{
+		runner:    runner,
+		store:     store,
+		sess:      sess,
+		workspace: workspace,
+		input:     input,
+	}
+
+	items := m.filteredCommands()
+	found := false
+	for _, item := range items {
+		if item.Name == "/review" && item.Kind == "skill" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected /review skill command in filtered commands, got %+v", items)
+	}
+}
+
 func TestCommandPaletteFiltersAsUserTypes(t *testing.T) {
 	input := textarea.New()
 	input.SetValue("/h")
@@ -1115,12 +1293,9 @@ func TestAtOpensMentionPaletteWithPrefilledToken(t *testing.T) {
 	m := model{
 		screen: screenChat,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "internal/tui/model.go", BaseName: "model.go"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "internal/tui/model.go", BaseName: "model.go"},
+		}, 0, false),
 	}
 
 	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("@")})
@@ -1142,13 +1317,10 @@ func TestMentionPaletteFiltersAsUserTypes(t *testing.T) {
 	input.SetValue("@mod")
 	m := model{
 		input: input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "internal/tui/model.go", BaseName: "model.go"},
-				{Path: "README.md", BaseName: "README.md"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "internal/tui/model.go", BaseName: "model.go"},
+			{Path: "README.md", BaseName: "README.md"},
+		}, 0, false),
 	}
 
 	m.syncInputOverlays()
@@ -1167,13 +1339,10 @@ func TestMentionPaletteEnterInsertsMentionInsteadOfSubmitting(t *testing.T) {
 	m := model{
 		screen: screenLanding,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "internal/tui/model.go", BaseName: "model.go"},
-				{Path: "README.md", BaseName: "README.md"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "internal/tui/model.go", BaseName: "model.go"},
+			{Path: "README.md", BaseName: "README.md"},
+		}, 0, false),
 	}
 	m.syncInputOverlays()
 
@@ -1203,12 +1372,9 @@ func TestMentionPaletteEscClosesWithoutResettingInput(t *testing.T) {
 	m := model{
 		screen: screenChat,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "internal/tui/model.go", BaseName: "model.go"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "internal/tui/model.go", BaseName: "model.go"},
+		}, 0, false),
 	}
 	m.syncInputOverlays()
 
@@ -1229,12 +1395,9 @@ func TestMentionPaletteEnterWithoutCandidatesFallsBackToSubmit(t *testing.T) {
 	m := model{
 		screen: screenLanding,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "README.md", BaseName: "README.md"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "README.md", BaseName: "README.md"},
+		}, 0, false),
 	}
 	m.syncInputOverlays()
 	if !m.mentionOpen {
@@ -1265,12 +1428,9 @@ func TestMentionPaletteTabInsertsMentionWithoutTogglingMode(t *testing.T) {
 		screen: screenChat,
 		mode:   modeBuild,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "internal/tui/model.go", BaseName: "model.go", TypeTag: "go"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "internal/tui/model.go", BaseName: "model.go", TypeTag: "go"},
+		}, 0, false),
 	}
 	m.syncInputOverlays()
 	if !m.mentionOpen {
@@ -1294,13 +1454,10 @@ func TestMentionPaletteRecentSelectionRanksFirstOnEmptyQuery(t *testing.T) {
 	m := model{
 		screen: screenChat,
 		input:  input,
-		mentionIndex: &workspaceFileIndex{
-			ready: true,
-			files: []mentionCandidate{
-				{Path: "alpha.go", BaseName: "alpha.go", TypeTag: "go"},
-				{Path: "beta.go", BaseName: "beta.go", TypeTag: "go"},
-			},
-		},
+		mentionIndex: mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
+			{Path: "alpha.go", BaseName: "alpha.go", TypeTag: "go"},
+			{Path: "beta.go", BaseName: "beta.go", TypeTag: "go"},
+		}, 0, false),
 		mentionRecent: map[string]int{"beta.go": 99},
 	}
 	m.syncInputOverlays()
@@ -1316,22 +1473,16 @@ func TestMentionPaletteRecentSelectionRanksFirstOnEmptyQuery(t *testing.T) {
 }
 
 func TestRenderMentionPaletteShowsTruncatedMeta(t *testing.T) {
-	index := newWorkspaceFileIndex("")
-	index.mu.Lock()
-	index.ready = true
-	index.maxFiles = 2
-	index.truncated = true
-	index.files = []mentionCandidate{
+	index := mention.NewStaticWorkspaceFileIndex([]mention.Candidate{
 		{Path: "a.go", BaseName: "a.go", TypeTag: "go"},
 		{Path: "b.go", BaseName: "b.go", TypeTag: "go"},
-	}
-	index.mu.Unlock()
+	}, 2, true)
 
 	m := model{
 		screen:      screenChat,
 		width:       100,
 		mentionOpen: true,
-		mentionResults: []mentionCandidate{
+		mentionResults: []mention.Candidate{
 			{Path: "a.go", BaseName: "a.go", TypeTag: "go"},
 			{Path: "b.go", BaseName: "b.go", TypeTag: "go"},
 		},
@@ -1341,6 +1492,30 @@ func TestRenderMentionPaletteShowsTruncatedMeta(t *testing.T) {
 	view := m.renderMentionPalette()
 	if !strings.Contains(view, "indexed first 2 files") {
 		t.Fatalf("expected mention palette to show truncation hint, got %q", view)
+	}
+}
+
+func TestCommandPaletteAllowsTypingJKWhenOpen(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.SetValue("/")
+	m := model{
+		screen:        screenChat,
+		commandOpen:   true,
+		commandCursor: 1,
+		input:         input,
+	}
+
+	afterK, _ := m.handleCommandPaletteKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	kModel := afterK.(model)
+	if kModel.input.Value() != "/k" {
+		t.Fatalf("expected k to be inserted into slash input, got %q", kModel.input.Value())
+	}
+
+	afterJ, _ := kModel.handleCommandPaletteKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	jModel := afterJ.(model)
+	if jModel.input.Value() != "/kj" {
+		t.Fatalf("expected j to be inserted into slash input, got %q", jModel.input.Value())
 	}
 }
 
@@ -1440,6 +1615,37 @@ func TestRenderConversationIncludesToolEntries(t *testing.T) {
 	}
 	if !strings.Contains(got, "Read internal/tui/model.go lines 1-20") {
 		t.Fatalf("expected conversation to show tool summary, got %q", got)
+	}
+}
+
+func TestRebuildSessionTimelineParsesUserToolResultParts(t *testing.T) {
+	sess := &session.Session{
+		Messages: []llm.Message{
+			llm.NewUserTextMessage("please inspect"),
+			{
+				Role: llm.RoleAssistant,
+				Parts: []llm.Part{{
+					Type: llm.PartToolUse,
+					ToolUse: &llm.ToolUsePart{
+						ID:        "call-1",
+						Name:      "read_file",
+						Arguments: `{"path":"a.txt"}`,
+					},
+				}},
+			},
+			llm.NewToolResultMessage("call-1", `{"path":"a.txt","content":"ok"}`),
+		},
+	}
+
+	items, runs := rebuildSessionTimeline(sess)
+	if len(items) != 2 {
+		t.Fatalf("expected user + tool items, got %#v", items)
+	}
+	if items[1].Kind != "tool" || !strings.Contains(items[1].Title, "Tool | read_file") {
+		t.Fatalf("expected tool item from tool_result part, got %#v", items[1])
+	}
+	if len(runs) != 1 || runs[0].Name != "read_file" {
+		t.Fatalf("expected tool run reconstructed, got %#v", runs)
 	}
 }
 
@@ -1679,6 +1885,28 @@ func TestApprovalBannerRendersAboveInput(t *testing.T) {
 	}
 	if strings.Contains(footer, "Approval Request") {
 		t.Fatalf("did not expect old centered approval modal title in footer")
+	}
+}
+
+func TestRenderFooterShowsActiveSkillBanner(t *testing.T) {
+	input := textarea.New()
+	m := model{
+		width: 120,
+		input: input,
+		sess: &session.Session{
+			ActiveSkill: &session.ActiveSkill{
+				Name: "review",
+				Args: map[string]string{"severity": "high"},
+			},
+		},
+	}
+
+	footer := m.renderFooter()
+	if !strings.Contains(footer, "Active skill: review") {
+		t.Fatalf("expected footer to show active skill banner, got %q", footer)
+	}
+	if !strings.Contains(footer, "severity=high") {
+		t.Fatalf("expected footer to show active skill args, got %q", footer)
 	}
 }
 

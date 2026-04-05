@@ -40,10 +40,6 @@ func TestLoadUsesEnvOverrides(t *testing.T) {
 	if cfg.Provider.ResolveAPIKey() != "secret" {
 		t.Fatalf("expected api key from env")
 	}
-	wantSessionDir := filepath.Join(home, "sessions")
-	if cfg.SessionDir != wantSessionDir {
-		t.Fatalf("unexpected session dir: want %q, got %q", wantSessionDir, cfg.SessionDir)
-	}
 }
 
 func TestResolveConfigPathExplicit(t *testing.T) {
@@ -117,7 +113,7 @@ func TestLoadMergesUserAndProjectConfigWithProjectPrecedence(t *testing.T) {
 	}
 }
 
-func TestLoadNormalizesRelativeSessionDir(t *testing.T) {
+func TestLoadAcceptsLegacySessionDirField(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("BYTEMIND_HOME", t.TempDir())
 	if err := writeConfig(filepath.Join(workspace, "config.json"), map[string]any{
@@ -136,9 +132,8 @@ func TestLoadNormalizesRelativeSessionDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(workspace, "tmp", "sessions")
-	if cfg.SessionDir != want {
-		t.Fatalf("expected normalized session dir %q, got %q", want, cfg.SessionDir)
+	if cfg.Provider.Model != "gpt-5.4-mini" {
+		t.Fatalf("expected provider model to load normally, got %q", cfg.Provider.Model)
 	}
 }
 
@@ -233,8 +228,8 @@ func TestEnsureHomeLayoutCreatesStandardDirectories(t *testing.T) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatalf("expected default config.json to be valid json: %v", err)
 	}
-	if cfg.SessionDir != filepath.Join(home, "sessions") {
-		t.Fatalf("expected default session_dir %q, got %q", filepath.Join(home, "sessions"), cfg.SessionDir)
+	if strings.Contains(string(data), "\"session_dir\"") {
+		t.Fatalf("expected default config.json not to include legacy session_dir")
 	}
 	if strings.TrimSpace(cfg.Provider.Model) == "" {
 		t.Fatalf("expected default provider model to be present")

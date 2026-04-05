@@ -49,6 +49,12 @@ type Options struct {
 	Stdout       io.Writer
 }
 
+type RunPromptInput struct {
+	UserMessage llm.Message
+	Assets      map[llm.AssetID]llm.ImageAsset
+	DisplayText string
+}
+
 type Runner struct {
 	workspace    string
 	config       config.Config
@@ -153,6 +159,23 @@ func (r *Runner) GetActiveSkill(sess *session.Session) (skills.Skill, bool) {
 }
 
 func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput, mode string, out io.Writer) (string, error) {
+	return r.RunPromptWithInput(ctx, sess, RunPromptInput{
+		UserMessage: llm.NewUserTextMessage(userInput),
+		DisplayText: userInput,
+	}, mode, out)
+}
+
+func (r *Runner) RunPromptWithInput(ctx context.Context, sess *session.Session, input RunPromptInput, mode string, out io.Writer) (string, error) {
+	userMessage := input.UserMessage
+	userMessage.Normalize()
+	if userMessage.Role == "" {
+		userMessage = llm.NewUserTextMessage(input.DisplayText)
+	}
+	if strings.TrimSpace(input.DisplayText) == "" {
+		input.DisplayText = userMessage.Text()
+	}
+	userInput := input.DisplayText
+
 	runMode := planpkg.NormalizeMode(mode)
 	if strings.TrimSpace(mode) == "" {
 		runMode = planpkg.NormalizeMode(string(sess.Mode))
@@ -162,15 +185,18 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 		sess.Mode = runMode
 	}
 	if runMode == planpkg.ModePlan {
+		goalText := strings.TrimSpace(userInput)
+		if goalText == "" {
+			goalText = strings.TrimSpace(userMessage.Text())
+		}
 		if strings.TrimSpace(sess.Plan.Goal) == "" {
-			sess.Plan.Goal = strings.TrimSpace(userInput)
+			sess.Plan.Goal = goalText
 		}
 		if sess.Plan.Phase == planpkg.PhaseNone {
 			sess.Plan.Phase = planpkg.PhaseDrafting
 		}
 	}
 
-	userMessage := llm.NewUserTextMessage(userInput)
 	if err := llm.ValidateMessage(userMessage); err != nil {
 		return "", err
 	}
@@ -234,6 +260,7 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 			Model:       r.config.Provider.Model,
 			Messages:    requestMessages,
 			Tools:       requestTools,
+			Assets:      input.Assets,
 			Temperature: 0.2,
 		}
 

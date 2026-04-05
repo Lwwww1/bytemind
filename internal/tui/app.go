@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytemind/internal/agent"
+	"bytemind/internal/assets"
 	"bytemind/internal/config"
 	"bytemind/internal/session"
 
@@ -9,11 +10,12 @@ import (
 )
 
 type Options struct {
-	Runner    *agent.Runner
-	Store     *session.Store
-	Session   *session.Session
-	Config    config.Config
-	Workspace string
+	Runner     *agent.Runner
+	Store      *session.Store
+	Session    *session.Session
+	ImageStore assets.ImageStore
+	Config     config.Config
+	Workspace  string
 }
 
 func Run(opts Options) error {

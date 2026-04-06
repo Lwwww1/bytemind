@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -333,6 +335,112 @@ func TestApplyUsageFallsBackToBreakdownWhenTotalIsZero(t *testing.T) {
 
 	if m.tokenUsedTotal != 20 {
 		t.Fatalf("expected fallback sum of usage breakdown (20), got %d", m.tokenUsedTotal)
+	}
+}
+
+func TestFetchRemoteTokenUsageCmdReturnsErrorMsgWhenConfigMissing(t *testing.T) {
+	m := model{cfg: config.Config{}}
+	cmd := m.fetchRemoteTokenUsageCmd()
+	if cmd == nil {
+		t.Fatalf("expected remote usage command")
+	}
+	msg := cmd()
+	pulled, ok := msg.(tokenUsagePulledMsg)
+	if !ok {
+		t.Fatalf("expected tokenUsagePulledMsg, got %T", msg)
+	}
+	if pulled.Err == nil || !strings.Contains(pulled.Err.Error(), "missing base url or api key") {
+		t.Fatalf("expected missing config error, got %v", pulled.Err)
+	}
+}
+
+func TestFetchRemoteTokenUsageCmdReturnsUsageMsgOnSuccess(t *testing.T) {
+	orig := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{"data":[{"results":[{"input_tokens":12,"output_tokens":8,"input_cached_tokens":3}]}]}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	m := model{
+		cfg: config.Config{
+			Provider: config.ProviderConfig{
+				BaseURL: "https://api.openai.com/v1",
+				APIKey:  "test-key",
+			},
+		},
+	}
+
+	cmd := m.fetchRemoteTokenUsageCmd()
+	msg := cmd()
+	pulled, ok := msg.(tokenUsagePulledMsg)
+	if !ok {
+		t.Fatalf("expected tokenUsagePulledMsg, got %T", msg)
+	}
+	if pulled.Err != nil {
+		t.Fatalf("expected successful usage pull message, got %v", pulled.Err)
+	}
+	if pulled.Used != 23 || pulled.Input != 12 || pulled.Output != 8 || pulled.Context != 3 {
+		t.Fatalf("unexpected pulled usage payload: %+v", pulled)
+	}
+}
+
+func TestUpdateTokenUsagePulledMsgUsesMaxAndIgnoresErrors(t *testing.T) {
+	m := model{
+		tokenUsage:     newTokenUsageComponent(),
+		tokenBudget:    5000,
+		tokenUsedTotal: 100,
+		tokenInput:     60,
+		tokenOutput:    20,
+		tokenContext:   5,
+	}
+
+	got, _ := m.Update(tokenUsagePulledMsg{
+		Used:    90,
+		Input:   40,
+		Output:  30,
+		Context: 10,
+	})
+	updated := got.(model)
+	if updated.tokenUsedTotal != 100 {
+		t.Fatalf("expected used total to keep local max 100, got %d", updated.tokenUsedTotal)
+	}
+	if updated.tokenInput != 60 {
+		t.Fatalf("expected input to keep local max 60, got %d", updated.tokenInput)
+	}
+	if updated.tokenOutput != 30 || updated.tokenContext != 10 {
+		t.Fatalf("expected output/context to use remote max values, got output=%d context=%d", updated.tokenOutput, updated.tokenContext)
+	}
+	if updated.tokenUsage.used != 100 {
+		t.Fatalf("expected token component to sync used=100, got %d", updated.tokenUsage.used)
+	}
+
+	got, _ = updated.Update(tokenUsagePulledMsg{Err: errors.New("boom")})
+	still := got.(model)
+	if still.tokenUsedTotal != updated.tokenUsedTotal || still.tokenInput != updated.tokenInput || still.tokenOutput != updated.tokenOutput || still.tokenContext != updated.tokenContext {
+		t.Fatalf("expected error usage message to leave counters unchanged, got %+v", still)
+	}
+}
+
+func TestAccumulateTokenUsageFallbackAndClamp(t *testing.T) {
+	m := model{}
+	m.accumulateTokenUsage([]llm.Message{
+		{},
+		{Usage: &llm.Usage{InputTokens: 10, OutputTokens: 4, ContextTokens: 1, TotalTokens: 0}},
+		{Usage: &llm.Usage{InputTokens: -5, OutputTokens: 8, ContextTokens: 0, TotalTokens: -1}},
+		{Usage: &llm.Usage{InputTokens: 1, OutputTokens: 1, ContextTokens: 1, TotalTokens: 20}},
+	})
+
+	if m.tokenUsedTotal != 38 {
+		t.Fatalf("expected used total 38, got %d", m.tokenUsedTotal)
+	}
+	if m.tokenInput != 11 || m.tokenOutput != 13 || m.tokenContext != 2 {
+		t.Fatalf("unexpected breakdown input=%d output=%d context=%d", m.tokenInput, m.tokenOutput, m.tokenContext)
 	}
 }
 
@@ -1750,12 +1858,12 @@ func TestRenderConversationIncludesToolEntries(t *testing.T) {
 		}(),
 		chatItems: []chatEntry{
 			{Kind: "user", Title: "You", Body: "check repo", Status: "final"},
-			{Kind: "tool", Title: "Tool | read_file", Body: "Read internal/tui/model.go lines 1-20", Status: "done"},
+			{Kind: "tool", Title: "Tool Result | read_file", Body: "Read internal/tui/model.go lines 1-20", Status: "done"},
 		},
 	}
 
 	got := m.renderConversation()
-	if !strings.Contains(got, "Tool | read_file") {
+	if !strings.Contains(got, "Tool Result | read_file") {
 		t.Fatalf("expected conversation to show tool entry, got %q", got)
 	}
 	if !strings.Contains(got, "Read internal/tui/model.go lines 1-20") {
@@ -1786,7 +1894,7 @@ func TestRebuildSessionTimelineParsesUserToolResultParts(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected user + tool items, got %#v", items)
 	}
-	if items[1].Kind != "tool" || !strings.Contains(items[1].Title, "Tool | read_file") {
+	if items[1].Kind != "tool" || !strings.Contains(items[1].Title, "Tool Result | read_file") {
 		t.Fatalf("expected tool item from tool_result part, got %#v", items[1])
 	}
 	if len(runs) != 1 || runs[0].Name != "read_file" {
@@ -1816,6 +1924,9 @@ func TestHandleAgentEventShowsToolProgressInChat(t *testing.T) {
 	}
 	if m.chatItems[2].Kind != "tool" || m.chatItems[2].Status != "running" || !strings.Contains(m.chatItems[2].Title, "Tool Call | read_file") {
 		t.Fatalf("expected running tool call chat item, got %+v", m.chatItems[2])
+	}
+	if strings.TrimSpace(m.chatItems[2].Body) != "" {
+		t.Fatalf("expected tool call body to hide params, got %q", m.chatItems[2].Body)
 	}
 
 	m.handleAgentEvent(agent.Event{
@@ -1938,6 +2049,9 @@ func TestToolStartWithoutAssistantDeltaDoesNotInjectThinkingCard(t *testing.T) {
 	if m.chatItems[1].Kind != "tool" || !strings.Contains(m.chatItems[1].Title, "Tool Call | list_files") {
 		t.Fatalf("expected tool call entry, got %+v", m.chatItems[1])
 	}
+	if strings.TrimSpace(m.chatItems[1].Body) != "" {
+		t.Fatalf("expected tool call entry to omit params body, got %q", m.chatItems[1].Body)
+	}
 }
 
 func TestToolStartWithGenericToolIntentDoesNotShowThinkingCard(t *testing.T) {
@@ -1960,6 +2074,41 @@ func TestToolStartWithGenericToolIntentDoesNotShowThinkingCard(t *testing.T) {
 	}
 	if m.chatItems[1].Kind != "tool" || !strings.Contains(m.chatItems[1].Title, "Tool Call | list_files") {
 		t.Fatalf("expected tool call entry after removing placeholder, got %+v", m.chatItems[1])
+	}
+	if strings.TrimSpace(m.chatItems[1].Body) != "" {
+		t.Fatalf("expected tool call entry to omit params body, got %q", m.chatItems[1].Body)
+	}
+}
+
+func TestRenderChatSectionToolHeaderOmitsStatusWords(t *testing.T) {
+	got := renderChatSection(chatEntry{
+		Kind:   "tool",
+		Title:  "Tool Call | list_files",
+		Body:   "",
+		Status: "running",
+	}, 64)
+
+	if strings.Contains(got, "running") || strings.Contains(got, "done") || strings.Contains(got, "pending") {
+		t.Fatalf("expected tool header to omit status words, got %q", got)
+	}
+	if strings.Contains(got, "params:") || strings.Contains(got, "{\"") {
+		t.Fatalf("expected tool section to hide params content, got %q", got)
+	}
+}
+
+func TestRenderChatCardToolUsesVisualSeparator(t *testing.T) {
+	got := renderChatCard(chatEntry{
+		Kind:   "tool",
+		Title:  "Tool Result | read_file",
+		Body:   "Read internal/tui/model.go lines 1-20",
+		Status: "done",
+	}, 64)
+
+	if !strings.Contains(got, "│") {
+		t.Fatalf("expected tool card to include a left border separator, got %q", got)
+	}
+	if !strings.Contains(got, "Tool Result | read_file") {
+		t.Fatalf("expected tool card title to render, got %q", got)
 	}
 }
 

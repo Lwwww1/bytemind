@@ -181,6 +181,7 @@ func TestEnsureAPIConfigForTUIPromptsAndWritesWorkspaceConfig(t *testing.T) {
 	workspace := t.TempDir()
 	home := filepath.Join(t.TempDir(), ".bytemind-home")
 	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv(defaultAPIKeyEnvName, "")
 
 	var stdout bytes.Buffer
 	input := strings.NewReader("https://api.openai.com/v1\ntest-key\ngpt-5.4\n")
@@ -199,20 +200,20 @@ func TestEnsureAPIConfigForTUIPromptsAndWritesWorkspaceConfig(t *testing.T) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatalf("expected valid json config file, got %v", err)
 	}
-	if got := strings.TrimSpace(anyToString(cfg.Provider["api_key"])); got != "test-key" {
-		t.Fatalf("expected saved api_key test-key, got %q", got)
+	if got := strings.TrimSpace(anyToString(cfg.Provider["api_key"])); got != "" {
+		t.Fatalf("expected api_key to be removed from file, got %q", got)
+	}
+	if got := strings.TrimSpace(anyToString(cfg.Provider["api_key_env"])); got != defaultAPIKeyEnvName {
+		t.Fatalf("expected api_key_env %q, got %q", defaultAPIKeyEnvName, got)
 	}
 	if got := strings.TrimSpace(anyToString(cfg.Provider["base_url"])); got != "https://api.openai.com/v1" {
-		t.Fatalf("expected default base_url, got %q", got)
+		t.Fatalf("expected saved base_url, got %q", got)
 	}
 	if got := strings.TrimSpace(anyToString(cfg.Provider["model"])); got != "gpt-5.4" {
-		t.Fatalf("expected model to be saved, got %q", got)
+		t.Fatalf("expected saved model, got %q", got)
 	}
-	if !strings.Contains(stdout.String(), "配置已写入") {
-		t.Fatalf("expected setup output to mention config path, got %q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "未检测到可用 API 配置") {
-		t.Fatalf("expected setup output to mention missing config, got %q", stdout.String())
+	if got := strings.TrimSpace(os.Getenv(defaultAPIKeyEnvName)); got != "test-key" {
+		t.Fatalf("expected in-process env key to be populated, got %q", got)
 	}
 	if !strings.Contains(stdout.String(), "OpenAI-compatible") {
 		t.Fatalf("expected setup output to mention OpenAI-compatible format, got %q", stdout.String())
@@ -228,14 +229,61 @@ func TestEnsureAPIConfigForTUIFailsWhenInputIsMissing(t *testing.T) {
 	workspace := t.TempDir()
 	home := filepath.Join(t.TempDir(), ".bytemind-home")
 	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv(defaultAPIKeyEnvName, "")
 
 	var stdout bytes.Buffer
 	err := ensureAPIConfigForTUI(workspace, "", strings.NewReader(""), &stdout)
 	if err == nil {
 		t.Fatal("expected missing input to abort setup")
 	}
-	if !strings.Contains(err.Error(), "初始化已取消") {
-		t.Fatalf("unexpected setup error: %v", err)
+}
+
+func TestEnsureAPIConfigForTUIRejectsNonHTTPSURL(t *testing.T) {
+	workspace := t.TempDir()
+	home := filepath.Join(t.TempDir(), ".bytemind-home")
+	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv(defaultAPIKeyEnvName, "")
+
+	var stdout bytes.Buffer
+	err := ensureAPIConfigForTUI(workspace, "", strings.NewReader("http://example.com\nkey\ngpt-5.4\n"), &stdout)
+	if err == nil {
+		t.Fatal("expected non-https URL to be rejected")
+	}
+}
+
+func TestEnsureAPIConfigForTUIMigratesPlaintextAPIKey(t *testing.T) {
+	workspace := t.TempDir()
+	home := filepath.Join(t.TempDir(), ".bytemind-home")
+	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv(defaultAPIKeyEnvName, "")
+
+	writeTestConfig(t, workspace, map[string]any{
+		"provider": map[string]any{
+			"type":     "openai-compatible",
+			"base_url": "https://api.openai.com/v1",
+			"model":    "gpt-5.4-mini",
+			"api_key":  "plain-key",
+		},
+		"stream": false,
+	})
+
+	var stdout bytes.Buffer
+	if err := ensureAPIConfigForTUI(workspace, "", strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("expected plaintext-key migration to succeed, got %v", err)
+	}
+	if got := os.Getenv(defaultAPIKeyEnvName); got != "plain-key" {
+		t.Fatalf("expected env var to carry migrated key, got %q", got)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workspace, "config.json"))
+	if err != nil {
+		t.Fatalf("expected migrated config file, got %v", err)
+	}
+	if strings.Contains(string(data), "plain-key") {
+		t.Fatalf("expected plaintext key removed from config, got %q", string(data))
+	}
+	if !strings.Contains(string(data), "\"api_key_env\": \"BYTEMIND_API_KEY\"") {
+		t.Fatalf("expected api_key_env in migrated config, got %q", string(data))
 	}
 }
 
@@ -244,6 +292,7 @@ func TestRunTUIBootstrapsAfterInteractiveSetup(t *testing.T) {
 	t.Chdir(workspace)
 	home := filepath.Join(t.TempDir(), ".bytemind-home")
 	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv(defaultAPIKeyEnvName, "")
 
 	sentinel := errors.New("stop program")
 	original := runTUIProgram
@@ -255,7 +304,7 @@ func TestRunTUIBootstrapsAfterInteractiveSetup(t *testing.T) {
 	runTUIProgram = func(opts itui.Options) error {
 		called = true
 		if opts.Config.Provider.APIKey != "wizard-key" {
-			t.Fatalf("expected wizard api key in runtime config, got %q", opts.Config.Provider.APIKey)
+			t.Fatalf("expected runtime config to resolve wizard key, got %q", opts.Config.Provider.APIKey)
 		}
 		if opts.Config.Provider.Model != "gpt-5.4-mini" {
 			t.Fatalf("expected wizard model in runtime config, got %q", opts.Config.Provider.Model)
@@ -282,8 +331,33 @@ func TestRunTUIBootstrapsAfterInteractiveSetup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected interactive setup to create workspace config, got %v", err)
 	}
-	if !strings.Contains(string(data), "wizard-key") || !strings.Contains(string(data), "gpt-5.4-mini") {
-		t.Fatalf("expected saved config to include wizard values, got %q", string(data))
+	if strings.Contains(string(data), "wizard-key") {
+		t.Fatalf("expected config file not to include plaintext key, got %q", string(data))
+	}
+	if !strings.Contains(string(data), "\"api_key_env\": \"BYTEMIND_API_KEY\"") {
+		t.Fatalf("expected saved config to include api_key_env, got %q", string(data))
+	}
+}
+
+func TestEnsureAPIConfigForTUISecondRunUsesPersistedSecret(t *testing.T) {
+	workspace := t.TempDir()
+	home := filepath.Join(t.TempDir(), ".bytemind-home")
+	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv(defaultAPIKeyEnvName, "")
+
+	var first bytes.Buffer
+	firstInput := strings.NewReader("https://api.openai.com/v1\nstored-key\ngpt-5.4-mini\n")
+	if err := ensureAPIConfigForTUI(workspace, "", firstInput, &first); err != nil {
+		t.Fatalf("expected first setup to succeed, got %v", err)
+	}
+	t.Setenv(defaultAPIKeyEnvName, "")
+
+	var second bytes.Buffer
+	if err := ensureAPIConfigForTUI(workspace, "", strings.NewReader(""), &second); err != nil {
+		t.Fatalf("expected second run to use persisted key without prompt, got %v", err)
+	}
+	if strings.Contains(second.String(), "url: ") || strings.Contains(second.String(), "key: ") || strings.Contains(second.String(), "model: ") {
+		t.Fatalf("expected no second interactive prompts, got %q", second.String())
 	}
 }
 

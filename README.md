@@ -107,6 +107,13 @@ Anthropic 示例：
   }
 }
 ```
+安全行为：
+
+- `config.json` 不再保存明文 `api_key`。
+- 配置会保存 `provider.api_key_env`（默认 `BYTEMIND_API_KEY`）。
+- 输入的 key 只注入当前进程环境变量，用于本次启动。
+- 检测到旧配置中有明文 `provider.api_key` 时，会自动迁移并移除明文。
+
 
 ## 交互命令
 

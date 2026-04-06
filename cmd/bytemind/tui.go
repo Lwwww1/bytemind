@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,9 +14,12 @@ import (
 	"strconv"
 	"strings"
 
+	"bytemind/internal/agent"
 	"bytemind/internal/assets"
 	"bytemind/internal/config"
+	"bytemind/internal/provider"
 	"bytemind/internal/secretstore"
+	"bytemind/internal/session"
 	"bytemind/internal/tui"
 )
 
@@ -46,28 +50,43 @@ func runTUI(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	app, store, sess, err := bootstrap(*configPath, *model, *sessionID, *streamOverride, *workspaceOverride, *maxIterations, stdin, stdout)
-	if err != nil {
-		return err
-	}
-
 	cfg, err := config.Load(workspace, *configPath)
 	if err != nil {
 		return err
 	}
-	if *model != "" {
-		cfg.Provider.Model = *model
+	if err := applyRuntimeOverrides(&cfg, *model, *streamOverride, *maxIterations); err != nil {
+		return err
 	}
-	if *streamOverride != "" {
-		parsed, err := strconv.ParseBool(*streamOverride)
-		if err != nil {
-			return err
-		}
-		cfg.Stream = parsed
+
+	interactive := isInteractiveStdin(stdin)
+	check := provider.Availability{Ready: true}
+	if interactive {
+		check = provider.CheckAvailability(context.Background(), cfg.Provider)
 	}
-	if *maxIterations > 0 {
-		cfg.MaxIterations = *maxIterations
+
+	guide := tui.StartupGuide{}
+	if !check.Ready {
+		guide = buildStartupGuide(cfg, check, workspace, *configPath)
 	}
+
+	var app *agent.Runner
+	var store *session.Store
+	var sess *session.Session
+	if guide.Active && interactive {
+		app, store, sess, err = bootstrapForTUI(*configPath, *model, *sessionID, *streamOverride, *workspaceOverride, *maxIterations, stdin, stdout)
+	} else {
+		app, store, sess, err = bootstrap(*configPath, *model, *sessionID, *streamOverride, *workspaceOverride, *maxIterations, stdin, stdout)
+	}
+	if err != nil {
+		return err
+	}
+	if app == nil || store == nil || sess == nil {
+		return errors.New("internal error: bootstrap returned nil runtime")
+	}
+	if err := applyRuntimeOverrides(&cfg, *model, *streamOverride, *maxIterations); err != nil {
+		return err
+	}
+
 	home, err := config.EnsureHomeLayout()
 	if err != nil {
 		return err
@@ -78,13 +97,128 @@ func runTUI(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 
 	return runTUIProgram(tui.Options{
-		Runner:     app,
-		Store:      store,
-		Session:    sess,
-		ImageStore: imageStore,
-		Config:     cfg,
-		Workspace:  sess.Workspace,
+		Runner:       app,
+		Store:        store,
+		Session:      sess,
+		ImageStore:   imageStore,
+		Config:       cfg,
+		Workspace:    sess.Workspace,
+		StartupGuide: guide,
 	})
+}
+
+func applyRuntimeOverrides(cfg *config.Config, modelOverride, streamOverride string, maxIterations int) error {
+	if modelOverride != "" {
+		cfg.Provider.Model = modelOverride
+	}
+	if streamOverride != "" {
+		parsed, err := strconv.ParseBool(streamOverride)
+		if err != nil {
+			return fmt.Errorf("invalid -stream value: %w", err)
+		}
+		cfg.Stream = parsed
+	}
+	if maxIterations > 0 {
+		cfg.MaxIterations = maxIterations
+	}
+	return nil
+}
+
+func isInteractiveStdin(stdin io.Reader) bool {
+	file, ok := stdin.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func buildStartupGuide(cfg config.Config, check provider.Availability, workspace, explicitConfigPath string) tui.StartupGuide {
+	path := configPathHint(workspace, explicitConfigPath)
+	envName := strings.TrimSpace(cfg.Provider.APIKeyEnv)
+	if envName == "" {
+		envName = defaultAPIKeyEnvName
+	}
+	lines := []string{
+		"Paste your API key in the input box below and press Enter.",
+		"Bytemind will verify it and save it automatically.",
+		"Default OpenAI setup only needs API key.",
+		"For other providers, set provider.base_url and provider.model too.",
+		"Optional: model=<name>  base_url=<url>  provider=<openai-compatible|anthropic>",
+		"You can still use /help and /quit commands.",
+		"Env fallback: " + envName,
+	}
+	if path != "" {
+		lines = append(lines, "Config file: "+path)
+	}
+	lines = append(lines, "Issue: "+startupIssueHint(check))
+
+	return tui.StartupGuide{
+		Active:       true,
+		Title:        "Let's finish setup",
+		Status:       "Bytemind will guide you through provider, base_url, model, and API key.",
+		Lines:        lines,
+		ConfigPath:   path,
+		CurrentField: "type",
+	}
+}
+
+func startupIssueHint(check provider.Availability) string {
+	reason := strings.ToLower(strings.TrimSpace(check.Reason))
+	switch {
+	case strings.Contains(reason, "missing api key"):
+		return "No API key is configured yet."
+	case strings.Contains(reason, "unauthorized"):
+		return "The API key was rejected by the provider."
+	case strings.Contains(reason, "failed to reach"):
+		return "Cannot reach provider endpoint. Check proxy or network."
+	case strings.Contains(reason, "not found"):
+		return "Provider endpoint path looks incorrect."
+	default:
+		if strings.TrimSpace(check.Reason) == "" {
+			return "Provider check failed."
+		}
+		return compactLine(check.Reason, 120)
+	}
+}
+
+func configPathHint(workspace, explicit string) string {
+	if strings.TrimSpace(explicit) != "" {
+		if abs, err := filepath.Abs(explicit); err == nil {
+			return abs
+		}
+		return explicit
+	}
+
+	candidates := []string{
+		filepath.Join(workspace, "config.json"),
+		filepath.Join(workspace, ".bytemind", "config.json"),
+		filepath.Join(workspace, "bytemind.config.json"),
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	home, err := config.ResolveHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "config.json")
+}
+
+func compactLine(raw string, limit int) string {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\n", " "))
+	if len(raw) <= limit {
+		return raw
+	}
+	if limit <= 3 {
+		return raw[:limit]
+	}
+	return raw[:limit-3] + "..."
 }
 
 func ensureAPIConfigForTUI(workspace, configPath string, stdin io.Reader, stdout io.Writer) error {
@@ -115,8 +249,8 @@ func ensureAPIConfigForTUI(workspace, configPath string, stdin io.Reader, stdout
 
 func runInteractiveConfigSetup(workspace, configPath string, cfg config.Config, stdin io.Reader, stdout io.Writer) error {
 	reader := bufio.NewReader(stdin)
-	fmt.Fprintln(stdout, "\u672A\u68C0\u6D4B\u5230\u53EF\u7528 API \u914D\u7F6E\uFF0C\u8BF7\u5148\u5B8C\u6210\u521D\u59CB\u5316\u3002")
-	fmt.Fprintln(stdout, "\u914D\u7F6E\u683C\u5F0F\uFF1AOpenAI-compatible\uFF08\u4F9D\u6B21\u8F93\u5165 url / key / model\uFF09\u3002")
+	fmt.Fprintln(stdout, "未检测到可用 API 配置，请先完成初始化。")
+	fmt.Fprintln(stdout, "配置格式：OpenAI-compatible（依次输入 url / key / model）。")
 
 	baseURL, err := promptSetupValue(reader, stdout, "url")
 	if err != nil {
@@ -137,21 +271,21 @@ func runInteractiveConfigSetup(workspace, configPath string, cfg config.Config, 
 	}
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" {
-		return errors.New("\u914D\u7F6E\u5931\u8D25: API key \u4E0D\u80FD\u4E3A\u7A7A")
+		return errors.New("配置失败: API key 不能为空")
 	}
 	modelName = strings.TrimSpace(modelName)
 	if modelName == "" {
-		return errors.New("\u914D\u7F6E\u5931\u8D25: model \u4E0D\u80FD\u4E3A\u7A7A")
+		return errors.New("配置失败: model 不能为空")
 	}
 	envName := strings.TrimSpace(cfg.Provider.APIKeyEnv)
 	if envName == "" {
 		envName = defaultAPIKeyEnvName
 	}
 	if err := os.Setenv(envName, apiKey); err != nil {
-		return fmt.Errorf("\u914D\u7F6E\u5931\u8D25: \u65E0\u6CD5\u8BBE\u7F6E\u73AF\u5883\u53D8\u91CF %s: %w", envName, err)
+		return fmt.Errorf("配置失败: 无法设置环境变量 %s: %w", envName, err)
 	}
 	if err := secretstore.Save(envName, apiKey); err != nil {
-		return fmt.Errorf("\u914D\u7F6E\u5931\u8D25: \u65E0\u6CD5\u5B89\u5168\u4FDD\u5B58 API key: %w", err)
+		return fmt.Errorf("配置失败: 无法安全保存 API key: %w", err)
 	}
 
 	cfg.Provider.Type = "openai-compatible"
@@ -172,9 +306,9 @@ func runInteractiveConfigSetup(workspace, configPath string, cfg config.Config, 
 	if err := writeConfigFile(targetPath, cfg); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "\u914D\u7F6E\u5DF2\u5199\u5165 %s\n", targetPath)
-	fmt.Fprintf(stdout, "\u5DF2\u5C06 API key \u6CE8\u5165\u73AF\u5883\u53D8\u91CF %s\uFF08\u4EC5\u5F53\u524D\u8FDB\u7A0B\uFF09\u3002\n", envName)
-	fmt.Fprintln(stdout, "\u5DF2\u5B89\u5168\u4FDD\u5B58 API key\uFF0C\u540E\u7EED\u542F\u52A8\u65E0\u9700\u518D\u8F93\u5165\u3002")
+	fmt.Fprintf(stdout, "配置已写入 %s\n", targetPath)
+	fmt.Fprintf(stdout, "已将 API key 注入环境变量 %s（仅当前进程）。\n", envName)
+	fmt.Fprintln(stdout, "已安全保存 API key，后续启动无需再输入。")
 	return nil
 }
 
@@ -188,9 +322,9 @@ func promptSetupValue(reader *bufio.Reader, stdout io.Writer, label string) (str
 	line = strings.TrimSpace(line)
 	if line == "" {
 		if errors.Is(err, io.EOF) {
-			return "", errors.New("\u521D\u59CB\u5316\u5DF2\u53D6\u6D88: \u672A\u6536\u5230\u8F93\u5165")
+			return "", errors.New("初始化已取消: 未收到输入")
 		}
-		return "", fmt.Errorf("\u914D\u7F6E\u5931\u8D25: %s \u4E0D\u80FD\u4E3A\u7A7A", label)
+		return "", fmt.Errorf("配置失败: %s 不能为空", label)
 	}
 	return line, nil
 }
@@ -204,9 +338,9 @@ func promptSecretValue(reader *bufio.Reader, _ io.Reader, stdout io.Writer, labe
 	line = strings.TrimSpace(line)
 	if line == "" {
 		if errors.Is(err, io.EOF) {
-			return "", errors.New("\u521D\u59CB\u5316\u5DF2\u53D6\u6D88: \u672A\u6536\u5230\u8F93\u5165")
+			return "", errors.New("初始化已取消: 未收到输入")
 		}
-		return "", fmt.Errorf("\u914D\u7F6E\u5931\u8D25: %s \u4E0D\u80FD\u4E3A\u7A7A", label)
+		return "", fmt.Errorf("配置失败: %s 不能为空", label)
 	}
 	return line, nil
 }
@@ -214,16 +348,16 @@ func promptSecretValue(reader *bufio.Reader, _ io.Reader, stdout io.Writer, labe
 func validateBaseURL(raw string) (string, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return "", errors.New("\u914D\u7F6E\u5931\u8D25: url \u4E0D\u80FD\u4E3A\u7A7A")
+		return "", errors.New("配置失败: url 不能为空")
 	}
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", errors.New("\u914D\u7F6E\u5931\u8D25: url \u5FC5\u987B\u662F\u5408\u6CD5\u5730\u5740")
+		return "", errors.New("配置失败: url 必须是合法地址")
 	}
 	scheme := strings.ToLower(parsed.Scheme)
 	host := strings.ToLower(parsed.Hostname())
 	if scheme != "https" && !(scheme == "http" && isLocalHost(host)) {
-		return "", errors.New("\u914D\u7F6E\u5931\u8D25: url \u5FC5\u987B\u4F7F\u7528 https\uff08localhost/127.0.0.1 \u5141\u8BB8 http\uff09")
+		return "", errors.New("配置失败: url 必须使用 https（localhost/127.0.0.1 允许 http）")
 	}
 	return strings.TrimRight(value, "/"), nil
 }
@@ -329,7 +463,7 @@ func migrateInlineAPIKeyToEnv(configFile string, cfg *config.Config, inlineAPIKe
 	if err := writeConfigFile(configFile, *cfg); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "\u68C0\u6D4B\u5230\u660E\u6587 provider.api_key\uFF0C\u5DF2\u8FC1\u79FB\u5230\u73AF\u5883\u53D8\u91CF %s\uFF08\u5F53\u524D\u8FDB\u7A0B\uFF09\u3002\n", envName)
-	fmt.Fprintln(stdout, "\u5DF2\u5B89\u5168\u4FDD\u5B58 API key\uFF0C\u540E\u7EED\u542F\u52A8\u65E0\u9700\u518D\u8F93\u5165\u3002")
+	fmt.Fprintf(stdout, "检测到明文 provider.api_key，已迁移到环境变量 %s（当前进程）。\n", envName)
+	fmt.Fprintln(stdout, "已安全保存 API key，后续启动无需再输入。")
 	return nil
 }

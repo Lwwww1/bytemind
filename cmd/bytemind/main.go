@@ -77,6 +77,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runTUI(args[1:], stdin, stdout, stderr)
 	case "run":
 		return runOneShot(args[1:], stdin, stdout, stderr)
+	case "install":
+		return runInstall(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -126,6 +128,14 @@ func promptPrefix() string {
 }
 
 func bootstrap(configPath, modelOverride, sessionID, streamOverride, workspaceOverride string, maxIterationsOverride int, stdin io.Reader, stdout io.Writer) (*agent.Runner, *session.Store, *session.Session, error) {
+	return bootstrapWithOptions(configPath, modelOverride, sessionID, streamOverride, workspaceOverride, maxIterationsOverride, stdin, stdout, true)
+}
+
+func bootstrapForTUI(configPath, modelOverride, sessionID, streamOverride, workspaceOverride string, maxIterationsOverride int, stdin io.Reader, stdout io.Writer) (*agent.Runner, *session.Store, *session.Session, error) {
+	return bootstrapWithOptions(configPath, modelOverride, sessionID, streamOverride, workspaceOverride, maxIterationsOverride, stdin, stdout, false)
+}
+
+func bootstrapWithOptions(configPath, modelOverride, sessionID, streamOverride, workspaceOverride string, maxIterationsOverride int, stdin io.Reader, stdout io.Writer, requireAPIKey bool) (*agent.Runner, *session.Store, *session.Session, error) {
 	workspace, err := resolveWorkspace(workspaceOverride)
 	if err != nil {
 		return nil, nil, nil, err
@@ -158,7 +168,7 @@ func bootstrap(configPath, modelOverride, sessionID, streamOverride, workspaceOv
 	}
 
 	apiKey := cfg.Provider.ResolveAPIKey()
-	if apiKey == "" {
+	if requireAPIKey && apiKey == "" {
 		return nil, nil, nil, errors.New("missing API key; run `go run ./cmd/bytemind chat` to configure once, or set BYTEMIND_API_KEY")
 	}
 
@@ -396,9 +406,11 @@ func sameWorkspace(a, b string) bool {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "go run ./cmd/bytemind chat [-config path] [-model name] [-session id] [-stream true|false] [-workspace path] [-max-iterations n]")
-	fmt.Fprintln(w, "go run ./cmd/bytemind tui [-config path] [-model name] [-session id] [-stream true|false] [-workspace path] [-max-iterations n]")
-	fmt.Fprintln(w, "go run ./cmd/bytemind run -prompt \"task\" [-config path] [-model name] [-session id] [-stream true|false] [-max-iterations n]")
+	fmt.Fprintln(w, "bytemind chat [-config path] [-model name] [-session id] [-stream true|false] [-workspace path] [-max-iterations n]")
+	fmt.Fprintln(w, "bytemind tui [-config path] [-model name] [-session id] [-stream true|false] [-workspace path] [-max-iterations n]")
+	fmt.Fprintln(w, "bytemind run -prompt \"task\" [-config path] [-model name] [-session id] [-stream true|false] [-max-iterations n]")
+	fmt.Fprintln(w, "bytemind install [-to dir] [-name binary-name]")
+	fmt.Fprintln(w, "tip: first time use `go run ./cmd/bytemind install`, then add install dir to PATH")
 }
 
 func printCommandSuggestions(w io.Writer, input string, suggestions []string) {

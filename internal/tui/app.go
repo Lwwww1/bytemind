@@ -10,12 +10,22 @@ import (
 )
 
 type Options struct {
-	Runner     *agent.Runner
-	Store      *session.Store
-	Session    *session.Session
-	ImageStore assets.ImageStore
-	Config     config.Config
-	Workspace  string
+	Runner       *agent.Runner
+	Store        *session.Store
+	Session      *session.Session
+	ImageStore   assets.ImageStore
+	Config       config.Config
+	Workspace    string
+	StartupGuide StartupGuide
+}
+
+type StartupGuide struct {
+	Active       bool
+	Title        string
+	Status       string
+	Lines        []string
+	ConfigPath   string
+	CurrentField string
 }
 
 func Run(opts Options) error {

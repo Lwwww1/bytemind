@@ -15,9 +15,11 @@ import (
 	"bytemind/internal/agent"
 	"bytemind/internal/assets"
 	"bytemind/internal/config"
+	"bytemind/internal/history"
 	"bytemind/internal/llm"
 	"bytemind/internal/mention"
 	planpkg "bytemind/internal/plan"
+	"bytemind/internal/provider"
 	"bytemind/internal/session"
 	"bytemind/internal/tools"
 
@@ -30,17 +32,20 @@ import (
 )
 
 const (
-	defaultSessionLimit = 8
-	scrollStep          = 3
-	commandPageSize     = 3
-	mentionPageSize     = 5
-	maxPendingBTW       = 5
-	pasteSubmitGuard    = 400 * time.Millisecond
-	assistantLabel      = "Bytemind"
-	thinkingLabel       = "Bytemind"
-	chatTitleLabel      = "Bytemind Chat"
-	tuiTitleLabel       = "Bytemind TUI"
-	footerHintText      = "tab agents | / commands | Ctrl+L sessions | Ctrl+C quit"
+	defaultSessionLimit   = 8
+	scrollStep            = 3
+	commandPageSize       = 3
+	mentionPageSize       = 5
+	maxPendingBTW         = 5
+	promptSearchPageSize  = 5
+	promptSearchLoadLimit = 50000
+	promptSearchResultCap = 200
+	pasteSubmitGuard      = 400 * time.Millisecond
+	assistantLabel        = "Bytemind"
+	thinkingLabel         = "Bytemind"
+	chatTitleLabel        = "Bytemind Chat"
+	tuiTitleLabel         = "Bytemind TUI"
+	footerHintText        = "tab agents | / commands | Ctrl+F history | Ctrl+L sessions | Ctrl+C quit"
 )
 
 type screenKind string
@@ -56,6 +61,27 @@ const (
 	modeBuild agentMode = "build"
 	modePlan  agentMode = "plan"
 )
+
+type promptSearchMode string
+
+const (
+	promptSearchModeQuick promptSearchMode = "quick"
+	promptSearchModePanel promptSearchMode = "panel"
+)
+
+const (
+	startupFieldType    = "type"
+	startupFieldBaseURL = "base_url"
+	startupFieldModel   = "model"
+	startupFieldAPIKey  = "api_key"
+)
+
+var startupFieldOrder = []string{
+	startupFieldType,
+	startupFieldBaseURL,
+	startupFieldModel,
+	startupFieldAPIKey,
+}
 
 type chatEntry struct {
 	Kind   string
@@ -150,47 +176,56 @@ type model struct {
 	input    textarea.Model
 	spinner  spinner.Model
 
-	chatItems          []chatEntry
-	toolRuns           []toolRun
-	plan               planpkg.State
-	sessions           []session.Summary
-	sessionLimit       int
-	sessionCursor      int
-	commandCursor      int
-	mentionCursor      int
-	screen             screenKind
-	mode               agentMode
-	sessionsOpen       bool
-	helpOpen           bool
-	commandOpen        bool
-	mentionOpen        bool
-	busy               bool
-	streamingIndex     int
-	statusNote         string
-	phase              string
-	llmConnected       bool
-	approval           *approvalPrompt
-	mentionQuery       string
-	mentionToken       mention.Token
-	mentionResults     []mention.Candidate
-	mentionIndex       *mention.WorkspaceFileIndex
-	mentionRecent      map[string]int
-	mentionSeq         int
-	inputImageRefs     map[int]llm.AssetID
-	inputImageMentions map[string]llm.AssetID
-	orphanedImages     map[llm.AssetID]time.Time
-	nextImageID        int
-	clipboard          clipboardImageReader
-	lastPasteAt        time.Time
-	lastInputAt        time.Time
-	inputBurstSize     int
-	chatAutoFollow     bool
-	runCancel          context.CancelFunc
-	pendingBTW         []string
-	interrupting       bool
-	interruptSafe      bool
-	runSeq             int
-	activeRunID        int
+	chatItems             []chatEntry
+	toolRuns              []toolRun
+	plan                  planpkg.State
+	sessions              []session.Summary
+	sessionLimit          int
+	sessionCursor         int
+	commandCursor         int
+	mentionCursor         int
+	screen                screenKind
+	mode                  agentMode
+	sessionsOpen          bool
+	helpOpen              bool
+	commandOpen           bool
+	mentionOpen           bool
+	promptSearchOpen      bool
+	busy                  bool
+	streamingIndex        int
+	statusNote            string
+	phase                 string
+	llmConnected          bool
+	approval              *approvalPrompt
+	mentionQuery          string
+	mentionToken          mention.Token
+	mentionResults        []mention.Candidate
+	mentionIndex          *mention.WorkspaceFileIndex
+	mentionRecent         map[string]int
+	mentionSeq            int
+	promptHistoryLoaded   bool
+	promptHistoryEntries  []history.PromptEntry
+	promptSearchMode      promptSearchMode
+	promptSearchQuery     string
+	promptSearchMatches   []history.PromptEntry
+	promptSearchCursor    int
+	promptSearchBaseInput string
+	inputImageRefs        map[int]llm.AssetID
+	inputImageMentions    map[string]llm.AssetID
+	orphanedImages        map[llm.AssetID]time.Time
+	nextImageID           int
+	clipboard             clipboardImageReader
+	lastPasteAt           time.Time
+	lastInputAt           time.Time
+	inputBurstSize        int
+	chatAutoFollow        bool
+	runCancel             context.CancelFunc
+	pendingBTW            []string
+	interrupting          bool
+	interruptSafe         bool
+	runSeq                int
+	activeRunID           int
+	startupGuide          StartupGuide
 }
 
 func newModel(opts Options) model {
@@ -262,6 +297,13 @@ func newModel(opts Options) model {
 		orphanedImages:     make(map[llm.AssetID]time.Time, 8),
 		nextImageID:        nextSessionImageID(opts.Session),
 		clipboard:          defaultClipboardImageReader{},
+		startupGuide:       opts.StartupGuide,
+	}
+	if opts.StartupGuide.Active {
+		m.statusNote = opts.StartupGuide.Status
+		m.llmConnected = false
+		m.phase = "error"
+		m.initializeStartupGuide()
 	}
 	m.ensureSessionImageAssets()
 	m.syncInputStyle()
@@ -382,7 +424,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.helpOpen || m.commandOpen || m.mentionOpen || m.approval != nil {
+	if m.helpOpen || m.commandOpen || m.mentionOpen || m.promptSearchOpen || m.approval != nil {
 		return m, nil
 	}
 	if m.screen != screenChat && m.screen != screenLanding {
@@ -522,7 +564,13 @@ func (m model) mouseOverChatInput(y int) bool {
 	if m.approval != nil {
 		inputTop += lipgloss.Height(m.renderApprovalBanner())
 	}
-	if m.commandOpen {
+	if m.startupGuide.Active {
+		inputTop += lipgloss.Height(m.renderStartupGuidePanel())
+	} else if m.promptSearchOpen {
+		inputTop += lipgloss.Height(m.renderPromptSearchPalette())
+	} else if m.mentionOpen {
+		inputTop += lipgloss.Height(m.renderMentionPalette())
+	} else if m.commandOpen {
 		inputTop += lipgloss.Height(m.renderCommandPalette())
 	}
 	inputBottom := inputTop + max(1, inputHeight) - 1
@@ -543,6 +591,16 @@ func (m model) mouseOverLandingInput(y int) bool {
 	}, "\n")))
 	titleHeight := 0
 	subtitleHeight := 0
+	overlayHeight := 0
+	if m.startupGuide.Active {
+		overlayHeight = lipgloss.Height(m.renderStartupGuidePanel()) + 1
+	} else if m.promptSearchOpen {
+		overlayHeight = lipgloss.Height(m.renderPromptSearchPalette()) + 1
+	} else if m.mentionOpen {
+		overlayHeight = lipgloss.Height(m.renderMentionPalette()) + 1
+	} else if m.commandOpen {
+		overlayHeight = lipgloss.Height(m.renderCommandPalette()) + 1
+	}
 	inputHeight := lipgloss.Height(
 		landingInputStyle.Copy().
 			BorderForeground(m.modeAccentColor()).
@@ -550,9 +608,9 @@ func (m model) mouseOverLandingInput(y int) bool {
 			Render(m.input.View()),
 	)
 	hintHeight := lipgloss.Height(mutedStyle.Render(footerHintText))
-	contentHeight := logoHeight + 1 + titleHeight + subtitleHeight + 1 + inputHeight + 1 + hintHeight
+	contentHeight := logoHeight + 1 + titleHeight + subtitleHeight + 1 + overlayHeight + inputHeight + 1 + hintHeight
 	contentTop := max(0, (m.height-contentHeight)/2)
-	inputTop := contentTop + logoHeight + 1 + titleHeight + subtitleHeight + 1
+	inputTop := contentTop + logoHeight + 1 + titleHeight + subtitleHeight + 1 + overlayHeight
 	inputBottom := inputTop + max(1, inputHeight) - 1
 	return y >= inputTop && y <= inputBottom
 }
@@ -567,6 +625,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.runCancel()
 		}
 		return m, tea.Quit
+	}
+
+	if m.promptSearchOpen {
+		return m.handlePromptSearchKey(msg)
+	}
+
+	switch msg.String() {
 	case "tab":
 		if m.commandOpen || m.mentionOpen || m.sessionsOpen || m.helpOpen || m.approval != nil {
 			break
@@ -577,6 +642,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.approval == nil {
 			m.helpOpen = !m.helpOpen
 		}
+		return m, nil
+	case "ctrl+f":
+		if m.approval != nil || m.helpOpen || m.sessionsOpen || m.commandOpen || m.mentionOpen {
+			return m, nil
+		}
+		m.openPromptSearch(promptSearchModeQuick)
 		return m, nil
 	}
 
@@ -683,7 +754,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if msg.String() == "enter" {
-		value := strings.TrimSpace(m.input.Value())
+		rawValue := m.input.Value()
+		value := strings.TrimSpace(rawValue)
+		if m.startupGuide.Active && !strings.HasPrefix(value, "/") {
+			if err := m.handleStartupGuideSubmission(rawValue); err != nil {
+				m.statusNote = err.Error()
+			}
+			m.screen = screenLanding
+			return m, nil
+		}
 		if value == "" {
 			return m, nil
 		}
@@ -1014,6 +1093,121 @@ func (m *model) openCommandPalette() {
 	m.syncInputOverlays()
 }
 
+func (m *model) openPromptSearch(mode promptSearchMode) {
+	m.ensurePromptHistoryLoaded()
+	m.promptSearchMode = mode
+	m.promptSearchBaseInput = m.input.Value()
+	m.promptSearchQuery = ""
+	m.promptSearchCursor = 0
+	m.promptSearchOpen = true
+	m.commandOpen = false
+	m.closeMentionPalette()
+	m.refreshPromptSearchMatches()
+	if len(m.promptSearchMatches) == 0 {
+		if mode == promptSearchModePanel {
+			m.statusNote = "History panel opened. No matching prompts."
+		} else {
+			m.statusNote = "No matching prompts."
+		}
+	} else {
+		if mode == promptSearchModePanel {
+			m.statusNote = fmt.Sprintf("History panel ready (%d matches).", len(m.promptSearchMatches))
+		} else {
+			m.statusNote = fmt.Sprintf("Prompt history ready (%d matches).", len(m.promptSearchMatches))
+		}
+	}
+}
+
+func (m *model) closePromptSearch(restoreInput bool) {
+	if restoreInput {
+		m.setInputValue(m.promptSearchBaseInput)
+	}
+	m.promptSearchOpen = false
+	m.promptSearchMode = ""
+	m.promptSearchQuery = ""
+	m.promptSearchMatches = nil
+	m.promptSearchCursor = 0
+	m.promptSearchBaseInput = ""
+	m.syncInputOverlays()
+}
+
+func (m *model) ensurePromptHistoryLoaded() {
+	if m.promptHistoryLoaded {
+		return
+	}
+	entries, err := history.LoadRecentPrompts(promptSearchLoadLimit)
+	if err != nil {
+		m.promptHistoryEntries = nil
+		m.promptHistoryLoaded = true
+		m.statusNote = "Prompt history unavailable: " + compact(err.Error(), 72)
+		return
+	}
+	m.promptHistoryEntries = entries
+	m.promptHistoryLoaded = true
+}
+
+func (m *model) refreshPromptSearchMatches() {
+	tokens, workspaceFilter, sessionFilter := parsePromptSearchQuery(m.promptSearchQuery)
+	limit := promptSearchResultCap
+	if m.promptSearchMode == promptSearchModePanel {
+		limit = promptSearchLoadLimit
+	}
+	matches := make([]history.PromptEntry, 0, min(len(m.promptHistoryEntries), limit))
+	for i := len(m.promptHistoryEntries) - 1; i >= 0; i-- {
+		entry := m.promptHistoryEntries[i]
+		prompt := strings.TrimSpace(entry.Prompt)
+		if prompt == "" {
+			continue
+		}
+		workspaceValue := strings.ToLower(strings.TrimSpace(entry.Workspace))
+		if workspaceFilter != "" && !strings.Contains(workspaceValue, workspaceFilter) {
+			continue
+		}
+		sessionValue := strings.ToLower(strings.TrimSpace(entry.SessionID))
+		if sessionFilter != "" && !strings.Contains(sessionValue, sessionFilter) {
+			continue
+		}
+		promptLower := strings.ToLower(prompt)
+		if !matchAllTokens(promptLower, tokens) {
+			continue
+		}
+		matches = append(matches, entry)
+		if len(matches) >= limit {
+			break
+		}
+	}
+
+	m.promptSearchMatches = matches
+	if len(matches) == 0 {
+		m.promptSearchCursor = 0
+		return
+	}
+	m.promptSearchCursor = clamp(m.promptSearchCursor, 0, len(matches)-1)
+}
+
+func (m *model) stepPromptSearch(delta int) {
+	if len(m.promptSearchMatches) == 0 {
+		return
+	}
+	next := m.promptSearchCursor + delta
+	if next < 0 {
+		next = 0
+	}
+	if next >= len(m.promptSearchMatches) {
+		next = len(m.promptSearchMatches) - 1
+	}
+	m.promptSearchCursor = next
+}
+
+func (m *model) trimPromptSearchQuery() {
+	if m.promptSearchQuery == "" {
+		return
+	}
+	runes := []rune(m.promptSearchQuery)
+	m.promptSearchQuery = string(runes[:len(runes)-1])
+	m.refreshPromptSearchMatches()
+}
+
 func (m *model) toggleMode() {
 	if m.mode == modeBuild {
 		m.mode = modePlan
@@ -1145,6 +1339,22 @@ func (m model) submitPrompt(value string) (tea.Model, tea.Cmd) {
 
 	m.input.Reset()
 	m.screen = screenChat
+	if m.promptHistoryLoaded {
+		entry := history.PromptEntry{
+			Timestamp: time.Now().UTC(),
+			Workspace: strings.TrimSpace(m.workspace),
+			Prompt:    strings.TrimSpace(displayText),
+		}
+		if m.sess != nil {
+			entry.SessionID = m.sess.ID
+		}
+		if entry.Prompt != "" {
+			m.promptHistoryEntries = append(m.promptHistoryEntries, entry)
+			if len(m.promptHistoryEntries) > promptSearchLoadLimit {
+				m.promptHistoryEntries = m.promptHistoryEntries[len(m.promptHistoryEntries)-promptSearchLoadLimit:]
+			}
+		}
+	}
 	m.appendChat(chatEntry{
 		Kind:   "user",
 		Title:  "You",
@@ -1599,7 +1809,11 @@ func (m model) renderLanding() string {
 		Width(m.landingInputShellWidth()).
 		Render(m.input.View())
 	parts := []string{logo, "", m.renderModeTabs(), ""}
-	if m.mentionOpen {
+	if m.startupGuide.Active {
+		parts = append(parts, m.renderStartupGuidePanel(), "")
+	} else if m.promptSearchOpen {
+		parts = append(parts, m.renderPromptSearchPalette(), "")
+	} else if m.mentionOpen {
 		parts = append(parts, m.renderMentionPalette(), "")
 	} else if m.commandOpen {
 		parts = append(parts, m.renderCommandPalette(), "")
@@ -1617,7 +1831,11 @@ func (m model) renderFooter() string {
 	if m.approval != nil {
 		parts = append(parts, m.renderApprovalBanner())
 	}
-	if m.mentionOpen {
+	if m.startupGuide.Active {
+		parts = append(parts, m.renderStartupGuidePanel())
+	} else if m.promptSearchOpen {
+		parts = append(parts, m.renderPromptSearchPalette())
+	} else if m.mentionOpen {
 		parts = append(parts, m.renderMentionPalette())
 	} else if m.commandOpen {
 		parts = append(parts, m.renderCommandPalette())
@@ -1775,6 +1993,457 @@ func (m model) renderTopInfoLine(left, right string, width int) string {
 	}
 	gap := width - leftW - rightW
 	return left + strings.Repeat(" ", max(2, gap)) + right
+}
+
+func (m model) renderPromptSearchPalette() string {
+	width := m.commandPaletteWidth()
+	items := m.promptSearchMatches
+	modeLabel := "search"
+	if m.promptSearchMode == promptSearchModePanel {
+		modeLabel = "panel"
+	}
+	if len(items) == 0 {
+		query := strings.TrimSpace(m.promptSearchQuery)
+		if query == "" {
+			query = "(all)"
+		}
+		content := []string{
+			commandPaletteMetaStyle.Render("Prompt history " + modeLabel),
+			commandPaletteMetaStyle.Render("query: " + query + "  (filters: ws:<kw> sid:<kw>)"),
+			commandPaletteMetaStyle.Render("No matching prompts."),
+			commandPaletteMetaStyle.Render("Type to filter  PgUp/PgDn page  Enter apply  Esc close"),
+		}
+		return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, content...))
+	}
+
+	selected, _ := m.selectedPromptSearchEntry()
+	rowWidth := max(1, width-commandPaletteStyle.GetHorizontalFrameSize())
+	rows := make([]string, 0, promptSearchPageSize+3)
+	for _, item := range m.visiblePromptSearchEntriesPage() {
+		rowStyle := commandPaletteRowStyle
+		textStyle := commandPaletteDescStyle
+		if item.Timestamp.Equal(selected.Timestamp) && item.SessionID == selected.SessionID && item.Prompt == selected.Prompt {
+			rowStyle = commandPaletteSelectedRowStyle
+			textStyle = commandPaletteSelectedDescStyle
+		}
+		workspaceName := filepath.Base(strings.TrimSpace(item.Workspace))
+		if workspaceName == "" || workspaceName == "." {
+			workspaceName = strings.TrimSpace(item.Workspace)
+		}
+		if workspaceName == "" {
+			workspaceName = "-"
+		}
+		meta := fmt.Sprintf("%s  ws:%s  sid:%s", item.Timestamp.Local().Format("01-02 15:04"), compact(workspaceName, 16), compact(item.SessionID, 12))
+		rowText := compact(strings.TrimSpace(item.Prompt), max(12, rowWidth-2))
+		rows = append(rows, rowStyle.Width(rowWidth).Render(textStyle.Render(rowText)))
+		rows = append(rows, rowStyle.Width(rowWidth).Render(commandPaletteMetaStyle.Render(compact(meta, max(12, rowWidth-2)))))
+	}
+	for len(rows) < promptSearchPageSize*2 {
+		rows = append(rows, commandPaletteRowStyle.Width(rowWidth).Render(""))
+	}
+
+	query := strings.TrimSpace(m.promptSearchQuery)
+	if query == "" {
+		query = "(all)"
+	}
+	meta := fmt.Sprintf("%s  query:%s  |  ws:<kw> sid:<kw>  PgUp/PgDn page  Ctrl+F next  Ctrl+S prev  Enter apply  Esc close", modeLabel, compact(query, 24))
+	rows = append(rows, commandPaletteMetaStyle.Render(meta))
+	return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
+}
+
+func (m model) renderStartupGuidePanel() string {
+	width := max(24, m.commandPaletteWidth())
+	title := strings.TrimSpace(m.startupGuide.Title)
+	if title == "" {
+		title = "Provider setup required"
+	}
+	status := strings.TrimSpace(m.startupGuide.Status)
+	if status == "" {
+		status = "AI provider is not available."
+	}
+
+	innerWidth := max(20, width-commandPaletteStyle.GetHorizontalFrameSize())
+	content := make([]string, 0, 2+len(m.startupGuide.Lines))
+	content = append(content, accentStyle.Render(title))
+	content = append(content, commandPaletteMetaStyle.Width(innerWidth).Render(status))
+	for _, line := range m.startupGuide.Lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		content = append(content, commandPaletteMetaStyle.Width(innerWidth).Render(line))
+	}
+	content = append(content, commandPaletteMetaStyle.Width(innerWidth).Render(startupGuideInputHint(m.startupGuide.CurrentField)))
+
+	return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, content...))
+}
+
+func (m *model) handleStartupGuideSubmission(rawInput string) error {
+	rawInput = strings.TrimSpace(rawInput)
+
+	field := strings.TrimSpace(m.startupGuide.CurrentField)
+	if !isStartupGuideField(field) {
+		field = startupFieldType
+	}
+	if explicitField, explicitValue, ok := parseStartupConfigInput(rawInput); ok {
+		field = explicitField
+		rawInput = explicitValue
+	}
+
+	switch field {
+	case startupFieldType, startupFieldBaseURL, startupFieldModel:
+		value, err := m.resolveStartupFieldValue(field, rawInput)
+		if err != nil {
+			return err
+		}
+		if err := m.applyStartupConfigField(field, value); err != nil {
+			return err
+		}
+		next := startupNextField(field)
+		if next == "" {
+			next = startupFieldAPIKey
+		}
+		m.setStartupGuideStep(next, "")
+		m.input.Reset()
+		return nil
+	case startupFieldAPIKey:
+		return m.verifyAndFinalizeStartupAPIKey(rawInput)
+	default:
+		return fmt.Errorf("unsupported setup field: %s", field)
+	}
+}
+
+func (m *model) verifyAndFinalizeStartupAPIKey(rawInput string) error {
+	apiKey := sanitizeAPIKeyInput(rawInput)
+	if apiKey == "" {
+		return fmt.Errorf("please paste a non-empty API key")
+	}
+
+	checkCfg := m.cfg.Provider
+	checkCfg.APIKey = apiKey
+	check := provider.CheckAvailability(context.Background(), checkCfg)
+	if !check.Ready {
+		m.llmConnected = false
+		m.phase = "error"
+		m.setStartupGuideStep(startupFieldAPIKey, startupGuideIssueHint(check))
+		return nil
+	}
+
+	writtenPath, saveErr := config.UpsertProviderAPIKey(m.startupGuide.ConfigPath, apiKey)
+
+	if envName := strings.TrimSpace(checkCfg.APIKeyEnv); envName != "" {
+		_ = os.Setenv(envName, apiKey)
+	} else {
+		_ = os.Setenv("BYTEMIND_API_KEY", apiKey)
+	}
+
+	client, err := provider.NewClient(checkCfg)
+	if err != nil {
+		return err
+	}
+	if m.runner != nil {
+		m.runner.UpdateProvider(checkCfg, client)
+	}
+	m.cfg.Provider = checkCfg
+	m.startupGuide.Active = false
+	m.statusNote = "Provider configured and verified. You can start chatting."
+	m.llmConnected = true
+	m.phase = "idle"
+	if saveErr != nil {
+		m.statusNote = "Provider verified, but config save failed: " + compact(saveErr.Error(), 80)
+	} else if strings.TrimSpace(writtenPath) != "" {
+		m.statusNote = "Provider configured and verified. Saved to " + compact(writtenPath, 48)
+	}
+	m.syncInputStyle()
+	m.input.Reset()
+	return nil
+}
+
+func (m *model) applyStartupConfigField(field, value string) error {
+	field = strings.TrimSpace(field)
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("%s cannot be empty", field)
+	}
+	persistValue := value
+
+	switch field {
+	case "model":
+		m.cfg.Provider.Model = value
+	case "base_url":
+		m.cfg.Provider.BaseURL = value
+	case "type":
+		normalized, ok := normalizeStartupProviderType(value)
+		if !ok {
+			return fmt.Errorf("provider must be openai-compatible or anthropic")
+		}
+		m.cfg.Provider.Type = normalized
+		persistValue = normalized
+	default:
+		return fmt.Errorf("unsupported setup field: %s", field)
+	}
+
+	writtenPath, err := config.UpsertProviderField(m.startupGuide.ConfigPath, field, persistValue)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(writtenPath) != "" {
+		m.startupGuide.ConfigPath = writtenPath
+	}
+	return nil
+}
+
+func parseStartupConfigInput(raw string) (field, value string, ok bool) {
+	trimmed := strings.TrimSpace(raw)
+	lower := strings.ToLower(trimmed)
+	if lower == "" {
+		return "", "", false
+	}
+
+	parse := func(alias, normalized string) (string, string, bool) {
+		for _, sep := range []string{"=", ":"} {
+			prefix := alias + sep
+			if strings.HasPrefix(lower, prefix) {
+				val := strings.TrimSpace(trimmed[len(prefix):])
+				return normalized, val, true
+			}
+		}
+		return "", "", false
+	}
+
+	for _, candidate := range []struct {
+		alias      string
+		normalized string
+	}{
+		{alias: "model", normalized: "model"},
+		{alias: "base_url", normalized: "base_url"},
+		{alias: "baseurl", normalized: "base_url"},
+		{alias: "base-url", normalized: "base_url"},
+		{alias: "provider", normalized: "type"},
+		{alias: "type", normalized: "type"},
+		{alias: "provider_type", normalized: "type"},
+		{alias: "api_key", normalized: "api_key"},
+		{alias: "apikey", normalized: "api_key"},
+		{alias: "key", normalized: "api_key"},
+	} {
+		if field, value, ok := parse(candidate.alias, candidate.normalized); ok {
+			return field, value, true
+		}
+	}
+
+	return "", "", false
+}
+
+func sanitizeAPIKeyInput(raw string) string {
+	value := strings.TrimSpace(raw)
+	value = strings.Trim(value, "\"'")
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "authorization: bearer ") {
+		value = strings.TrimSpace(value[len("authorization: bearer "):])
+	}
+	if strings.HasPrefix(lower, "bearer ") {
+		value = strings.TrimSpace(value[len("bearer "):])
+	}
+	return strings.TrimSpace(value)
+}
+
+func normalizeStartupProviderType(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "openai-compatible", "openai_compatible", "openai":
+		return "openai-compatible", true
+	case "anthropic":
+		return "anthropic", true
+	default:
+		return "", false
+	}
+}
+
+func isStartupGuideField(field string) bool {
+	switch field {
+	case startupFieldType, startupFieldBaseURL, startupFieldModel, startupFieldAPIKey:
+		return true
+	default:
+		return false
+	}
+}
+
+func startupNextField(current string) string {
+	for i, field := range startupFieldOrder {
+		if field == current {
+			if i+1 >= len(startupFieldOrder) {
+				return ""
+			}
+			return startupFieldOrder[i+1]
+		}
+	}
+	return startupFieldType
+}
+
+func startupFieldStep(field string) (int, int) {
+	for i, item := range startupFieldOrder {
+		if item == field {
+			return i + 1, len(startupFieldOrder)
+		}
+	}
+	return 1, len(startupFieldOrder)
+}
+
+func startupFieldName(field string) string {
+	switch field {
+	case startupFieldType:
+		return "provider"
+	case startupFieldBaseURL:
+		return "base_url"
+	case startupFieldModel:
+		return "model"
+	case startupFieldAPIKey:
+		return "api_key"
+	default:
+		return field
+	}
+}
+
+func startupProviderDefaultBaseURL(providerType string) string {
+	switch strings.ToLower(strings.TrimSpace(providerType)) {
+	case "anthropic":
+		return "https://api.anthropic.com"
+	default:
+		return "https://api.openai.com/v1"
+	}
+}
+
+func startupProviderDefaultModel(providerType string) string {
+	switch strings.ToLower(strings.TrimSpace(providerType)) {
+	case "anthropic":
+		return ""
+	default:
+		return "GPT-5.4"
+	}
+}
+
+func (m model) startupCurrentValue(field string) string {
+	switch field {
+	case startupFieldType:
+		return strings.TrimSpace(m.cfg.Provider.Type)
+	case startupFieldBaseURL:
+		return strings.TrimSpace(m.cfg.Provider.BaseURL)
+	case startupFieldModel:
+		return strings.TrimSpace(m.cfg.Provider.Model)
+	default:
+		return ""
+	}
+}
+
+func (m *model) resolveStartupFieldValue(field, rawInput string) (string, error) {
+	value := strings.TrimSpace(rawInput)
+	if value != "" {
+		return value, nil
+	}
+
+	current := m.startupCurrentValue(field)
+	if current != "" {
+		return current, nil
+	}
+
+	switch field {
+	case startupFieldType:
+		return "openai-compatible", nil
+	case startupFieldBaseURL:
+		return startupProviderDefaultBaseURL(m.cfg.Provider.Type), nil
+	case startupFieldModel:
+		if fallback := startupProviderDefaultModel(m.cfg.Provider.Type); fallback != "" {
+			return fallback, nil
+		}
+		return "", fmt.Errorf("please enter model name for provider %s", strings.TrimSpace(m.cfg.Provider.Type))
+	default:
+		return "", fmt.Errorf("%s cannot be empty", startupFieldName(field))
+	}
+}
+
+func (m *model) initializeStartupGuide() {
+	field := strings.TrimSpace(m.startupGuide.CurrentField)
+	if !isStartupGuideField(field) {
+		field = startupFieldType
+	}
+	m.setStartupGuideStep(field, "")
+}
+
+func (m *model) setStartupGuideStep(field, issue string) {
+	if !isStartupGuideField(field) {
+		field = startupFieldType
+	}
+	step, total := startupFieldStep(field)
+	fieldName := startupFieldName(field)
+	if strings.TrimSpace(issue) == "" {
+		m.startupGuide.Status = fmt.Sprintf("Step %d/%d: set %s.", step, total, fieldName)
+	} else {
+		m.startupGuide.Status = fmt.Sprintf("Step %d/%d: set %s. %s", step, total, fieldName, issue)
+	}
+	m.statusNote = m.startupGuide.Status
+	m.startupGuide.CurrentField = field
+	m.startupGuide.Lines = startupGuideStepLines(field, m.cfg, m.startupGuide.ConfigPath, issue)
+	m.syncInputStyle()
+}
+
+func startupGuideStepLines(field string, cfg config.Config, configPath, issue string) []string {
+	lines := make([]string, 0, 8)
+	switch field {
+	case startupFieldType:
+		lines = append(lines, "Enter provider: openai-compatible or anthropic.")
+	case startupFieldBaseURL:
+		lines = append(lines, "Enter provider base_url.")
+		lines = append(lines, "Example: https://api.deepseek.com")
+	case startupFieldModel:
+		lines = append(lines, "Enter model name.")
+		lines = append(lines, "Example: deepseek-chat or GPT-5.4")
+	case startupFieldAPIKey:
+		lines = append(lines, "Paste API key and press Enter.")
+		lines = append(lines, "Bytemind will verify it automatically.")
+	}
+
+	switch field {
+	case startupFieldType, startupFieldBaseURL, startupFieldModel:
+		current := ""
+		switch field {
+		case startupFieldType:
+			current = strings.TrimSpace(cfg.Provider.Type)
+		case startupFieldBaseURL:
+			current = strings.TrimSpace(cfg.Provider.BaseURL)
+		case startupFieldModel:
+			current = strings.TrimSpace(cfg.Provider.Model)
+		}
+		if current == "" {
+			lines = append(lines, "Press Enter to use default.")
+		} else {
+			lines = append(lines, "Press Enter to keep current: "+current)
+		}
+	}
+	if strings.TrimSpace(issue) != "" {
+		lines = append(lines, "Issue: "+issue)
+	}
+	if strings.TrimSpace(configPath) != "" {
+		lines = append(lines, "Config file: "+configPath)
+	}
+	return lines
+}
+
+func startupGuideIssueHint(check provider.Availability) string {
+	reason := strings.ToLower(strings.TrimSpace(check.Reason))
+	switch {
+	case strings.Contains(reason, "missing api key"):
+		return "No API key is configured yet."
+	case strings.Contains(reason, "unauthorized"):
+		return "The API key was rejected by the provider."
+	case strings.Contains(reason, "failed to reach"):
+		return "Cannot reach provider endpoint. Check proxy or network."
+	case strings.Contains(reason, "not found"):
+		return "Provider endpoint path looks incorrect."
+	default:
+		if strings.TrimSpace(check.Reason) == "" {
+			return "Provider check failed."
+		}
+		return compact(strings.TrimSpace(check.Reason), 90)
+	}
 }
 
 func (m model) renderCommandPalette() string {
@@ -2881,9 +3550,72 @@ func (m *model) syncCommandPalette() {
 }
 
 func (m *model) syncInputOverlays() {
+	if m.startupGuide.Active || m.promptSearchOpen {
+		return
+	}
 	m.syncCommandPalette()
 	m.syncMentionPalette()
 	m.syncInputImageRefs(m.input.Value())
+}
+
+func (m model) handlePromptSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case isPageUpKey(msg):
+		m.stepPromptSearch(-promptSearchPageSize)
+		return m, nil
+	case isPageDownKey(msg):
+		m.stepPromptSearch(promptSearchPageSize)
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "esc":
+		m.closePromptSearch(true)
+		m.statusNote = "Prompt search canceled."
+		return m, nil
+	case "enter":
+		selected, ok := m.selectedPromptSearchEntry()
+		if ok {
+			m.setInputValue(selected.Prompt)
+			m.closePromptSearch(false)
+			m.statusNote = "Prompt restored from history."
+			return m, nil
+		}
+		m.closePromptSearch(true)
+		m.statusNote = "No prompt selected."
+		return m, nil
+	case "ctrl+f", "down", "j":
+		m.stepPromptSearch(1)
+		return m, nil
+	case "ctrl+s", "up", "k":
+		m.stepPromptSearch(-1)
+		return m, nil
+	case "home":
+		m.stepPromptSearch(-len(m.promptSearchMatches))
+		return m, nil
+	case "end":
+		m.stepPromptSearch(len(m.promptSearchMatches))
+		return m, nil
+	case "backspace", "ctrl+h":
+		m.trimPromptSearchQuery()
+		return m, nil
+	}
+
+	switch msg.Type {
+	case tea.KeyBackspace:
+		m.trimPromptSearchQuery()
+		return m, nil
+	case tea.KeySpace:
+		m.promptSearchQuery += " "
+		m.refreshPromptSearchMatches()
+		return m, nil
+	case tea.KeyRunes:
+		m.promptSearchQuery += string(msg.Runes)
+		m.refreshPromptSearchMatches()
+		return m, nil
+	default:
+		return m, nil
+	}
 }
 
 func (m *model) syncMentionPalette() {
@@ -3067,6 +3799,24 @@ func (m model) visibleMentionItemsPage() []mention.Candidate {
 	return m.mentionResults[start:end]
 }
 
+func (m model) selectedPromptSearchEntry() (history.PromptEntry, bool) {
+	if len(m.promptSearchMatches) == 0 {
+		return history.PromptEntry{}, false
+	}
+	index := clamp(m.promptSearchCursor, 0, len(m.promptSearchMatches)-1)
+	return m.promptSearchMatches[index], true
+}
+
+func (m model) visiblePromptSearchEntriesPage() []history.PromptEntry {
+	if len(m.promptSearchMatches) == 0 {
+		return nil
+	}
+	cursor := clamp(m.promptSearchCursor, 0, len(m.promptSearchMatches)-1)
+	start := (cursor / promptSearchPageSize) * promptSearchPageSize
+	end := min(len(m.promptSearchMatches), start+promptSearchPageSize)
+	return m.promptSearchMatches[start:end]
+}
+
 func (m *model) setInputValue(value string) {
 	m.input.SetValue(value)
 	m.input.CursorEnd()
@@ -3105,9 +3855,11 @@ func (m model) helpText() string {
 		"Tab toggles between Build and Plan modes.",
 		"Plan mode keeps the plan panel visible and focused on structured steps.",
 		"Use Ctrl+G to open or close the help panel.",
+		"Use Ctrl+F to search prompt history and restore previous input.",
+		"If provider setup is required, paste an API key in the input and press Enter.",
 		"After restoring a session with a saved plan, type 'continue execution' to resume it.",
 		"Approval requests appear above the input area when a shell command needs confirmation.",
-		"The footer keeps only the essential shortcuts: tab agents, / commands, Ctrl+L sessions, Ctrl+C quit.",
+		"The footer keeps only the essential shortcuts: tab agents, / commands, Ctrl+F history, Ctrl+L sessions, Ctrl+C quit.",
 	}, "\n")
 }
 func visibleCommandItems(group string) []commandItem {
@@ -3182,6 +3934,46 @@ func matchesCommandItem(item commandItem, query string) bool {
 		strings.HasPrefix(usage, query)
 }
 
+func matchAllTokens(text string, tokens []string) bool {
+	if len(tokens) == 0 {
+		return true
+	}
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		if !strings.Contains(text, token) {
+			return false
+		}
+	}
+	return true
+}
+
+func parsePromptSearchQuery(raw string) (tokens []string, workspaceFilter, sessionFilter string) {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(raw)))
+	tokens = make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(field, "ws:"):
+			workspaceFilter = strings.TrimSpace(strings.TrimPrefix(field, "ws:"))
+		case strings.HasPrefix(field, "workspace:"):
+			workspaceFilter = strings.TrimSpace(strings.TrimPrefix(field, "workspace:"))
+		case strings.HasPrefix(field, "sid:"):
+			sessionFilter = strings.TrimSpace(strings.TrimPrefix(field, "sid:"))
+		case strings.HasPrefix(field, "session:"):
+			sessionFilter = strings.TrimSpace(strings.TrimPrefix(field, "session:"))
+		default:
+			tokens = append(tokens, field)
+		}
+	}
+	return tokens, workspaceFilter, sessionFilter
+}
+
 func (m model) chatPanelWidth() int {
 	return max(20, m.width)
 }
@@ -3217,9 +4009,43 @@ func (m model) modeAccentColor() lipgloss.Color {
 }
 
 func (m *model) syncInputStyle() {
-	m.input.Placeholder = "Ask Bytemind to inspect, change, or verify this workspace..."
+	if m.startupGuide.Active {
+		m.input.Placeholder = startupGuideInputPlaceholder(m.startupGuide.CurrentField)
+	} else {
+		m.input.Placeholder = "Ask Bytemind to inspect, change, or verify this workspace..."
+	}
 	m.input.Prompt = ""
 	m.input.SetHeight(2)
+}
+
+func startupGuideInputHint(field string) string {
+	switch strings.TrimSpace(field) {
+	case startupFieldType:
+		return "Enter provider and press Enter."
+	case startupFieldBaseURL:
+		return "Enter base_url and press Enter."
+	case startupFieldModel:
+		return "Enter model and press Enter."
+	case startupFieldAPIKey:
+		return "Paste API key and press Enter to verify."
+	default:
+		return "Input value then press Enter."
+	}
+}
+
+func startupGuideInputPlaceholder(field string) string {
+	switch strings.TrimSpace(field) {
+	case startupFieldType:
+		return "Step 1/4: provider (openai-compatible or anthropic)"
+	case startupFieldBaseURL:
+		return "Step 2/4: base_url (example: https://api.deepseek.com)"
+	case startupFieldModel:
+		return "Step 3/4: model (example: deepseek-chat)"
+	case startupFieldAPIKey:
+		return "Step 4/4: paste API key and press Enter..."
+	default:
+		return "Complete setup and press Enter..."
+	}
 }
 
 func resolveSessionID(summaries []session.Summary, prefix string) (string, error) {

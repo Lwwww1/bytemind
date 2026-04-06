@@ -260,7 +260,10 @@ func normalize(cfg *Config) error {
 		return errors.New("provider.base_url is required")
 	}
 	if strings.TrimSpace(cfg.Provider.Model) == "" {
-		return errors.New("provider.model is required")
+		cfg.Provider.Model = defaultModel(cfg.Provider.Type)
+		if strings.TrimSpace(cfg.Provider.Model) == "" {
+			return errors.New("provider.model is required")
+		}
 	}
 	if cfg.Provider.APIKeyEnv == "" {
 		cfg.Provider.APIKeyEnv = "BYTEMIND_API_KEY"
@@ -364,5 +367,14 @@ func defaultBaseURL(providerType string) string {
 		return "https://api.anthropic.com"
 	default:
 		return "https://api.openai.com/v1"
+	}
+}
+
+func defaultModel(providerType string) string {
+	switch normalizeProviderType(providerType) {
+	case "openai-compatible", "openai", "":
+		return "GPT-5.4"
+	default:
+		return ""
 	}
 }

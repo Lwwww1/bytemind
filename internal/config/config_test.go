@@ -137,6 +137,29 @@ func TestLoadAcceptsLegacySessionDirField(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsOpenAIModelWhenMissing(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	if err := writeConfig(filepath.Join(workspace, "config.json"), map[string]any{
+		"provider": map[string]any{
+			"type":     "openai-compatible",
+			"base_url": "https://api.deepseek.com",
+			"model":    "",
+			"api_key":  "test-key",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider.Model != "GPT-5.4" {
+		t.Fatalf("expected default model GPT-5.4, got %q", cfg.Provider.Model)
+	}
+}
+
 func TestLoadRejectsUnsupportedProviderType(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("BYTEMIND_HOME", t.TempDir())
@@ -233,6 +256,121 @@ func TestEnsureHomeLayoutCreatesStandardDirectories(t *testing.T) {
 	}
 	if strings.TrimSpace(cfg.Provider.Model) == "" {
 		t.Fatalf("expected default provider model to be present")
+	}
+}
+
+func TestUpsertProviderAPIKeyUpdatesExistingConfig(t *testing.T) {
+	workspace := t.TempDir()
+	configPath := filepath.Join(workspace, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "provider": {
+    "type": "openai-compatible",
+    "base_url": "https://api.openai.com/v1",
+    "model": "GPT-5.4",
+    "api_key": "old-key",
+    "api_key_env": "BYTEMIND_API_KEY"
+  },
+  "custom": "keep-me"
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writtenPath, err := UpsertProviderAPIKey(configPath, "new-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writtenPath == "" {
+		t.Fatal("expected written path")
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	providerDoc, ok := doc["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected provider object, got %#v", doc["provider"])
+	}
+	if providerDoc["api_key"] != "new-key" {
+		t.Fatalf("expected api_key to be updated, got %#v", providerDoc["api_key"])
+	}
+	if doc["custom"] != "keep-me" {
+		t.Fatalf("expected custom field to be preserved, got %#v", doc["custom"])
+	}
+}
+
+func TestUpsertProviderAPIKeyCreatesConfigWhenMissing(t *testing.T) {
+	workspace := t.TempDir()
+	configPath := filepath.Join(workspace, "nested", "config.json")
+
+	writtenPath, err := UpsertProviderAPIKey(configPath, "new-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(writtenPath) != filepath.Clean(configPath) {
+		t.Fatalf("expected written path %q, got %q", configPath, writtenPath)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider.ResolveAPIKey() != "new-key" {
+		t.Fatalf("expected api key to be written, got %q", cfg.Provider.ResolveAPIKey())
+	}
+	if cfg.Provider.Model == "" || cfg.Provider.BaseURL == "" {
+		t.Fatalf("expected defaults to be present, got %#v", cfg.Provider)
+	}
+}
+
+func TestUpsertProviderFieldUpdatesModelAndBaseURL(t *testing.T) {
+	workspace := t.TempDir()
+	configPath := filepath.Join(workspace, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "provider": {
+    "type": "openai-compatible",
+    "base_url": "https://api.openai.com/v1",
+    "model": "GPT-5.4",
+    "api_key": "test-key"
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := UpsertProviderField(configPath, "model", "deepseek-chat"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpsertProviderField(configPath, "base_url", "https://api.deepseek.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(workspace, configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider.Model != "deepseek-chat" {
+		t.Fatalf("expected updated model, got %q", cfg.Provider.Model)
+	}
+	if cfg.Provider.BaseURL != "https://api.deepseek.com" {
+		t.Fatalf("expected updated base url, got %q", cfg.Provider.BaseURL)
+	}
+}
+
+func TestUpsertProviderFieldRejectsUnsupportedField(t *testing.T) {
+	_, err := UpsertProviderField(filepath.Join(t.TempDir(), "config.json"), "foo", "bar")
+	if err == nil {
+		t.Fatal("expected unsupported field error")
+	}
+	if !strings.Contains(err.Error(), "unsupported provider field") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"bytemind/internal/config"
+	"bytemind/internal/provider"
 	"bytemind/internal/session"
 )
 
@@ -20,6 +22,14 @@ func TestCompleteSlashCommand(t *testing.T) {
 	}
 	if completed != "/help" {
 		t.Fatalf("expected /help, got %q", completed)
+	}
+}
+
+func TestPrintUsageIncludesInstallCommand(t *testing.T) {
+	var out bytes.Buffer
+	printUsage(&out)
+	if !strings.Contains(out.String(), "bytemind install") {
+		t.Fatalf("expected usage to mention install command, got %q", out.String())
 	}
 }
 
@@ -455,6 +465,59 @@ func TestBootstrapRejectsMissingAPIKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "missing API key") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBootstrapForTUIAllowsMissingAPIKey(t *testing.T) {
+	workspace := t.TempDir()
+	t.Chdir(workspace)
+	t.Setenv("BYTEMIND_API_KEY", "")
+	writeTestConfig(t, workspace, map[string]any{
+		"provider": map[string]any{
+			"type":     "openai-compatible",
+			"base_url": "https://api.openai.com/v1",
+			"model":    "gpt-5.4-mini",
+		},
+		"stream": false,
+	})
+
+	runner, store, sess, err := bootstrapForTUI("", "", "", "", "", 0, strings.NewReader(""), &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("expected bootstrapForTUI to continue without api key, got %v", err)
+	}
+	if runner == nil || store == nil || sess == nil {
+		t.Fatal("expected bootstrapForTUI to return runner, store, and session")
+	}
+}
+
+func TestBuildStartupGuideIncludesReasonAndPath(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.Config{
+		Provider: config.ProviderConfig{
+			APIKeyEnv: "BYTEMIND_API_KEY",
+		},
+	}
+	guide := buildStartupGuide(cfg, provider.Availability{
+		Ready:  false,
+		Reason: "API key unauthorized",
+		Detail: "provider error 401",
+	}, workspace, "")
+
+	if !guide.Active {
+		t.Fatal("expected active startup guide")
+	}
+	if !strings.Contains(guide.Status, "guide you through provider") {
+		t.Fatalf("unexpected guide status: %q", guide.Status)
+	}
+	if guide.CurrentField != "type" {
+		t.Fatalf("expected startup guide to begin at provider step, got %q", guide.CurrentField)
+	}
+	if len(guide.Lines) == 0 {
+		t.Fatal("expected guide lines")
+	}
+	joined := strings.Join(guide.Lines, "\n")
+	if !strings.Contains(joined, "Paste your API key") {
+		t.Fatalf("expected key input hint, got %q", joined)
 	}
 }
 

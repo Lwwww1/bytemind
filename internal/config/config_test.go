@@ -16,6 +16,7 @@ func TestLoadUsesEnvOverrides(t *testing.T) {
 	t.Setenv("BYTEMIND_HOME", home)
 	t.Setenv("BYTEMIND_MODEL", "override-model")
 	t.Setenv("BYTEMIND_API_KEY", "secret")
+	t.Setenv("BYTEMIND_TOKEN_QUOTA", "88000")
 	t.Setenv("BYTEMIND_PROVIDER_TYPE", "anthropic")
 	t.Setenv("BYTEMIND_PROVIDER_AUTO_DETECT_TYPE", "true")
 	t.Setenv("BYTEMIND_STREAM", "false")
@@ -41,6 +42,25 @@ func TestLoadUsesEnvOverrides(t *testing.T) {
 	}
 	if cfg.Provider.ResolveAPIKey() != "secret" {
 		t.Fatalf("expected api key from env")
+	}
+	if cfg.TokenQuota != 88000 {
+		t.Fatalf("expected token quota from env override, got %d", cfg.TokenQuota)
+	}
+}
+
+func TestLoadIgnoresInvalidTokenQuotaEnv(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv("BYTEMIND_API_KEY", "secret")
+	t.Setenv("BYTEMIND_TOKEN_QUOTA", "not-a-number")
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TokenQuota != 5000 {
+		t.Fatalf("expected invalid token quota to fall back to default 5000, got %d", cfg.TokenQuota)
 	}
 }
 

@@ -2544,7 +2544,7 @@ func renderChatCard(item chatEntry, width int) string {
 	case "user":
 		border = chatUserStyle
 	case "tool":
-		border = chatToolStyle
+		border = chatAssistantStyle
 	case "system":
 		border = chatSystemStyle
 	default:
@@ -2553,7 +2553,21 @@ func renderChatCard(item chatEntry, width int) string {
 		}
 	}
 	contentWidth := max(8, width-border.GetHorizontalFrameSize())
-	return border.Width(contentWidth).Render(renderChatSection(item, contentWidth))
+	rendered := border.Width(contentWidth).Render(renderChatSection(item, contentWidth))
+	if item.Kind != "tool" {
+		return rendered
+	}
+
+	sep := lipgloss.NewStyle().Foreground(colorTool).Render("│")
+	lines := strings.Split(rendered, "\n")
+	for i := range lines {
+		if strings.TrimSpace(lines[i]) == "" {
+			lines[i] = "  " + lines[i]
+			continue
+		}
+		lines[i] = sep + " " + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func renderChatSection(item chatEntry, width int) string {

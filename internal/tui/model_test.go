@@ -26,6 +26,19 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+type fakeClipboardTextWriter struct {
+	last string
+	err  error
+}
+
+func (f *fakeClipboardTextWriter) WriteText(_ context.Context, text string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.last = text
+	return nil
+}
+
 func TestHandleMouseScrollsViewport(t *testing.T) {
 	m := model{
 		screen: screenChat,
@@ -98,6 +111,152 @@ func TestHandleMouseEnablesViewportMouseForwarding(t *testing.T) {
 	}
 	if updated.viewport.YOffset == 0 {
 		t.Fatalf("expected mouse wheel to scroll viewport")
+	}
+}
+
+func TestHandleMouseDragSelectionCopiesViewportText(t *testing.T) {
+	writer := &fakeClipboardTextWriter{}
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:        screenChat,
+		width:         120,
+		height:        28,
+		input:         input,
+		viewport:      viewport.New(60, 10),
+		tokenUsage:    newTokenUsageComponent(),
+		clipboardText: writer,
+	}
+	m.viewport.SetContent("alpha line\nbeta line\ngamma line")
+
+	left, _, top, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatal("expected conversation viewport bounds to be available")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      left,
+		Y:      top,
+	})
+	pressed := got.(model)
+
+	got, _ = pressed.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionMotion,
+		X:      left + 4,
+		Y:      top,
+	})
+	moved := got.(model)
+
+	got, _ = moved.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionRelease,
+		Button: tea.MouseButtonLeft,
+		X:      left + 4,
+		Y:      top,
+	})
+	released := got.(model)
+
+	if writer.last != "alpha" {
+		t.Fatalf("expected copied selection %q, got %q", "alpha", writer.last)
+	}
+	if !strings.Contains(released.statusNote, "Copied selection") {
+		t.Fatalf("expected copy status note, got %q", released.statusNote)
+	}
+}
+
+func TestHandleMouseClickWithoutDragDoesNotCopySelection(t *testing.T) {
+	writer := &fakeClipboardTextWriter{}
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:        screenChat,
+		width:         120,
+		height:        28,
+		input:         input,
+		viewport:      viewport.New(60, 10),
+		tokenUsage:    newTokenUsageComponent(),
+		clipboardText: writer,
+	}
+	m.viewport.SetContent("alpha line\nbeta line")
+
+	left, _, top, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatal("expected conversation viewport bounds to be available")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      left + 2,
+		Y:      top,
+	})
+	pressed := got.(model)
+
+	got, _ = pressed.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionRelease,
+		Button: tea.MouseButtonLeft,
+		X:      left + 2,
+		Y:      top,
+	})
+	released := got.(model)
+
+	if writer.last != "" {
+		t.Fatalf("expected click without drag not to copy text, got %q", writer.last)
+	}
+	if !strings.Contains(released.statusNote, "Selection is empty") {
+		t.Fatalf("expected empty selection note, got %q", released.statusNote)
+	}
+}
+
+func TestHandleMouseDragSelectionCopyFailureSetsStatus(t *testing.T) {
+	writer := &fakeClipboardTextWriter{err: errors.New("clipboard write failed")}
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:        screenChat,
+		width:         120,
+		height:        28,
+		input:         input,
+		viewport:      viewport.New(60, 10),
+		tokenUsage:    newTokenUsageComponent(),
+		clipboardText: writer,
+	}
+	m.viewport.SetContent("alpha line\nbeta line")
+
+	left, _, top, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatal("expected conversation viewport bounds to be available")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      left,
+		Y:      top,
+	})
+	pressed := got.(model)
+
+	got, _ = pressed.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionMotion,
+		X:      left + 2,
+		Y:      top,
+	})
+	moved := got.(model)
+
+	got, _ = moved.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionRelease,
+		Button: tea.MouseButtonLeft,
+		X:      left + 2,
+		Y:      top,
+	})
+	released := got.(model)
+
+	if !strings.Contains(released.statusNote, "clipboard write failed") {
+		t.Fatalf("expected copy error in status note, got %q", released.statusNote)
 	}
 }
 

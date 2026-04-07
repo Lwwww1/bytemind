@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +51,8 @@ const (
 	footerHintText        = "tab agents | / commands | Ctrl+F history | Ctrl+L sessions | Ctrl+C quit"
 )
 
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
 type screenKind string
 
 const (
@@ -91,6 +94,11 @@ type chatEntry struct {
 	Meta   string
 	Body   string
 	Status string
+}
+
+type viewportSelectionPoint struct {
+	Col int
+	Row int
 }
 
 type commandItem struct {
@@ -219,6 +227,9 @@ type model struct {
 	chatAutoFollow        bool
 	draggingScrollbar     bool
 	scrollbarDragOffset   int
+	mouseSelecting        bool
+	mouseSelectionStart   viewportSelectionPoint
+	mouseSelectionEnd     viewportSelectionPoint
 	tokenUsage            tokenUsageComponent
 	tokenUsedTotal        int
 	tokenBudget           int
@@ -239,6 +250,7 @@ type model struct {
 	orphanedImages        map[llm.AssetID]time.Time
 	nextImageID           int
 	clipboard             clipboardImageReader
+	clipboardText         clipboardTextWriter
 	runCancel             context.CancelFunc
 	pendingBTW            []string
 	interrupting          bool
@@ -319,6 +331,7 @@ func newModel(opts Options) model {
 		orphanedImages:     make(map[llm.AssetID]time.Time, 8),
 		nextImageID:        nextSessionImageID(opts.Session),
 		clipboard:          defaultClipboardImageReader{},
+		clipboardText:      defaultClipboardTextWriter{},
 		startupGuide:       opts.StartupGuide,
 	}
 	if opts.StartupGuide.Active {
@@ -487,6 +500,35 @@ func (m model) shouldKeepStreamingIndexOnRunFinished() bool {
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.mouseSelecting {
+		switch msg.Action {
+		case tea.MouseActionMotion:
+			if point, ok := m.viewportPointFromMouse(msg.X, msg.Y); ok {
+				m.mouseSelectionEnd = point
+				m.statusNote = "Selecting text..."
+			}
+			return m, nil
+		case tea.MouseActionRelease:
+			if point, ok := m.viewportPointFromMouse(msg.X, msg.Y); ok {
+				m.mouseSelectionEnd = point
+			}
+			m.mouseSelecting = false
+			if selected := m.viewportSelectionText(); strings.TrimSpace(selected) != "" {
+				if m.clipboardText == nil {
+					m.statusNote = "clipboard copy is unavailable in current environment"
+				} else if err := m.clipboardText.WriteText(context.Background(), selected); err != nil {
+					m.statusNote = err.Error()
+				} else {
+					m.statusNote = "Copied selection to clipboard."
+				}
+			} else {
+				m.statusNote = "Selection is empty."
+			}
+			m.draggingScrollbar = false
+			return m, nil
+		}
+	}
+
 	if msg.Action == tea.MouseActionRelease {
 		m.draggingScrollbar = false
 	}
@@ -526,6 +568,13 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					m.chatAutoFollow = false
 					return m, nil
 				}
+			}
+			if point, ok := m.viewportPointFromMouse(msg.X, msg.Y); ok {
+				m.mouseSelecting = true
+				m.mouseSelectionStart = point
+				m.mouseSelectionEnd = point
+				m.statusNote = "Selecting text..."
+				return m, nil
 			}
 		}
 	}
@@ -2098,6 +2147,89 @@ func (m *model) dragScrollbarTo(mouseY int) {
 	desiredTop = clamp(desiredTop, 0, trackRange)
 	offset := (desiredTop*maxOffset + trackRange/2) / trackRange
 	m.viewport.SetYOffset(clamp(offset, 0, maxOffset))
+}
+
+func (m model) conversationViewportBounds() (left, right, top, bottom int, ok bool) {
+	trackX, trackTop, trackBottom, visible := m.scrollbarTrackBounds()
+	if !visible || m.viewport.Width <= 0 || m.viewport.Height <= 0 {
+		return 0, 0, 0, 0, false
+	}
+	left = trackX - m.viewport.Width
+	right = left + m.viewport.Width - 1
+	top = trackTop
+	bottom = trackBottom
+	return left, right, top, bottom, true
+}
+
+func (m model) viewportPointFromMouse(x, y int) (viewportSelectionPoint, bool) {
+	left, right, top, bottom, ok := m.conversationViewportBounds()
+	if !ok {
+		return viewportSelectionPoint{}, false
+	}
+	// Keep drag-select usable for terminals that report 0-based or 1-based mouse coords.
+	if x < left-1 || x > right+1 || y < top-1 || y > bottom+1 {
+		return viewportSelectionPoint{}, false
+	}
+	return viewportSelectionPoint{
+		Col: clamp(x-left, 0, max(0, m.viewport.Width-1)),
+		Row: clamp(y-top, 0, max(0, m.viewport.Height-1)),
+	}, true
+}
+
+func (m model) viewportSelectionText() string {
+	start := m.mouseSelectionStart
+	end := m.mouseSelectionEnd
+	if start.Row > end.Row || (start.Row == end.Row && start.Col > end.Col) {
+		start, end = end, start
+	}
+	if start.Row == end.Row && start.Col == end.Col {
+		return ""
+	}
+
+	view := strings.ReplaceAll(m.viewport.View(), "\r\n", "\n")
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	maxRow := len(lines) - 1
+	start.Row = clamp(start.Row, 0, maxRow)
+	end.Row = clamp(end.Row, 0, maxRow)
+	if start.Row > end.Row {
+		start, end = end, start
+	}
+
+	parts := make([]string, 0, end.Row-start.Row+1)
+	for row := start.Row; row <= end.Row; row++ {
+		plain := stripANSIText(lines[row])
+		runes := []rune(plain)
+		switch {
+		case row == start.Row && row == end.Row:
+			parts = append(parts, sliceViewportLine(runes, start.Col, end.Col))
+		case row == start.Row:
+			parts = append(parts, sliceViewportLine(runes, start.Col, len(runes)-1))
+		case row == end.Row:
+			parts = append(parts, sliceViewportLine(runes, 0, end.Col))
+		default:
+			parts = append(parts, strings.TrimRight(string(runes), " "))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func sliceViewportLine(runes []rune, startCol, endCol int) string {
+	if len(runes) == 0 {
+		return ""
+	}
+	startCol = clamp(startCol, 0, len(runes)-1)
+	endCol = clamp(endCol, 0, len(runes)-1)
+	if endCol < startCol {
+		return ""
+	}
+	return strings.TrimRight(string(runes[startCol:endCol+1]), " ")
+}
+
+func stripANSIText(value string) string {
+	return ansiEscapePattern.ReplaceAllString(value, "")
 }
 
 func (m model) renderLanding() string {

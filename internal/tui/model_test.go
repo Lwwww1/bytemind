@@ -219,6 +219,12 @@ func TestRenderMainPanelShowsTokenUsageBadge(t *testing.T) {
 	_ = m.tokenUsage.SetUsage(1234, 5000)
 
 	panel := m.renderMainPanel()
+	if !tokenUsageFeatureOn {
+		if strings.Contains(panel, "1,234 / 5,000") {
+			t.Fatalf("expected token usage badge to be hidden when disabled, got %q", panel)
+		}
+		return
+	}
 	if !strings.Contains(panel, "1,234 / 5,000") {
 		t.Fatalf("expected token usage badge text in main panel, got %q", panel)
 	}
@@ -245,6 +251,12 @@ func TestHandleMouseHoverTokenUsageConsumesEvent(t *testing.T) {
 		Y:      y,
 	})
 	updated := got.(model)
+	if !tokenUsageFeatureOn {
+		if updated.tokenUsage.hover {
+			t.Fatalf("expected hover to stay disabled when token badge is disabled")
+		}
+		return
+	}
 	if !updated.tokenUsage.hover {
 		t.Fatalf("expected hover state to activate over token badge")
 	}
@@ -266,6 +278,12 @@ func TestHandleAgentEventUsageUpdatedAccumulatesRealTokens(t *testing.T) {
 		},
 	})
 
+	if !tokenUsageFeatureOn {
+		if m.tokenUsedTotal != 0 || m.tokenInput != 0 || m.tokenOutput != 0 || m.tokenContext != 0 {
+			t.Fatalf("expected token counters to stay zero when feature is disabled, got used=%d input=%d output=%d context=%d", m.tokenUsedTotal, m.tokenInput, m.tokenOutput, m.tokenContext)
+		}
+		return
+	}
 	if m.tokenUsedTotal != 190 {
 		t.Fatalf("expected cumulative used tokens 190, got %d", m.tokenUsedTotal)
 	}
@@ -290,6 +308,12 @@ func TestAssistantDeltaEstimationsAreCalibratedByOfficialUsage(t *testing.T) {
 	})
 
 	estimated := m.tempEstimatedOutput
+	if !tokenUsageFeatureOn {
+		if estimated != 0 || m.tokenUsedTotal != 0 || m.tokenOutput != 0 {
+			t.Fatalf("expected no token estimation when feature disabled, estimate=%d used=%d output=%d", estimated, m.tokenUsedTotal, m.tokenOutput)
+		}
+		return
+	}
 	if estimated <= 0 {
 		t.Fatalf("expected temporary estimated output tokens to increase")
 	}
@@ -334,6 +358,12 @@ func TestApplyUsageFallsBackToBreakdownWhenTotalIsZero(t *testing.T) {
 		},
 	})
 
+	if !tokenUsageFeatureOn {
+		if m.tokenUsedTotal != 0 {
+			t.Fatalf("expected usage update to be ignored when feature disabled, got %d", m.tokenUsedTotal)
+		}
+		return
+	}
 	if m.tokenUsedTotal != 20 {
 		t.Fatalf("expected fallback sum of usage breakdown (20), got %d", m.tokenUsedTotal)
 	}
@@ -342,6 +372,12 @@ func TestApplyUsageFallsBackToBreakdownWhenTotalIsZero(t *testing.T) {
 func TestFetchRemoteTokenUsageCmdReturnsErrorMsgWhenConfigMissing(t *testing.T) {
 	m := model{cfg: config.Config{}}
 	cmd := m.fetchRemoteTokenUsageCmd()
+	if !tokenUsageFeatureOn {
+		if cmd != nil {
+			t.Fatalf("expected remote usage command to be disabled")
+		}
+		return
+	}
 	if cmd == nil {
 		t.Fatalf("expected remote usage command")
 	}
@@ -378,6 +414,12 @@ func TestFetchRemoteTokenUsageCmdReturnsUsageMsgOnSuccess(t *testing.T) {
 	}
 
 	cmd := m.fetchRemoteTokenUsageCmd()
+	if !tokenUsageFeatureOn {
+		if cmd != nil {
+			t.Fatalf("expected remote usage command to be disabled")
+		}
+		return
+	}
 	msg := cmd()
 	pulled, ok := msg.(tokenUsagePulledMsg)
 	if !ok {
@@ -408,6 +450,12 @@ func TestUpdateTokenUsagePulledMsgUsesMaxAndIgnoresErrors(t *testing.T) {
 		Context: 10,
 	})
 	updated := got.(model)
+	if !tokenUsageFeatureOn {
+		if updated.tokenUsedTotal != m.tokenUsedTotal || updated.tokenInput != m.tokenInput || updated.tokenOutput != m.tokenOutput || updated.tokenContext != m.tokenContext {
+			t.Fatalf("expected pulled usage to be ignored when feature disabled, got %+v", updated)
+		}
+		return
+	}
 	if updated.tokenUsedTotal != 100 {
 		t.Fatalf("expected used total to keep local max 100, got %d", updated.tokenUsedTotal)
 	}
@@ -2369,12 +2417,12 @@ func TestRenderConversationIncludesToolEntries(t *testing.T) {
 		}(),
 		chatItems: []chatEntry{
 			{Kind: "user", Title: "You", Body: "check repo", Status: "final"},
-			{Kind: "tool", Title: "Tool Result | read_file", Body: "Read internal/tui/model.go lines 1-20", Status: "done"},
+			{Kind: "tool", Title: "Tool Call | read_file", Body: "Read internal/tui/model.go lines 1-20", Status: "done"},
 		},
 	}
 
 	got := m.renderConversation()
-	if !strings.Contains(got, "Tool Result | read_file") {
+	if !strings.Contains(got, "Tool Call | read_file") {
 		t.Fatalf("expected conversation to show tool entry, got %q", got)
 	}
 	if !strings.Contains(got, "Read internal/tui/model.go lines 1-20") {
@@ -2405,7 +2453,7 @@ func TestRebuildSessionTimelineParsesUserToolResultParts(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected user + tool items, got %#v", items)
 	}
-	if items[1].Kind != "tool" || !strings.Contains(items[1].Title, "Tool Result | read_file") {
+	if items[1].Kind != "tool" || !strings.Contains(items[1].Title, "Tool Call | read_file") {
 		t.Fatalf("expected tool item from tool_result part, got %#v", items[1])
 	}
 	if len(runs) != 1 || runs[0].Name != "read_file" {
@@ -2445,20 +2493,17 @@ func TestHandleAgentEventShowsToolProgressInChat(t *testing.T) {
 		ToolName:   "read_file",
 		ToolResult: `{"path":"internal/tui/model.go","start_line":1,"end_line":20}`,
 	})
-	if len(m.chatItems) != 4 {
-		t.Fatalf("expected completed tool to append tool result, got %d", len(m.chatItems))
+	if len(m.chatItems) != 3 {
+		t.Fatalf("expected completed tool to update existing tool call, got %d", len(m.chatItems))
 	}
-	if m.chatItems[2].Status != "running" {
-		t.Fatalf("expected tool call entry to remain running history, got %q", m.chatItems[2].Status)
+	if m.chatItems[2].Kind != "tool" || !strings.Contains(m.chatItems[2].Title, "Tool Call | read_file") {
+		t.Fatalf("expected tool call entry after completion, got %+v", m.chatItems[2])
 	}
-	if m.chatItems[3].Kind != "tool" || !strings.Contains(m.chatItems[3].Title, "Tool Result | read_file") {
-		t.Fatalf("expected tool result entry after tool call, got %+v", m.chatItems[3])
+	if m.chatItems[2].Status != "done" {
+		t.Fatalf("expected completed tool call status to be done, got %q", m.chatItems[2].Status)
 	}
-	if m.chatItems[3].Status != "done" {
-		t.Fatalf("expected completed tool result status to be done, got %q", m.chatItems[3].Status)
-	}
-	if !strings.Contains(m.chatItems[3].Body, "Read internal/tui/model.go lines 1-20") {
-		t.Fatalf("expected completed tool summary in result item, got %q", m.chatItems[3].Body)
+	if !strings.Contains(m.chatItems[2].Body, "Read internal/tui/model.go lines 1-20") {
+		t.Fatalf("expected completed tool summary in tool call item, got %q", m.chatItems[2].Body)
 	}
 }
 
@@ -2975,7 +3020,7 @@ func TestBusyEnterInToolPhaseDefersBTWCancel(t *testing.T) {
 func TestRenderChatCardToolUsesVisualSeparator(t *testing.T) {
 	got := renderChatCard(chatEntry{
 		Kind:   "tool",
-		Title:  "Tool Result | read_file",
+		Title:  "Tool Call | read_file",
 		Body:   "Read internal/tui/model.go lines 1-20",
 		Status: "done",
 	}, 64)
@@ -2983,7 +3028,7 @@ func TestRenderChatCardToolUsesVisualSeparator(t *testing.T) {
 	if !strings.Contains(got, "│") && !strings.Contains(got, "|") {
 		t.Fatalf("expected tool card to include a left border separator, got %q", got)
 	}
-	if !strings.Contains(got, "Tool Result | read_file") {
+	if !strings.Contains(got, "Tool Call | read_file") {
 		t.Fatalf("expected tool card title to render, got %q", got)
 	}
 }
@@ -3779,6 +3824,15 @@ func TestRenderTokenBadgeAndScrollbarHelpers(t *testing.T) {
 	m.refreshViewport()
 
 	compact := m.renderTokenBadge(79)
+	if !tokenUsageFeatureOn {
+		if compact != "" {
+			t.Fatalf("expected empty compact badge when token feature disabled, got %q", compact)
+		}
+		if full := m.renderTokenBadge(80); full != "" {
+			t.Fatalf("expected empty full badge when token feature disabled, got %q", full)
+		}
+		return
+	}
 	if strings.Contains(compact, "/") {
 		t.Fatalf("expected compact badge under width threshold, got %q", compact)
 	}

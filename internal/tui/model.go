@@ -48,7 +48,6 @@ const (
 	chatTitleLabel        = "Bytemind Chat"
 	tuiTitleLabel         = "Bytemind TUI"
 	footerHintText        = "tab agents | / commands | Ctrl+F history | Ctrl+L sessions | Ctrl+C quit"
-	tokenUsageFeatureOn   = false
 )
 
 type screenKind string
@@ -341,15 +340,13 @@ func newModel(opts Options) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{
+	return tea.Batch(
 		textarea.Blink,
 		waitForAsync(m.async),
+		m.tokenUsage.tickCmd(),
 		m.loadSessionsCmd(),
-	}
-	if tokenUsageFeatureOn {
-		cmds = append(cmds, m.tokenUsage.tickCmd(), m.fetchRemoteTokenUsageCmd())
-	}
-	return tea.Batch(cmds...)
+		m.fetchRemoteTokenUsageCmd(),
+	)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -443,9 +440,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tokenUsagePulledMsg:
-		if !tokenUsageFeatureOn {
-			return m, nil
-		}
 		if msg.Err != nil {
 			return m, nil
 		}
@@ -458,9 +452,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tokenUsage.SetBreakdown(m.tokenInput, m.tokenOutput, m.tokenContext)
 		return m, nil
 	case tokenMonitorTickMsg:
-		if !tokenUsageFeatureOn {
-			return m, nil
-		}
 		cmd, _ := m.tokenUsage.Update(msg)
 		return m, cmd
 	case tea.MouseMsg:
@@ -508,10 +499,8 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.screen == screenChat && m.sessionsOpen {
 		return m, nil
 	}
-	if tokenUsageFeatureOn {
-		if cmd, consumed := m.tokenUsage.Update(msg); consumed {
-			return m, cmd
-		}
+	if cmd, consumed := m.tokenUsage.Update(msg); consumed {
+		return m, cmd
 	}
 	if m.screen == screenChat {
 		if msg.Action == tea.MouseActionMotion && m.draggingScrollbar {
@@ -1536,9 +1525,7 @@ func (m *model) handleAgentEvent(event agent.Event) {
 		m.phase = "responding"
 		m.statusNote = "LLM is responding..."
 		m.llmConnected = true
-		if tokenUsageFeatureOn {
-			m.applyEstimatedUsage(event.Content)
-		}
+		m.applyEstimatedUsage(event.Content)
 		m.appendAssistantDelta(event.Content)
 	case agent.EventAssistantMessage:
 		m.llmConnected = true
@@ -1584,9 +1571,7 @@ func (m *model) handleAgentEvent(event agent.Event) {
 		}
 		m.statusNote = fmt.Sprintf("Plan updated with %d step(s).", len(m.plan.Steps))
 	case agent.EventUsageUpdated:
-		if tokenUsageFeatureOn {
-			m.applyUsage(event.Usage)
-		}
+		m.applyUsage(event.Usage)
 	case agent.EventRunFinished:
 		if strings.TrimSpace(event.Content) != "" {
 			m.statusNote = "Run finished."
@@ -1852,10 +1837,6 @@ func (m *model) refreshViewport() {
 }
 
 func (m *model) syncTokenUsageBounds() {
-	if !tokenUsageFeatureOn {
-		m.tokenUsage.SetBounds(0, 0, 0, 0)
-		return
-	}
 	if m.screen != screenChat || m.width <= 0 || m.height <= 0 {
 		m.tokenUsage.SetBounds(0, 0, 0, 0)
 		return
@@ -1919,9 +1900,6 @@ func (m model) View() string {
 }
 
 func (m *model) SetUsage(used, total int) tea.Cmd {
-	if !tokenUsageFeatureOn {
-		return nil
-	}
 	return m.tokenUsage.SetUsage(used, total)
 }
 
@@ -1989,19 +1967,14 @@ func (m model) renderMainPanel() string {
 	header := lipgloss.JoinHorizontal(lipgloss.Top, status, "  ", badge)
 
 	parts := []string{header}
-	if tokenUsageFeatureOn {
-		if popup := strings.TrimSpace(m.tokenUsage.PopupView()); popup != "" {
-			parts = append(parts, lipgloss.PlaceHorizontal(width, lipgloss.Right, popup))
-		}
+	if popup := strings.TrimSpace(m.tokenUsage.PopupView()); popup != "" {
+		parts = append(parts, lipgloss.PlaceHorizontal(width, lipgloss.Right, popup))
 	}
 	parts = append(parts, "", conversation)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m model) renderTokenBadge(width int) string {
-	if !tokenUsageFeatureOn {
-		return ""
-	}
 	if width < 80 {
 		return m.tokenUsage.CompactView()
 	}
@@ -3100,9 +3073,6 @@ func (m model) loadSessionsCmd() tea.Cmd {
 }
 
 func (m model) fetchRemoteTokenUsageCmd() tea.Cmd {
-	if !tokenUsageFeatureOn {
-		return nil
-	}
 	return func() tea.Msg {
 		usage, err := fetchCurrentMonthUsage(m.cfg)
 		if err != nil {

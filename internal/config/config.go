@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"bytemind/internal/secretstore"
 )
 
 const (
@@ -89,10 +91,27 @@ func (p ProviderConfig) ResolveAPIKey() string {
 	if strings.TrimSpace(p.APIKey) != "" {
 		return strings.TrimSpace(p.APIKey)
 	}
-	if env := strings.TrimSpace(p.APIKeyEnv); env != "" {
-		return strings.TrimSpace(os.Getenv(env))
+
+	envName := strings.TrimSpace(p.APIKeyEnv)
+	if envName == "" {
+		envName = "BYTEMIND_API_KEY"
 	}
-	return strings.TrimSpace(os.Getenv("BYTEMIND_API_KEY"))
+
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return value
+	}
+	if value, err := secretstore.Load(envName); err == nil && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	if !strings.EqualFold(envName, "BYTEMIND_API_KEY") {
+		if value := strings.TrimSpace(os.Getenv("BYTEMIND_API_KEY")); value != "" {
+			return value
+		}
+		if value, err := secretstore.Load("BYTEMIND_API_KEY"); err == nil && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func ResolveHomeDir() (string, error) {
@@ -122,7 +141,7 @@ func EnsureHomeLayout() (string, error) {
 		filepath.Join(home, "migrations"),
 	}
 	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", err
 		}
 	}
@@ -162,7 +181,7 @@ func ensureDefaultConfigFile(home string) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o600)
 }
 
 func resolveConfigPath(workspace, explicit string) (string, error) {

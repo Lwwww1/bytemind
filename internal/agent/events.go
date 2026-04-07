@@ -1,6 +1,9 @@
 package agent
 
-import planpkg "bytemind/internal/plan"
+import (
+	"bytemind/internal/llm"
+	planpkg "bytemind/internal/plan"
+)
 
 type EventType string
 
@@ -11,6 +14,7 @@ const (
 	EventToolCallStarted   EventType = "tool_call_started"
 	EventToolCallCompleted EventType = "tool_call_completed"
 	EventPlanUpdated       EventType = "plan_updated"
+	EventUsageUpdated      EventType = "usage_updated"
 	EventRunFinished       EventType = "run_finished"
 )
 
@@ -24,6 +28,7 @@ type Event struct {
 	ToolResult    string
 	Error         string
 	Plan          planpkg.State
+	Usage         llm.Usage
 }
 
 type Observer interface {

@@ -36,6 +36,7 @@ type Message struct {
 	Parts     []Part      `json:"content,omitempty"`
 	CreatedAt string      `json:"created_at,omitempty"`
 	Meta      MessageMeta `json:"meta,omitempty"`
+	Usage     *Usage      `json:"usage,omitempty"`
 
 	// Legacy compatibility fields used by existing runner/tui/provider paths.
 	Content    string     `json:"-"`
@@ -235,12 +236,14 @@ func (m Message) MarshalJSON() ([]byte, error) {
 		Content   []Part      `json:"content,omitempty"`
 		CreatedAt string      `json:"created_at,omitempty"`
 		Meta      MessageMeta `json:"meta,omitempty"`
+		Usage     *Usage      `json:"usage,omitempty"`
 	}{
 		ID:        m.ID,
 		Role:      m.Role,
 		Content:   parts,
 		CreatedAt: m.CreatedAt,
 		Meta:      m.Meta,
+		Usage:     m.Usage,
 	}
 	return json.Marshal(wire)
 }
@@ -252,6 +255,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		Content   json.RawMessage `json:"content"`
 		CreatedAt string          `json:"created_at"`
 		Meta      MessageMeta     `json:"meta"`
+		Usage     *Usage          `json:"usage"`
 
 		ToolCallID string     `json:"tool_call_id"`
 		ToolCalls  []ToolCall `json:"tool_calls"`
@@ -265,6 +269,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	m.Role = raw.Role
 	m.CreatedAt = raw.CreatedAt
 	m.Meta = raw.Meta
+	m.Usage = raw.Usage
 	m.ToolCalls = raw.ToolCalls
 	m.ToolCallID = raw.ToolCallID
 	m.Content = ""
@@ -305,6 +310,13 @@ type ToolCall struct {
 type ToolFunctionCall struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+}
+
+type Usage struct {
+	InputTokens   int `json:"input_tokens,omitempty"`
+	OutputTokens  int `json:"output_tokens,omitempty"`
+	ContextTokens int `json:"context_tokens,omitempty"`
+	TotalTokens   int `json:"total_tokens,omitempty"`
 }
 
 type ToolDefinition struct {

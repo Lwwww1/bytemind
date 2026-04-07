@@ -19,6 +19,7 @@ type Config struct {
 	ApprovalPolicy string         `json:"approval_policy"`
 	MaxIterations  int            `json:"max_iterations"`
 	Stream         bool           `json:"stream"`
+	TokenQuota     int            `json:"token_quota"`
 }
 
 type ProviderConfig struct {
@@ -46,6 +47,7 @@ func Default(workspace string) Config {
 		ApprovalPolicy: "on-request",
 		MaxIterations:  32,
 		Stream:         true,
+		TokenQuota:     5000,
 	}
 }
 
@@ -152,6 +154,7 @@ func ensureDefaultConfigFile(home string) error {
 		ApprovalPolicy: "on-request",
 		MaxIterations:  32,
 		Stream:         true,
+		TokenQuota:     5000,
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -242,6 +245,11 @@ func applyEnv(cfg *Config) {
 			cfg.Stream = parsed
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("BYTEMIND_TOKEN_QUOTA")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.TokenQuota = parsed
+		}
+	}
 }
 
 func normalize(cfg *Config) error {
@@ -304,6 +312,9 @@ func normalize(cfg *Config) error {
 	case "always", "never":
 	default:
 		return errors.New("approval_policy must be one of always, on-request, never")
+	}
+	if cfg.TokenQuota < 1 {
+		cfg.TokenQuota = 5000
 	}
 	return nil
 }

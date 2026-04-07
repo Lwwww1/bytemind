@@ -357,8 +357,8 @@ func TestOpenAIMessagesMapsThinkingAndToolResultParts(t *testing.T) {
 	}
 }
 
-func TestOpenAIMessagesRejectsMissingImageAsset(t *testing.T) {
-	_, err := openAIMessages(llm.ChatRequest{
+func TestOpenAIMessagesDegradesMissingImageAsset(t *testing.T) {
+	messages, err := openAIMessages(llm.ChatRequest{
 		Messages: []llm.Message{{
 			Role: llm.RoleUser,
 			Parts: []llm.Part{{
@@ -367,12 +367,19 @@ func TestOpenAIMessagesRejectsMissingImageAsset(t *testing.T) {
 			}},
 		}},
 	})
-	if err == nil {
-		t.Fatal("expected missing image asset error")
+	if err != nil {
+		t.Fatalf("openAIMessages: %v", err)
 	}
-	var providerErr *llm.ProviderError
-	if !errors.As(err, &providerErr) || providerErr.Code != llm.ErrorCodeAssetNotFound {
-		t.Fatalf("unexpected error: %#v", err)
+	if len(messages) != 1 {
+		t.Fatalf("expected a single converted message, got %#v", messages)
+	}
+	content, _ := messages[0]["content"].([]map[string]any)
+	if len(content) != 1 || content[0]["type"] != "text" {
+		t.Fatalf("expected missing image to degrade to text block, got %#v", messages[0])
+	}
+	text, _ := content[0]["text"].(string)
+	if !strings.Contains(text, "unavailable asset asset-1") {
+		t.Fatalf("expected fallback text to include asset id, got %#v", content[0]["text"])
 	}
 }
 

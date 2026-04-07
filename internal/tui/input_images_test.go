@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -99,6 +100,51 @@ func TestApplyInputImagePipelineConvertsPastedPathToPlaceholder(t *testing.T) {
 	}
 	if !bytes.Equal(blob.Data, []byte("png-from-file")) {
 		t.Fatalf("unexpected stored bytes: %q", string(blob.Data))
+	}
+}
+
+func TestParseClipboardImageOutputJSONPayload(t *testing.T) {
+	raw := "{\"media_type\":\"image/jpeg\",\"file_name\":\"copied.jpg\",\"data\":\"" + base64.StdEncoding.EncodeToString([]byte("jpeg-bytes")) + "\"}\n"
+	mediaType, data, fileName, err := parseClipboardImageOutput(raw)
+	if err != nil {
+		t.Fatalf("parseClipboardImageOutput: %v", err)
+	}
+	if mediaType != "image/jpeg" {
+		t.Fatalf("expected image/jpeg, got %q", mediaType)
+	}
+	if fileName != "copied.jpg" {
+		t.Fatalf("expected copied.jpg, got %q", fileName)
+	}
+	if !bytes.Equal(data, []byte("jpeg-bytes")) {
+		t.Fatalf("unexpected decoded bytes %q", string(data))
+	}
+}
+
+func TestParseClipboardImageOutputLegacyBase64(t *testing.T) {
+	raw := base64.StdEncoding.EncodeToString([]byte("png-bytes"))
+	mediaType, data, fileName, err := parseClipboardImageOutput(raw)
+	if err != nil {
+		t.Fatalf("parseClipboardImageOutput: %v", err)
+	}
+	if mediaType != "image/png" {
+		t.Fatalf("expected image/png fallback, got %q", mediaType)
+	}
+	if fileName != "clipboard.png" {
+		t.Fatalf("expected clipboard.png fallback, got %q", fileName)
+	}
+	if !bytes.Equal(data, []byte("png-bytes")) {
+		t.Fatalf("unexpected decoded bytes %q", string(data))
+	}
+}
+
+func TestParseClipboardImageOutputPrefersLastNonEmptyLine(t *testing.T) {
+	raw := "warning line\n\n{\"media_type\":\"image/png\",\"file_name\":\"clip.png\",\"data\":\"" + base64.StdEncoding.EncodeToString([]byte("ok")) + "\"}\n"
+	_, data, _, err := parseClipboardImageOutput(raw)
+	if err != nil {
+		t.Fatalf("parseClipboardImageOutput: %v", err)
+	}
+	if !bytes.Equal(data, []byte("ok")) {
+		t.Fatalf("unexpected decoded bytes %q", string(data))
 	}
 }
 

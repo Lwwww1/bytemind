@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -197,12 +196,14 @@ func anthropicMessages(req llm.ChatRequest) (string, []map[string]any, error) {
 				case llm.PartText:
 					blocks = append(blocks, map[string]any{"type": "text", "text": part.Text.Value})
 				case llm.PartImageRef:
-					asset, ok := req.Assets[part.Image.AssetID]
-					if !ok {
-						return "", nil, llm.WrapError("anthropic", llm.ErrorCodeAssetNotFound, fmt.Errorf("asset %q not found", part.Image.AssetID))
+					assetID := llm.AssetID("")
+					if part.Image != nil {
+						assetID = part.Image.AssetID
 					}
-					if len(asset.Data) == 0 {
-						return "", nil, llm.WrapError("anthropic", llm.ErrorCodeAssetNotFound, fmt.Errorf("asset %q has empty payload", part.Image.AssetID))
+					asset, ok := req.Assets[assetID]
+					if !ok || len(asset.Data) == 0 {
+						blocks = append(blocks, map[string]any{"type": "text", "text": missingImageAssetFallback(assetID)})
+						continue
 					}
 					mediaType := strings.TrimSpace(asset.MediaType)
 					if mediaType == "" {

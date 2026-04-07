@@ -492,12 +492,14 @@ func openAIMessages(req llm.ChatRequest) ([]map[string]any, error) {
 			case llm.PartThinking:
 				content = append(content, map[string]any{"type": "text", "text": part.Thinking.Value})
 			case llm.PartImageRef:
-				asset, ok := req.Assets[part.Image.AssetID]
-				if !ok {
-					return nil, llm.WrapError("openai", llm.ErrorCodeAssetNotFound, fmt.Errorf("asset %q not found", part.Image.AssetID))
+				assetID := llm.AssetID("")
+				if part.Image != nil {
+					assetID = part.Image.AssetID
 				}
-				if len(asset.Data) == 0 {
-					return nil, llm.WrapError("openai", llm.ErrorCodeAssetNotFound, fmt.Errorf("asset %q has empty payload", part.Image.AssetID))
+				asset, ok := req.Assets[assetID]
+				if !ok || len(asset.Data) == 0 {
+					content = append(content, map[string]any{"type": "text", "text": missingImageAssetFallback(assetID)})
+					continue
 				}
 				mediaType := strings.TrimSpace(asset.MediaType)
 				if mediaType == "" {
@@ -561,6 +563,14 @@ func openAIMessages(req llm.ChatRequest) ([]map[string]any, error) {
 	}
 
 	return result, nil
+}
+
+func missingImageAssetFallback(assetID llm.AssetID) string {
+	id := strings.TrimSpace(string(assetID))
+	if id == "" {
+		return "[image omitted: unavailable asset]"
+	}
+	return fmt.Sprintf("[image omitted: unavailable asset %s]", id)
 }
 
 func (c *OpenAICompatible) postJSON(ctx context.Context, url string, payload map[string]any) ([]byte, error) {

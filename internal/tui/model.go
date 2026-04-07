@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -30,6 +29,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -48,10 +48,8 @@ const (
 	thinkingLabel         = "Bytemind"
 	chatTitleLabel        = "Bytemind Chat"
 	tuiTitleLabel         = "Bytemind TUI"
-	footerHintText        = "tab agents | / commands | Ctrl+F history | Ctrl+L sessions | Ctrl+C quit"
+	footerHintText        = "tab agents | / commands | drag select | Ctrl+C copy/quit | Ctrl+F history | Ctrl+L sessions"
 )
-
-var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
 type screenKind string
 
@@ -167,6 +165,10 @@ type tokenUsagePulledMsg struct {
 	Err     error
 }
 
+type selectionToastExpiredMsg struct {
+	ID int
+}
+
 var commandItems = []commandItem{
 	{Name: "/help", Usage: "/help", Description: "Show usage and supported commands.", Kind: "command"},
 	{Name: "/session", Usage: "/session", Description: "Open the recent session list.", Kind: "command"},
@@ -190,6 +192,7 @@ type model struct {
 
 	async    chan tea.Msg
 	viewport viewport.Model
+	copyView viewport.Model
 	planView viewport.Model
 	input    textarea.Model
 	spinner  spinner.Model
@@ -228,8 +231,11 @@ type model struct {
 	draggingScrollbar     bool
 	scrollbarDragOffset   int
 	mouseSelecting        bool
+	mouseSelectionActive  bool
 	mouseSelectionStart   viewportSelectionPoint
 	mouseSelectionEnd     viewportSelectionPoint
+	selectionToast        string
+	selectionToastID      int
 	tokenUsage            tokenUsageComponent
 	tokenUsedTotal        int
 	tokenBudget           int
@@ -281,6 +287,9 @@ func newModel(opts Options) model {
 	vp.MouseWheelEnabled = true
 	vp.MouseWheelDelta = scrollStep
 
+	copyVP := viewport.New(0, 0)
+	copyVP.YPosition = 0
+
 	planVP := viewport.New(0, 0)
 	planVP.YPosition = 0
 	planVP.MouseWheelEnabled = true
@@ -307,6 +316,7 @@ func newModel(opts Options) model {
 		workspace:          opts.Workspace,
 		async:              async,
 		viewport:           vp,
+		copyView:           copyVP,
 		planView:           planVP,
 		input:              input,
 		spinner:            spin,
@@ -464,6 +474,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, m.tokenBudget)
 		m.tokenUsage.SetBreakdown(m.tokenInput, m.tokenOutput, m.tokenContext)
 		return m, nil
+	case selectionToastExpiredMsg:
+		if msg.ID == m.selectionToastID {
+			m.selectionToast = ""
+		}
+		return m, nil
 	case tokenMonitorTickMsg:
 		cmd, _ := m.tokenUsage.Update(msg)
 		return m, cmd
@@ -505,25 +520,19 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		case tea.MouseActionMotion:
 			if point, ok := m.viewportPointFromMouse(msg.X, msg.Y); ok {
 				m.mouseSelectionEnd = point
-				m.statusNote = "Selecting text..."
+			} else {
+				m.clearMouseSelection()
 			}
 			return m, nil
 		case tea.MouseActionRelease:
-			if point, ok := m.viewportPointFromMouse(msg.X, msg.Y); ok {
+			if point, ok := m.viewportPointFromMouse(msg.X, msg.Y); ok && selectionHasRange(m.mouseSelectionStart, point) {
 				m.mouseSelectionEnd = point
+				m.mouseSelectionActive = true
+				m.statusNote = "Selection ready. Press Ctrl+C to copy."
+			} else {
+				m.clearMouseSelection()
 			}
 			m.mouseSelecting = false
-			if selected := m.viewportSelectionText(); strings.TrimSpace(selected) != "" {
-				if m.clipboardText == nil {
-					m.statusNote = "clipboard copy is unavailable in current environment"
-				} else if err := m.clipboardText.WriteText(context.Background(), selected); err != nil {
-					m.statusNote = err.Error()
-				} else {
-					m.statusNote = "Copied selection to clipboard."
-				}
-			} else {
-				m.statusNote = "Selection is empty."
-			}
 			m.draggingScrollbar = false
 			return m, nil
 		}
@@ -569,16 +578,22 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			}
+			if m.mouseSelectionActive {
+				m.clearMouseSelection()
+			}
 			if point, ok := m.viewportPointFromMouse(msg.X, msg.Y); ok {
 				m.mouseSelecting = true
+				m.mouseSelectionActive = false
 				m.mouseSelectionStart = point
 				m.mouseSelectionEnd = point
-				m.statusNote = "Selecting text..."
 				return m, nil
 			}
 		}
 	}
 	if m.mouseOverInput(msg.Y) {
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && m.hasCopyableSelection() {
+			m.clearMouseSelection()
+		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			m.scrollInput(-scrollStep)
@@ -610,20 +625,63 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			m.viewport.LineUp(scrollStep)
+			m.syncCopyViewOffset()
 			m.chatAutoFollow = false
 			return m, nil
 		case tea.MouseButtonWheelDown:
 			m.viewport.LineDown(scrollStep)
+			m.syncCopyViewOffset()
 			m.chatAutoFollow = m.viewport.AtBottom()
 			return m, nil
 		default:
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
+			m.syncCopyViewOffset()
 			m.chatAutoFollow = m.viewport.AtBottom()
 			return m, cmd
 		}
 	}
 	return m, nil
+}
+
+func (m *model) copyCurrentSelection() tea.Cmd {
+	if m == nil {
+		return nil
+	}
+	if selected := m.viewportSelectionText(); strings.TrimSpace(selected) != "" {
+		if m.clipboardText == nil {
+			m.statusNote = "clipboard copy is unavailable in current environment"
+		} else if err := m.clipboardText.WriteText(context.Background(), selected); err != nil {
+			m.statusNote = err.Error()
+		} else {
+			m.statusNote = "Copied selection to clipboard."
+			m.selectionToast = "Copied selection"
+			m.selectionToastID++
+			id := m.selectionToastID
+			m.clearMouseSelection()
+			return tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg {
+				return selectionToastExpiredMsg{ID: id}
+			})
+		}
+		return nil
+	}
+	m.statusNote = "Selection is empty."
+	m.clearMouseSelection()
+	return nil
+}
+
+func (m *model) clearMouseSelection() {
+	if m == nil {
+		return
+	}
+	m.mouseSelecting = false
+	m.mouseSelectionActive = false
+	m.mouseSelectionStart = viewportSelectionPoint{}
+	m.mouseSelectionEnd = viewportSelectionPoint{}
+}
+
+func (m model) hasCopyableSelection() bool {
+	return (m.mouseSelecting || m.mouseSelectionActive) && selectionHasRange(m.mouseSelectionStart, m.mouseSelectionEnd)
 }
 
 func (m *model) ensureViewportMouse() {
@@ -777,6 +835,9 @@ func (m model) mouseOverLandingInput(y int) bool {
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
+		if m.hasCopyableSelection() {
+			return m, m.copyCurrentSelection()
+		}
 		if m.approval != nil {
 			m.approval.Reply <- approvalDecision{Approved: false}
 		}
@@ -791,6 +852,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "esc":
+		if m.hasCopyableSelection() {
+			m.clearMouseSelection()
+			m.statusNote = "Selection cleared."
+			return m, nil
+		}
 	case "tab":
 		if m.commandOpen || m.mentionOpen || m.sessionsOpen || m.helpOpen || m.approval != nil {
 			break
@@ -916,10 +983,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadSessionsCmd()
 	case "home":
 		m.viewport.GotoTop()
+		m.syncCopyViewOffset()
 		m.chatAutoFollow = false
 		return m, nil
 	case "end":
 		m.viewport.GotoBottom()
+		m.syncCopyViewOffset()
 		m.chatAutoFollow = true
 		return m, nil
 	}
@@ -1910,12 +1979,16 @@ func (m *model) refreshViewport() {
 	chatOffset := m.viewport.YOffset
 	keepChatBottom := m.chatAutoFollow || m.viewport.AtBottom()
 	m.viewport.SetContent(m.renderConversation())
+	m.copyView.SetContent(m.renderConversationCopy())
 	if keepChatBottom {
 		m.viewport.GotoBottom()
+		m.copyView.GotoBottom()
 		m.chatAutoFollow = true
 	} else {
 		m.viewport.SetYOffset(chatOffset)
+		m.copyView.SetYOffset(chatOffset)
 	}
+	m.syncCopyViewOffset()
 
 	planOffset := m.planView.YOffset
 	m.planView.SetContent(m.planPanelContent(max(16, m.planView.Width)))
@@ -2017,6 +2090,83 @@ func (m model) renderConversation() string {
 	return lipgloss.JoinVertical(lipgloss.Left, blocks...)
 }
 
+func (m model) renderConversationCopy() string {
+	if len(m.chatItems) == 0 {
+		return "No messages yet. Start with an instruction like \"analyze this repo\" or \"implement a TUI shell\"."
+	}
+	width := m.viewport.Width
+	if width <= 0 {
+		width = m.conversationPanelWidth()
+	}
+	width = max(24, width)
+	blocks := make([]string, 0, len(m.chatItems))
+	for i := 0; i < len(m.chatItems); {
+		item := m.chatItems[i]
+		if item.Kind == "user" {
+			blocks = append(blocks, renderChatCopySection(item, width))
+			i++
+			continue
+		}
+
+		j := i
+		for j < len(m.chatItems) && m.chatItems[j].Kind != "user" {
+			j++
+		}
+
+		runParts := make([]string, 0, j-i)
+		for _, runItem := range m.chatItems[i:j] {
+			runParts = append(runParts, renderChatCopySection(runItem, width))
+		}
+		blocks = append(blocks, strings.Join(runParts, "\n\n"))
+		i = j
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func renderChatCopySection(item chatEntry, width int) string {
+	title := strings.TrimSpace(item.Title)
+	status := strings.TrimSpace(item.Status)
+	if status == "final" {
+		status = ""
+	}
+	switch item.Kind {
+	case "assistant":
+		if strings.EqualFold(item.Status, "thinking") {
+			title = "thinking"
+			status = ""
+		}
+	case "user":
+		if strings.TrimSpace(item.Meta) != "" {
+			title = strings.TrimSpace(item.Meta)
+		}
+	}
+
+	if title == "" {
+		switch item.Kind {
+		case "assistant":
+			title = assistantLabel
+		case "user":
+			title = "You"
+		case "tool":
+			title = "Tool"
+		default:
+			title = "Message"
+		}
+	}
+	if status != "" {
+		title += "  " + status
+	}
+
+	body := strings.TrimRight(formatChatBody(item, width), "\n")
+	if item.Kind == "tool" && strings.TrimSpace(body) == "" {
+		return title
+	}
+	if strings.TrimSpace(body) == "" {
+		return title
+	}
+	return title + "\n" + body
+}
+
 func (m *model) syncViewportSize() {
 	if m.width == 0 || m.height == 0 {
 		return
@@ -2033,14 +2183,24 @@ func (m *model) syncViewportSize() {
 	contentHeight := max(3, panelInnerHeight)
 	m.viewport.Width = max(8, m.conversationPanelWidth()-scrollbarWidth)
 	m.viewport.Height = contentHeight
+	m.copyView.Width = m.viewport.Width
+	m.copyView.Height = m.viewport.Height
+	m.syncCopyViewOffset()
+}
+
+func (m *model) syncCopyViewOffset() {
+	if m == nil {
+		return
+	}
+	m.copyView.SetYOffset(m.viewport.YOffset)
 }
 
 func (m model) renderMainPanel() string {
 	width := max(24, m.chatPanelInnerWidth())
-	badge := strings.TrimSpace(m.renderTokenBadge(width))
+	badge := strings.TrimSpace(m.renderTopRightCluster(width))
 	conversation := lipgloss.JoinHorizontal(
 		lipgloss.Top,
-		m.viewport.View(),
+		m.renderConversationViewport(),
 		m.renderScrollbar(m.viewport.Height, m.viewport.TotalLineCount(), m.viewport.YOffset),
 	)
 	if badge == "" {
@@ -2058,6 +2218,51 @@ func (m model) renderMainPanel() string {
 	}
 	parts = append(parts, "", conversation)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+func (m model) renderConversationViewport() string {
+	if m.hasCopyableSelection() {
+		if preview := m.renderActiveSelectionPreview(); strings.TrimSpace(preview) != "" {
+			return preview
+		}
+	}
+	return m.viewport.View()
+}
+
+func (m model) renderActiveSelectionPreview() string {
+	view := strings.ReplaceAll(m.viewport.View(), "\r\n", "\n")
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+
+	start, end := normalizeViewportSelectionPoints(m.mouseSelectionStart, m.mouseSelectionEnd)
+	maxRow := len(lines) - 1
+	start.Row = clamp(start.Row, 0, maxRow)
+	end.Row = clamp(end.Row, 0, maxRow)
+
+	rendered := make([]string, 0, len(lines))
+	for row, raw := range lines {
+		lineWidth := max(xansi.StringWidth(raw), m.viewport.Width)
+		rangeStart, rangeEnd, ok := selectionColumnsForRow(row, lineWidth, start, end, false)
+		if !ok {
+			rendered = append(rendered, raw)
+			continue
+		}
+		rendered = append(rendered, highlightVisibleLineByCells(raw, rangeStart, rangeEnd))
+	}
+	return strings.Join(rendered, "\n")
+}
+
+func (m model) renderTopRightCluster(width int) string {
+	parts := make([]string, 0, 2)
+	if toast := strings.TrimSpace(m.selectionToast); toast != "" {
+		parts = append(parts, selectionToastStyle.Render(toast))
+	}
+	if badge := strings.TrimSpace(m.renderTokenBadge(width)); badge != "" {
+		parts = append(parts, badge)
+	}
+	return strings.Join(parts, "  ")
 }
 
 func (m model) renderTokenBadge(width int) string {
@@ -2138,12 +2343,14 @@ func (m *model) dragScrollbarTo(mouseY int) {
 	trackRange := max(0, m.viewport.Height-thumbHeight)
 	if trackRange == 0 {
 		m.viewport.SetYOffset(0)
+		m.syncCopyViewOffset()
 		return
 	}
 	desiredTop := mouseY - trackTop - m.scrollbarDragOffset
 	desiredTop = clamp(desiredTop, 0, trackRange)
 	offset := (desiredTop*maxOffset + trackRange/2) / trackRange
 	m.viewport.SetYOffset(clamp(offset, 0, maxOffset))
+	m.syncCopyViewOffset()
 }
 
 func (m model) conversationViewportBounds() (left, right, top, bottom int, ok bool) {
@@ -2174,11 +2381,7 @@ func (m model) viewportPointFromMouse(x, y int) (viewportSelectionPoint, bool) {
 }
 
 func (m model) viewportSelectionText() string {
-	start := m.mouseSelectionStart
-	end := m.mouseSelectionEnd
-	if start.Row > end.Row || (start.Row == end.Row && start.Col > end.Col) {
-		start, end = end, start
-	}
+	start, end := normalizeViewportSelectionPoints(m.mouseSelectionStart, m.mouseSelectionEnd)
 	if start.Row == end.Row && start.Col == end.Col {
 		return ""
 	}
@@ -2197,36 +2400,84 @@ func (m model) viewportSelectionText() string {
 
 	parts := make([]string, 0, end.Row-start.Row+1)
 	for row := start.Row; row <= end.Row; row++ {
-		plain := stripANSIText(lines[row])
-		runes := []rune(plain)
-		switch {
-		case row == start.Row && row == end.Row:
-			parts = append(parts, sliceViewportLine(runes, start.Col, end.Col))
-		case row == start.Row:
-			parts = append(parts, sliceViewportLine(runes, start.Col, len(runes)-1))
-		case row == end.Row:
-			parts = append(parts, sliceViewportLine(runes, 0, end.Col))
-		default:
-			parts = append(parts, strings.TrimRight(string(runes), " "))
+		raw := lines[row]
+		lineWidth := max(xansi.StringWidth(raw), m.viewport.Width)
+		rangeStart, rangeEnd, ok := selectionColumnsForRow(row, lineWidth, start, end, false)
+		if !ok {
+			parts = append(parts, "")
+			continue
 		}
+		parts = append(parts, sliceViewportLineByCells(raw, rangeStart, rangeEnd))
 	}
 	return strings.Join(parts, "\n")
 }
 
-func sliceViewportLine(runes []rune, startCol, endCol int) string {
-	if len(runes) == 0 {
+func sliceViewportLineByCells(line string, startCol, endCol int) string {
+	width := xansi.StringWidth(line)
+	if width == 0 {
 		return ""
 	}
-	startCol = clamp(startCol, 0, len(runes)-1)
-	endCol = clamp(endCol, 0, len(runes)-1)
 	if endCol < startCol {
 		return ""
 	}
-	return strings.TrimRight(string(runes[startCol:endCol+1]), " ")
+	start := clamp(startCol, 0, width-1)
+	end := clamp(endCol+1, start+1, width)
+	return strings.TrimRight(xansi.Strip(xansi.Cut(line, start, end)), " ")
+}
+
+func normalizeViewportSelectionPoints(start, end viewportSelectionPoint) (viewportSelectionPoint, viewportSelectionPoint) {
+	if start.Row > end.Row || (start.Row == end.Row && start.Col > end.Col) {
+		return end, start
+	}
+	return start, end
+}
+
+func selectionColumnsForRow(row, width int, start, end viewportSelectionPoint, includePoint bool) (int, int, bool) {
+	if width <= 0 || row < start.Row || row > end.Row {
+		return 0, 0, false
+	}
+	if start.Row == end.Row {
+		if start.Col == end.Col {
+			if includePoint && row == start.Row {
+				col := clamp(start.Col, 0, width-1)
+				return col, col, true
+			}
+			return 0, 0, false
+		}
+		return clamp(start.Col, 0, width-1), clamp(end.Col, 0, width-1), true
+	}
+	switch row {
+	case start.Row:
+		return clamp(start.Col, 0, width-1), width - 1, true
+	case end.Row:
+		return 0, clamp(end.Col, 0, width-1), true
+	default:
+		return 0, width - 1, true
+	}
+}
+
+func highlightVisibleLineByCells(line string, startCol, endCol int) string {
+	width := xansi.StringWidth(line)
+	if width == 0 {
+		return ""
+	}
+	if endCol < startCol {
+		return line
+	}
+	start := clamp(startCol, 0, width-1)
+	end := clamp(endCol+1, start+1, width)
+	left := xansi.Cut(line, 0, start)
+	middle := selectionHighlightStyle.Render(xansi.Strip(xansi.Cut(line, start, end)))
+	right := xansi.Cut(line, end, width)
+	return left + middle + right
+}
+
+func selectionHasRange(start, end viewportSelectionPoint) bool {
+	return start.Row != end.Row || start.Col != end.Col
 }
 
 func stripANSIText(value string) string {
-	return ansiEscapePattern.ReplaceAllString(value, "")
+	return xansi.Strip(value)
 }
 
 func (m model) renderLanding() string {
@@ -4558,10 +4809,11 @@ func (m model) helpText() string {
 		"Plan mode keeps the plan panel visible and focused on structured steps.",
 		"Use Ctrl+G to open or close the help panel.",
 		"Use Ctrl+F to search prompt history and restore previous input.",
+		"Drag across the conversation with the left mouse button to select text, then press Ctrl+C to copy it.",
 		"If provider setup is required, paste an API key in the input and press Enter.",
 		"After restoring a session with a saved plan, type 'continue execution' to resume it.",
 		"Approval requests appear above the input area when a shell command needs confirmation.",
-		"The footer keeps only the essential shortcuts: tab agents, / commands, Ctrl+F history, Ctrl+L sessions, Ctrl+C quit.",
+		"The footer keeps only the essential shortcuts: tab agents, / commands, drag select, Ctrl+C copy/quit, Ctrl+F history, Ctrl+L sessions.",
 	}, "\n")
 }
 func visibleCommandItems(group string) []commandItem {

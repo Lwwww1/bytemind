@@ -114,7 +114,7 @@ func TestHandleMouseEnablesViewportMouseForwarding(t *testing.T) {
 	}
 }
 
-func TestHandleMouseDragSelectionCopiesViewportText(t *testing.T) {
+func TestHandleMouseDragSelectionArmsCopyableSelection(t *testing.T) {
 	writer := &fakeClipboardTextWriter{}
 	input := textarea.New()
 	input.Focus()
@@ -158,15 +158,66 @@ func TestHandleMouseDragSelectionCopiesViewportText(t *testing.T) {
 	})
 	released := got.(model)
 
-	if writer.last != "alpha" {
-		t.Fatalf("expected copied selection %q, got %q", "alpha", writer.last)
+	if writer.last != "" {
+		t.Fatalf("expected drag release not to copy before ctrl+c, got %q", writer.last)
 	}
-	if !strings.Contains(released.statusNote, "Copied selection") {
-		t.Fatalf("expected copy status note, got %q", released.statusNote)
+	if !released.mouseSelectionActive {
+		t.Fatalf("expected drag release to keep an active selection")
+	}
+	if !strings.Contains(released.statusNote, "Press Ctrl+C to copy") {
+		t.Fatalf("expected copy hint after drag selection, got %q", released.statusNote)
 	}
 }
 
-func TestHandleMouseClickWithoutDragDoesNotCopySelection(t *testing.T) {
+func TestHandleMouseReleaseAtDifferentPointArmsSelectionWithoutMotion(t *testing.T) {
+	writer := &fakeClipboardTextWriter{}
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:        screenChat,
+		width:         120,
+		height:        28,
+		input:         input,
+		viewport:      viewport.New(60, 10),
+		tokenUsage:    newTokenUsageComponent(),
+		clipboardText: writer,
+	}
+	m.viewport.SetContent("alpha line\nbeta line")
+
+	left, _, top, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatal("expected conversation viewport bounds to be available")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      left,
+		Y:      top,
+	})
+	pressed := got.(model)
+
+	got, _ = pressed.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionRelease,
+		Button: tea.MouseButtonLeft,
+		X:      left + 4,
+		Y:      top,
+	})
+	released := got.(model)
+
+	if writer.last != "" {
+		t.Fatalf("expected release-with-range not to copy before ctrl+c, got %q", writer.last)
+	}
+	if !released.mouseSelectionActive {
+		t.Fatalf("expected release at different point to keep an active selection")
+	}
+	if !strings.Contains(released.statusNote, "Press Ctrl+C to copy") {
+		t.Fatalf("expected copy hint after selection, got %q", released.statusNote)
+	}
+}
+
+func TestHandleMouseSingleClickStartsSelectionWithoutCopy(t *testing.T) {
 	writer := &fakeClipboardTextWriter{}
 	input := textarea.New()
 	input.Focus()
@@ -206,57 +257,161 @@ func TestHandleMouseClickWithoutDragDoesNotCopySelection(t *testing.T) {
 	if writer.last != "" {
 		t.Fatalf("expected click without drag not to copy text, got %q", writer.last)
 	}
-	if !strings.Contains(released.statusNote, "Selection is empty") {
-		t.Fatalf("expected empty selection note, got %q", released.statusNote)
+	if released.mouseSelecting {
+		t.Fatalf("expected click without drag to leave selection mode")
+	}
+	if released.mouseSelectionActive {
+		t.Fatalf("expected click without drag not to keep an active selection")
 	}
 }
 
-func TestHandleMouseDragSelectionCopyFailureSetsStatus(t *testing.T) {
+func TestCtrlCCopiesActiveSelectionAndShowsToast(t *testing.T) {
+	writer := &fakeClipboardTextWriter{}
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:               screenChat,
+		width:                120,
+		height:               28,
+		input:                input,
+		viewport:             viewport.New(60, 10),
+		tokenUsage:           newTokenUsageComponent(),
+		clipboardText:        writer,
+		mouseSelectionActive: true,
+		mouseSelectionStart:  viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:    viewportSelectionPoint{Row: 0, Col: 4},
+	}
+	m.viewport.SetContent("alpha line\nbeta line")
+
+	got, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	updated := got.(model)
+
+	if writer.last != "alpha" {
+		t.Fatalf("expected ctrl+c copied selection %q, got %q", "alpha", writer.last)
+	}
+	if updated.mouseSelectionActive {
+		t.Fatalf("expected successful copy to clear active selection")
+	}
+	if updated.selectionToast != "Copied selection" {
+		t.Fatalf("expected copy toast, got %q", updated.selectionToast)
+	}
+	if cmd == nil {
+		t.Fatalf("expected ctrl+c copy to schedule toast expiry")
+	}
+}
+
+func TestCtrlCCopyFailureKeepsSelectionAndSetsStatus(t *testing.T) {
 	writer := &fakeClipboardTextWriter{err: errors.New("clipboard write failed")}
 	input := textarea.New()
 	input.Focus()
 
 	m := model{
-		screen:        screenChat,
-		width:         120,
-		height:        28,
-		input:         input,
-		viewport:      viewport.New(60, 10),
-		tokenUsage:    newTokenUsageComponent(),
-		clipboardText: writer,
+		screen:               screenChat,
+		width:                120,
+		height:               28,
+		input:                input,
+		viewport:             viewport.New(60, 10),
+		tokenUsage:           newTokenUsageComponent(),
+		clipboardText:        writer,
+		mouseSelectionActive: true,
+		mouseSelectionStart:  viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:    viewportSelectionPoint{Row: 0, Col: 2},
 	}
 	m.viewport.SetContent("alpha line\nbeta line")
 
-	left, _, top, _, ok := m.conversationViewportBounds()
-	if !ok {
-		t.Fatal("expected conversation viewport bounds to be available")
-	}
-
-	got, _ := m.handleMouse(tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
-		X:      left,
-		Y:      top,
-	})
-	pressed := got.(model)
-
-	got, _ = pressed.handleMouse(tea.MouseMsg{
-		Action: tea.MouseActionMotion,
-		X:      left + 2,
-		Y:      top,
-	})
-	moved := got.(model)
-
-	got, _ = moved.handleMouse(tea.MouseMsg{
-		Action: tea.MouseActionRelease,
-		Button: tea.MouseButtonLeft,
-		X:      left + 2,
-		Y:      top,
-	})
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
 	released := got.(model)
 
 	if !strings.Contains(released.statusNote, "clipboard write failed") {
 		t.Fatalf("expected copy error in status note, got %q", released.statusNote)
+	}
+	if !released.mouseSelectionActive {
+		t.Fatalf("expected failed copy to keep active selection")
+	}
+}
+
+func TestViewportSelectionTextUsesVisibleViewportLayout(t *testing.T) {
+	m := model{
+		viewport: viewport.New(32, 6),
+		copyView: viewport.New(32, 6),
+	}
+	m.viewport.SetContent("You\nalpha line")
+	m.copyView.SetContent("alpha line\nbeta line")
+	m.mouseSelectionStart = viewportSelectionPoint{Row: 1, Col: 0}
+	m.mouseSelectionEnd = viewportSelectionPoint{Row: 1, Col: 4}
+
+	got := m.viewportSelectionText()
+	if got != "alpha" {
+		t.Fatalf("expected viewport-aligned selection %q, got %q", "alpha", got)
+	}
+}
+
+func TestViewportSelectionTextUsesCellCoordinatesForWideRunes(t *testing.T) {
+	m := model{
+		viewport: viewport.New(32, 6),
+	}
+	m.viewport.SetContent("你好世界")
+	m.mouseSelectionStart = viewportSelectionPoint{Row: 0, Col: 0}
+	m.mouseSelectionEnd = viewportSelectionPoint{Row: 0, Col: 3}
+
+	got := m.viewportSelectionText()
+	if got != "你好" {
+		t.Fatalf("expected wide-rune selection %q, got %q", "你好", got)
+	}
+}
+
+func TestRenderConversationCopyUsesPlainMessageText(t *testing.T) {
+	m := model{
+		width:  120,
+		height: 28,
+		viewport: func() viewport.Model {
+			vp := viewport.New(60, 10)
+			return vp
+		}(),
+		chatItems: []chatEntry{
+			{Kind: "assistant", Title: assistantLabel, Body: "line one\nline two", Status: "final"},
+		},
+	}
+
+	got := m.renderConversationCopy()
+	if strings.Contains(got, "│") || strings.Contains(got, "┃") {
+		t.Fatalf("expected copy conversation without card borders, got %q", got)
+	}
+	if !strings.Contains(got, "line one") || !strings.Contains(got, "line two") {
+		t.Fatalf("expected copy conversation to contain message body, got %q", got)
+	}
+}
+
+func TestRenderConversationViewportShowsHighlightAfterSelection(t *testing.T) {
+	m := model{
+		viewport: viewport.New(16, 3),
+		copyView: viewport.New(16, 3),
+		mouseSelectionActive: true,
+		mouseSelectionStart:  viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:    viewportSelectionPoint{Row: 0, Col: 4},
+	}
+	m.viewport.SetContent("You\nalpha line\nbeta line")
+	m.copyView.SetContent("alpha line\nbeta line")
+
+	got := m.renderConversationViewport()
+	if !strings.Contains(got, "You") || !strings.Contains(got, "alpha line") || !strings.Contains(got, "beta line") {
+		t.Fatalf("expected selection rendering to preserve visible content, got %q", got)
+	}
+}
+
+func TestRenderConversationViewportHighlightsWhileDraggingAfterRangeExists(t *testing.T) {
+	m := model{
+		viewport: viewport.New(16, 3),
+		mouseSelecting:      true,
+		mouseSelectionStart: viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:   viewportSelectionPoint{Row: 0, Col: 4},
+	}
+	m.viewport.SetContent("alpha line\nbeta line")
+
+	got := m.renderConversationViewport()
+	if !strings.Contains(got, "alpha line") || !strings.Contains(got, "beta line") {
+		t.Fatalf("expected dragging selection rendering to preserve visible content, got %q", got)
 	}
 }
 

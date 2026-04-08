@@ -716,7 +716,7 @@ func TestAuthorSkillTranslatesChineseBriefToEnglish(t *testing.T) {
 		Registry: tools.DefaultRegistry(),
 	})
 
-	result, err := runner.AuthorSkill("review-plus", "鐢ㄤ簬浠ｇ爜璇勫锛岄噸鐐瑰叧娉ㄥ洖褰掗闄?)
+	result, err := runner.AuthorSkill("review-plus", "\u7528\u4e8e\u4ee3\u7801\u8bc4\u5ba1\uff0c\u91cd\u70b9\u5173\u6ce8\u56de\u5f52\u98ce\u9669")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -743,7 +743,7 @@ func TestAuthorSkillFallsBackToEnglishWhenTranslationFails(t *testing.T) {
 	workspace := t.TempDir()
 	client := &fakeClient{
 		replies: []llm.Message{
-			llm.NewAssistantTextMessage("鐢ㄤ簬浠ｇ爜璇勫"),
+			llm.NewAssistantTextMessage("\u7528\u4e8e\u4ee3\u7801\u8bc4\u5ba1"),
 		},
 	}
 	runner := NewRunner(Options{
@@ -756,7 +756,7 @@ func TestAuthorSkillFallsBackToEnglishWhenTranslationFails(t *testing.T) {
 		Registry: tools.DefaultRegistry(),
 	})
 
-	result, err := runner.AuthorSkill("review-plus", "鐢ㄤ簬浠ｇ爜璇勫")
+	result, err := runner.AuthorSkill("review-plus", "\u7528\u4e8e\u4ee3\u7801\u8bc4\u5ba1")
 	if err != nil {
 		t.Fatal(err)
 	}

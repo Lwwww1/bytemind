@@ -4403,6 +4403,21 @@ func TestThinkingFilters(t *testing.T) {
 	}
 }
 
+func TestCurrentSkillLabelBranches(t *testing.T) {
+	m := model{}
+	if got := m.currentSkillLabel(); got != "无" {
+		t.Fatalf("expected 无 for nil session, got %q", got)
+	}
+	m.sess = &session.Session{ActiveSkill: &session.ActiveSkill{}}
+	if got := m.currentSkillLabel(); got != "无" {
+		t.Fatalf("expected 无 for blank skill name, got %q", got)
+	}
+	m.sess.ActiveSkill.Name = "review"
+	if got := m.currentSkillLabel(); got != "review" {
+		t.Fatalf("expected active skill name, got %q", got)
+	}
+}
+
 func containsString(items []string, target string) bool {
 	for _, item := range items {
 		if item == target {

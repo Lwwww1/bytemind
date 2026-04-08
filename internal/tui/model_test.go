@@ -4389,6 +4389,12 @@ func TestThinkingFilters(t *testing.T) {
 	if !shouldRenderThinkingFromDelta("First, I will inspect the failing branch and then patch tests.") {
 		t.Fatalf("expected structured reasoning marker to trigger thinking rendering")
 	}
+	if isMeaningfulThinking("我会调用 read_file 先检查相关上下文。", "read_file") {
+		t.Fatalf("expected generic Chinese tool-intent phrase not to be treated as meaningful thinking")
+	}
+	if !shouldRenderThinkingFromDelta("我会先检查失败分支，然后补充测试。") {
+		t.Fatalf("expected Chinese structured reasoning marker to trigger thinking rendering")
+	}
 }
 
 func containsString(items []string, target string) bool {

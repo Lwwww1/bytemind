@@ -4408,17 +4408,18 @@ func isMeaningfulThinking(body, toolName string) bool {
 	}
 
 	cnPrefixes := []string{
-		"鎴戝皢璋冪敤",
-		"鎴戜細璋冪敤",
-		"鎴戝厛璋冪敤",
-		"鎴戣璋冪敤",
+		"我将调用",
+		"我会调用",
+		"我先调用",
+		"我要调用",
 		"先调用",
-		"鎴戝皢浣跨敤",
-		"鎴戜細浣跨敤",
-		"鎴戝厛浣跨敤",
-		"鎴戝皢杩愯",
-		"鎴戜細杩愯",
-		"鍏堟鏌ョ浉鍏充笂涓嬫枃",
+		"我将使用",
+		"我会使用",
+		"我先使用",
+		"我将运行",
+		"我会运行",
+		"先检查相关上下文",
+		"我会先检查相关上下文",
 	}
 	for _, prefix := range cnPrefixes {
 		if strings.HasPrefix(raw, prefix) {
@@ -4448,7 +4449,7 @@ func shouldRenderThinkingFromDelta(body string) bool {
 		"through build and test",
 		"我会先",
 		"先了解",
-		"鐒跺悗",
+		"然后",
 		"最后",
 		"通过构建和测试",
 		"系统性",

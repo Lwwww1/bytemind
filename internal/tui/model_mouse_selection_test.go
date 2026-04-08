@@ -870,3 +870,149 @@ func TestRenderConversationViewportHighlightsWhileDraggingAfterRangeExists(t *te
 		t.Fatalf("expected dragging selection rendering to preserve visible content, got %q", got)
 	}
 }
+
+func TestRenderInputSelectionPreviewHighlightsSelectedCells(t *testing.T) {
+	m := model{
+		inputSelectionActive: true,
+		inputSelectionStart:  viewportSelectionPoint{Row: 0, Col: 0},
+		inputSelectionEnd:    viewportSelectionPoint{Row: 0, Col: 1},
+	}
+	got := m.renderInputSelectionPreview("nihao")
+	if xansi.Strip(got) != "nihao" {
+		t.Fatalf("expected preview to preserve text, got %q", xansi.Strip(got))
+	}
+	if !strings.Contains(got, selectionHighlightStyle.Render("ni")) {
+		t.Fatalf("expected preview to highlight selected span, got %q", got)
+	}
+}
+
+func TestInputPointFromMouseClampToBoundsMapsToLineEnd(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.ShowLineNumbers = false
+	input.Prompt = ""
+	input.SetWidth(40)
+	input.SetHeight(2)
+	input.SetValue("nihao")
+
+	m := model{
+		screen:     screenLanding,
+		width:      110,
+		height:     34,
+		input:      input,
+		tokenUsage: newTokenUsageComponent(),
+	}
+	view := m.View()
+	lines := strings.Split(strings.ReplaceAll(view, "\r\n", "\n"), "\n")
+	targetRow, targetCol := -1, -1
+	for row, line := range lines {
+		plain := xansi.Strip(line)
+		byteCol := strings.Index(plain, "nihao")
+		if byteCol >= 0 {
+			targetRow = row
+			targetCol = xansi.StringWidth(plain[:byteCol])
+			break
+		}
+	}
+	if targetRow < 0 || targetCol < 0 {
+		t.Fatalf("expected to locate landing input text in rendered view")
+	}
+
+	outsideX := m.width + 50
+	if _, ok := m.inputPointFromMouse(outsideX, targetRow, false); ok {
+		t.Fatalf("expected clamp=false outside point to be rejected")
+	}
+	point, ok := m.inputPointFromMouse(outsideX, targetRow, true)
+	if !ok {
+		t.Fatalf("expected clamp=true outside point to clamp into zone")
+	}
+	sourceLines := m.inputSelectionSourceLines("")
+	if point.Row < 0 || point.Row >= len(sourceLines) {
+		t.Fatalf("expected clamped point row to stay within rendered lines, got row=%d", point.Row)
+	}
+	lineWidth := xansi.StringWidth(sourceLines[point.Row])
+	wantCol := max(0, lineWidth-1)
+	if point.Row != 0 || point.Col != wantCol {
+		t.Fatalf("expected clamped point on first row at rendered line end, got row=%d col=%d wantCol=%d", point.Row, point.Col, wantCol)
+	}
+}
+
+func TestInputPointFromMouseOutsideHonorsClampFlag(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.ShowLineNumbers = false
+	input.Prompt = ""
+	input.SetWidth(40)
+	input.SetHeight(2)
+	input.SetValue("nihao")
+
+	m := model{
+		screen:     screenLanding,
+		width:      110,
+		height:     34,
+		input:      input,
+		tokenUsage: newTokenUsageComponent(),
+	}
+	view := m.View()
+	lines := strings.Split(strings.ReplaceAll(view, "\r\n", "\n"), "\n")
+	targetRow, targetCol := -1, -1
+	for row, line := range lines {
+		plain := xansi.Strip(line)
+		byteCol := strings.Index(plain, "nihao")
+		if byteCol >= 0 {
+			targetRow = row
+			targetCol = xansi.StringWidth(plain[:byteCol])
+			break
+		}
+	}
+	if targetRow < 0 || targetCol < 0 {
+		t.Fatalf("expected to locate landing input text in rendered view")
+	}
+
+	outsideX := m.width + 50
+	if _, ok := m.inputPointFromMouse(outsideX, targetRow, false); ok {
+		t.Fatalf("expected clamp=false mouse outside to be rejected")
+	}
+	if _, ok := m.inputPointFromMouse(outsideX, targetRow, true); !ok {
+		t.Fatalf("expected clamp=true mouse outside to be accepted")
+	}
+}
+
+func TestCopyCurrentSelectionEmptyClearsSelectionState(t *testing.T) {
+	m := model{
+		mouseSelectionActive: true,
+		mouseSelectionStart:  viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:    viewportSelectionPoint{Row: 0, Col: 0},
+		inputSelectionActive: true,
+		inputSelectionStart:  viewportSelectionPoint{Row: 0, Col: 0},
+		inputSelectionEnd:    viewportSelectionPoint{Row: 0, Col: 0},
+	}
+	if cmd := m.copyCurrentSelection(); cmd != nil {
+		t.Fatalf("expected empty selection copy to return nil cmd")
+	}
+	if m.statusNote != "Selection is empty." {
+		t.Fatalf("expected empty selection status note, got %q", m.statusNote)
+	}
+	if m.mouseSelectionActive || m.inputSelectionActive || m.inputMouseSelecting || m.mouseSelecting {
+		t.Fatalf("expected empty selection copy to clear selection state")
+	}
+}
+
+func TestHandleMouseSelectionScrollTickWithoutRangeOnlySchedulesNextTick(t *testing.T) {
+	m := model{
+		mouseSelecting:       true,
+		mouseSelectionTickID: 3,
+		mouseSelectionStart:  viewportSelectionPoint{Row: 2, Col: 5},
+		mouseSelectionEnd:    viewportSelectionPoint{Row: 2, Col: 5},
+		viewport:             viewport.New(40, 4),
+	}
+	beforeOffset := m.viewport.YOffset
+	updatedModel, cmd := m.handleMouseSelectionScrollTick(mouseSelectionScrollTickMsg{ID: 3})
+	updated := updatedModel.(model)
+	if cmd == nil {
+		t.Fatalf("expected tick to schedule the next cycle even without a range")
+	}
+	if updated.viewport.YOffset != beforeOffset {
+		t.Fatalf("expected no autoscroll when selection range is empty, before=%d after=%d", beforeOffset, updated.viewport.YOffset)
+	}
+}

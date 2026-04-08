@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 )
 
 func TestSystemPromptRendersMainModeSystemAndInstruction(t *testing.T) {
@@ -169,6 +170,35 @@ func TestFormatSkillsLimitsAndSummarizesOverflow(t *testing.T) {
 	}
 }
 
+func TestFormatSkillsSanitizesNonEnglishDescriptions(t *testing.T) {
+	got := formatSkills([]PromptSkill{
+		{Name: "review", Description: "以正确性为重点进行代码评审。", Enabled: true},
+	})
+
+	assertContains(t, got, "- review: Description omitted (non-English source). enabled=true")
+	assertNoHanText(t, got)
+}
+
+func TestRenderActiveSkillPromptSanitizesNonEnglishFields(t *testing.T) {
+	out := renderActiveSkillPrompt(&PromptActiveSkill{
+		Name:         "review",
+		Description:  "以正确性为重点进行代码评审。",
+		WhenToUse:    "当用户要求评审时使用。",
+		Instructions: "优先回归风险和测试缺口。",
+		Args: map[string]string{
+			"base_ref": "主分支",
+		},
+		ToolPolicy: "allowlist",
+		Tools:      []string{"read_file"},
+	})
+
+	assertContains(t, out, "Description: Description omitted (non-English source).")
+	assertContains(t, out, "When To Use: When-to-use omitted (non-English source).")
+	assertContains(t, out, "Instructions omitted (non-English source).")
+	assertContains(t, out, "- base_ref=[non-English value omitted]")
+	assertNoHanText(t, out)
+}
+
 func TestIsGitRepository(t *testing.T) {
 	workspace := t.TempDir()
 	if isGitRepository(workspace) {
@@ -212,6 +242,15 @@ func assertNoTemplateMarkers(t *testing.T, prompt string) {
 	for _, marker := range markers {
 		if strings.Contains(prompt, marker) {
 			t.Fatalf("expected template marker %q to be rendered, got %q", marker, prompt)
+		}
+	}
+}
+
+func assertNoHanText(t *testing.T, text string) {
+	t.Helper()
+	for _, r := range text {
+		if unicode.Is(unicode.Han, r) {
+			t.Fatalf("expected no Han characters, got %q", text)
 		}
 	}
 }

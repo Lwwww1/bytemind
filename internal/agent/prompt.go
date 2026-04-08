@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -165,9 +166,12 @@ func formatSkills(skills []PromptSkill) string {
 	lines := make([]string, 0, len(skills))
 	for _, skill := range skills {
 		name := strings.TrimSpace(skill.Name)
-		description := strings.TrimSpace(skill.Description)
-		if name == "" || description == "" {
+		if name == "" {
 			continue
+		}
+		description := englishSkillTextOrFallback(strings.TrimSpace(skill.Description), "Description omitted (non-English source).")
+		if description == "" {
+			description = "No description provided."
 		}
 		description = trimPromptText(description, maxPromptSkillDescriptionRune)
 		lines = append(lines, fmt.Sprintf("- %s: %s enabled=%t", name, description, skill.Enabled))
@@ -213,9 +217,9 @@ func renderActiveSkillPrompt(skill *PromptActiveSkill) string {
 	}
 
 	name := strings.TrimSpace(skill.Name)
-	description := strings.TrimSpace(skill.Description)
-	whenToUse := strings.TrimSpace(skill.WhenToUse)
-	instructions := strings.TrimSpace(skill.Instructions)
+	description := englishSkillTextOrFallback(strings.TrimSpace(skill.Description), "Description omitted (non-English source).")
+	whenToUse := englishSkillTextOrFallback(strings.TrimSpace(skill.WhenToUse), "When-to-use omitted (non-English source).")
+	instructions := englishSkillTextOrFallback(strings.TrimSpace(skill.Instructions), "Instructions omitted (non-English source).")
 	toolPolicy := strings.TrimSpace(skill.ToolPolicy)
 	if name == "" && description == "" && whenToUse == "" && instructions == "" && toolPolicy == "" {
 		return ""
@@ -246,6 +250,7 @@ func renderActiveSkillPrompt(skill *PromptActiveSkill) string {
 				if value == "" {
 					continue
 				}
+				value = englishSkillTextOrFallback(value, "[non-English value omitted]")
 				lines = append(lines, fmt.Sprintf("- %s=%s", key, value))
 			}
 		}
@@ -317,6 +322,26 @@ func trimPromptText(text string, maxRunes int) string {
 		return string(runes[:maxRunes])
 	}
 	return string(runes[:maxRunes-3]) + "..."
+}
+
+func englishSkillTextOrFallback(text, fallback string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if containsHanText(text) {
+		return strings.TrimSpace(fallback)
+	}
+	return text
+}
+
+func containsHanText(text string) bool {
+	for _, r := range text {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
 }
 
 func promptDebugEnabled() bool {

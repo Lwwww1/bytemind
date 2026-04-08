@@ -63,6 +63,19 @@ var footerShortcutHints = []footerShortcutHint{
 	{Key: "Ctrl+C", Label: "quit"},
 }
 
+var promptSearchFilterHints = []footerShortcutHint{
+	{Key: "ws:<kw>", Label: "workspace"},
+	{Key: "sid:<kw>", Label: "session"},
+}
+
+var promptSearchActionHints = []footerShortcutHint{
+	{Key: "PgUp/PgDn", Label: "page"},
+	{Key: "Ctrl+F", Label: "next"},
+	{Key: "Ctrl+S", Label: "prev"},
+	{Key: "Enter", Label: "apply"},
+	{Key: "Esc", Label: "close"},
+}
+
 type screenKind string
 
 const (
@@ -2192,8 +2205,12 @@ func (m model) renderFooterInfoLine() string {
 }
 
 func renderFooterShortcutHints() string {
-	parts := make([]string, 0, len(footerShortcutHints))
-	for _, hint := range footerShortcutHints {
+	return renderInlineShortcutHints(footerShortcutHints)
+}
+
+func renderInlineShortcutHints(hints []footerShortcutHint) string {
+	parts := make([]string, 0, len(hints))
+	for _, hint := range hints {
 		parts = append(parts, footerHintKeyStyle.Render(hint.Key)+" "+footerHintLabelStyle.Render(hint.Label))
 	}
 	return strings.Join(parts, footerHintDividerStyle.Render("  |  "))
@@ -2324,9 +2341,14 @@ func (m model) renderPromptSearchPalette() string {
 		}
 		content := []string{
 			commandPaletteMetaStyle.Render("Prompt history " + modeLabel),
-			commandPaletteMetaStyle.Render("query: " + query + "  (filters: ws:<kw> sid:<kw>)"),
+			commandPaletteMetaStyle.Render("query: "+query+"  (filters: ") + renderInlineShortcutHints(promptSearchFilterHints) + commandPaletteMetaStyle.Render(")"),
 			commandPaletteMetaStyle.Render("No matching prompts."),
-			commandPaletteMetaStyle.Render("Type to filter  PgUp/PgDn page  Enter apply  Esc close"),
+			commandPaletteMetaStyle.Render("Type to filter  ") +
+				renderInlineShortcutHints([]footerShortcutHint{
+					{Key: "PgUp/PgDn", Label: "page"},
+					{Key: "Enter", Label: "apply"},
+					{Key: "Esc", Label: "close"},
+				}),
 		}
 		return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, content...))
 	}
@@ -2361,8 +2383,12 @@ func (m model) renderPromptSearchPalette() string {
 	if query == "" {
 		query = "(all)"
 	}
-	meta := fmt.Sprintf("%s  query:%s  |  ws:<kw> sid:<kw>  PgUp/PgDn page  Ctrl+F next  Ctrl+S prev  Enter apply  Esc close", modeLabel, compact(query, 24))
-	rows = append(rows, commandPaletteMetaStyle.Render(meta))
+	meta := commandPaletteMetaStyle.Render(fmt.Sprintf("%s  query:%s", modeLabel, compact(query, 24))) +
+		footerHintDividerStyle.Render("  |  ") +
+		renderInlineShortcutHints(promptSearchFilterHints) +
+		footerHintDividerStyle.Render("  |  ") +
+		renderInlineShortcutHints(promptSearchActionHints)
+	rows = append(rows, meta)
 	return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
 }
 

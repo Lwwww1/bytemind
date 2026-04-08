@@ -753,6 +753,41 @@ func TestPromptSearchPanelSupportsPageNavigation(t *testing.T) {
 	}
 }
 
+func TestRenderPromptSearchPaletteNoMatchesUsesHighContrastShortcuts(t *testing.T) {
+	m := model{
+		screen:              screenChat,
+		width:               140,
+		promptSearchMode:    promptSearchModeQuick,
+		promptSearchQuery:   "missing",
+		promptSearchMatches: nil,
+	}
+
+	got := m.renderPromptSearchPalette()
+	for _, want := range []string{"ws:<kw>", "workspace", "sid:<kw>", "session", "PgUp/PgDn", "Enter", "Esc"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected no-match prompt search palette to contain %q, got %q", want, got)
+		}
+	}
+}
+
+func TestRenderPromptSearchPaletteMetaLineUsesHighContrastShortcuts(t *testing.T) {
+	m := model{
+		screen:           screenChat,
+		width:            140,
+		promptSearchMode: promptSearchModeQuick,
+		promptSearchMatches: []history.PromptEntry{
+			{Prompt: "fix tui", Workspace: "repo-a", SessionID: "sess-1", Timestamp: time.Now()},
+		},
+	}
+
+	got := m.renderPromptSearchPalette()
+	for _, want := range []string{"ws:<kw>", "workspace", "sid:<kw>", "session", "Ctrl+F", "next", "Ctrl+S", "prev"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected prompt search meta line to contain %q, got %q", want, got)
+		}
+	}
+}
+
 func TestStartupGuideSequentialFlowAdvancesAndClearsInput(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(configPath, []byte(`{

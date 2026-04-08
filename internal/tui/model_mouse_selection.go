@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
 	zone "github.com/lrstanley/bubblezone"
 )
@@ -13,6 +14,28 @@ import (
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	ensureZoneManager()
 	msg = m.normalizeMouseMsg(msg)
+
+	if m.inputMouseSelecting {
+		switch msg.Action {
+		case tea.MouseActionMotion:
+			if point, ok := m.inputPointFromMouse(msg.X, msg.Y, true); ok {
+				m.inputSelectionEnd = point
+			} else {
+				m.clearInputSelection()
+			}
+			return m, nil
+		case tea.MouseActionRelease:
+			if point, ok := m.inputPointFromMouse(msg.X, msg.Y, true); ok && selectionHasRange(m.inputSelectionStart, point) {
+				m.inputSelectionEnd = point
+				m.inputSelectionActive = true
+				m.statusNote = "Selection ready. Press Ctrl+C to copy."
+			} else {
+				m.clearInputSelection()
+			}
+			m.inputMouseSelecting = false
+			return m, nil
+		}
+	}
 
 	if m.mouseSelecting {
 		m.mouseSelectionMouseX = msg.X
@@ -56,8 +79,17 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	if m.mouseOverInput(msg.Y) {
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && (m.mouseSelecting || m.mouseSelectionActive) {
-			m.clearMouseSelection()
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			if m.mouseSelecting || m.mouseSelectionActive {
+				m.clearMouseSelection()
+			}
+			if point, ok := m.inputPointFromMouse(msg.X, msg.Y, false); ok {
+				m.inputMouseSelecting = true
+				m.inputSelectionActive = false
+				m.inputSelectionStart = point
+				m.inputSelectionEnd = point
+				return m, nil
+			}
 		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
@@ -97,6 +129,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 			if m.mouseSelectionActive {
 				m.clearMouseSelection()
+			}
+			if m.inputSelectionActive || m.inputMouseSelecting {
+				m.clearInputSelection()
 			}
 			if point, ok := m.viewportPointFromMouse(msg.X, msg.Y); ok {
 				m.mouseSelecting = true
@@ -239,7 +274,11 @@ func (m *model) copyCurrentSelection() tea.Cmd {
 	if m == nil {
 		return nil
 	}
-	if selected := m.viewportSelectionText(); strings.TrimSpace(selected) != "" {
+	selected := m.inputSelectionText()
+	if strings.TrimSpace(selected) == "" {
+		selected = m.viewportSelectionText()
+	}
+	if strings.TrimSpace(selected) != "" {
 		if m.clipboardText == nil {
 			m.statusNote = "clipboard copy is unavailable in current environment"
 		} else if err := m.clipboardText.WriteText(context.Background(), selected); err != nil {
@@ -250,6 +289,7 @@ func (m *model) copyCurrentSelection() tea.Cmd {
 			m.selectionToastID++
 			id := m.selectionToastID
 			m.clearMouseSelection()
+			m.clearInputSelection()
 			return tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg {
 				return selectionToastExpiredMsg{ID: id}
 			})
@@ -258,11 +298,17 @@ func (m *model) copyCurrentSelection() tea.Cmd {
 	}
 	m.statusNote = "Selection is empty."
 	m.clearMouseSelection()
+	m.clearInputSelection()
 	return nil
 }
 
 func (m model) normalizeMouseMsg(msg tea.MouseMsg) tea.MouseMsg {
 	if m.mouseYOffset == 0 {
+		return msg
+	}
+	if m.screen == screenLanding {
+		// Landing input uses zone-based hit testing; applying an extra global
+		// y-offset here introduces row drift in some Windows terminals.
 		return msg
 	}
 	msg.Y += m.mouseYOffset
@@ -282,13 +328,31 @@ func (m *model) clearMouseSelection() {
 	m.mouseSelectionEnd = viewportSelectionPoint{}
 }
 
+func (m *model) clearInputSelection() {
+	if m == nil {
+		return
+	}
+	m.inputMouseSelecting = false
+	m.inputSelectionActive = false
+	m.inputSelectionStart = viewportSelectionPoint{}
+	m.inputSelectionEnd = viewportSelectionPoint{}
+}
+
 func (m model) hasCopyableSelection() bool {
+	return m.hasCopyableInputSelection() || m.hasCopyableViewportSelection()
+}
+
+func (m model) hasCopyableInputSelection() bool {
+	return (m.inputMouseSelecting || m.inputSelectionActive) && selectionHasRange(m.inputSelectionStart, m.inputSelectionEnd)
+}
+
+func (m model) hasCopyableViewportSelection() bool {
 	return (m.mouseSelecting || m.mouseSelectionActive) && selectionHasRange(m.mouseSelectionStart, m.mouseSelectionEnd)
 }
 
 func (m model) renderConversationViewport() string {
 	content := ""
-	if m.hasCopyableSelection() {
+	if m.hasCopyableViewportSelection() {
 		if preview := m.renderActiveSelectionPreview(); strings.TrimSpace(preview) != "" {
 			content = preview
 		}
@@ -297,6 +361,39 @@ func (m model) renderConversationViewport() string {
 		content = m.viewport.View()
 	}
 	return zone.Mark(conversationViewportZoneID, content)
+}
+
+func (m model) renderInputEditorView() string {
+	raw := m.input.View()
+	if !m.hasCopyableInputSelection() {
+		return raw
+	}
+	if preview := m.renderInputSelectionPreview(raw); preview != "" {
+		return preview
+	}
+	return raw
+}
+
+func (m model) renderInputSelectionPreview(raw string) string {
+	lines := m.inputSelectionSourceLines(raw)
+	if len(lines) == 0 {
+		return raw
+	}
+	start, end := normalizeViewportSelectionPoints(m.inputSelectionStart, m.inputSelectionEnd)
+	maxRow := len(lines) - 1
+	start.Row = clamp(start.Row, 0, maxRow)
+	end.Row = clamp(end.Row, 0, maxRow)
+	rendered := make([]string, 0, len(lines))
+	for row, line := range lines {
+		lineWidth := max(1, xansi.StringWidth(line))
+		rangeStart, rangeEnd, ok := selectionColumnsForRow(row, lineWidth, start, end, false)
+		if !ok {
+			rendered = append(rendered, line)
+			continue
+		}
+		rendered = append(rendered, highlightVisibleLineByCells(line, rangeStart, rangeEnd))
+	}
+	return strings.Join(rendered, "\n")
 }
 
 func (m model) renderActiveSelectionPreview() string {
@@ -409,6 +506,39 @@ func (m model) viewportSelectionText() string {
 	return strings.Join(parts, "\n")
 }
 
+func (m model) inputSelectionText() string {
+	if strings.TrimSpace(m.input.Value()) == "" {
+		return ""
+	}
+	start, end := normalizeViewportSelectionPoints(m.inputSelectionStart, m.inputSelectionEnd)
+	if start.Row == end.Row && start.Col == end.Col {
+		return ""
+	}
+	lines := m.inputSelectionSourceLines("")
+	if len(lines) == 0 {
+		return ""
+	}
+	maxRow := len(lines) - 1
+	start.Row = clamp(start.Row, 0, maxRow)
+	end.Row = clamp(end.Row, 0, maxRow)
+	if start.Row > end.Row {
+		start, end = end, start
+	}
+
+	parts := make([]string, 0, end.Row-start.Row+1)
+	for row := start.Row; row <= end.Row; row++ {
+		raw := lines[row]
+		lineWidth := max(1, xansi.StringWidth(raw))
+		rangeStart, rangeEnd, ok := selectionColumnsForRow(row, lineWidth, start, end, false)
+		if !ok {
+			parts = append(parts, "")
+			continue
+		}
+		parts = append(parts, sliceViewportLineByCells(raw, rangeStart, rangeEnd))
+	}
+	return strings.Join(parts, "\n")
+}
+
 func (m model) selectionSourceLines() []string {
 	content := m.viewportContentCache
 	if content == "" {
@@ -416,6 +546,149 @@ func (m model) selectionSourceLines() []string {
 	}
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	return strings.Split(content, "\n")
+}
+
+func (m model) inputSelectionSourceLines(raw string) []string {
+	if raw == "" {
+		raw = m.input.View()
+	}
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	return strings.Split(raw, "\n")
+}
+
+func (m model) inputPointFromMouse(x, y int, clampToBounds bool) (viewportSelectionPoint, bool) {
+	ensureZoneManager()
+	if z := zone.Get(inputEditorZoneID); z != nil {
+		if point, ok := m.inputPointFromZone(z, x, y, clampToBounds); ok {
+			return point, true
+		}
+		// Keep input selection robust for terminals that occasionally
+		// report mouse rows with small absolute drift.
+		if x >= z.StartX-1 && x <= z.EndX+1 {
+			for delta := 1; delta <= mouseZoneAutoProbeMaxDelta; delta++ {
+				if point, ok := m.inputPointFromZone(z, x, y-delta, clampToBounds); ok {
+					return point, true
+				}
+				if point, ok := m.inputPointFromZone(z, x, y+delta, clampToBounds); ok {
+					return point, true
+				}
+			}
+		}
+	}
+
+	left, right, top, bottom, innerLeft, innerTop, ok := m.inputInnerBounds()
+	if !ok {
+		return viewportSelectionPoint{}, false
+	}
+	if !clampToBounds && (x < left || x > right || y < top || y > bottom) {
+		return viewportSelectionPoint{}, false
+	}
+	x = clamp(x, left, right)
+	y = clamp(y, top, bottom)
+	lines := m.inputSelectionSourceLines("")
+	if len(lines) == 0 {
+		return viewportSelectionPoint{}, false
+	}
+	row := clamp(y-innerTop, 0, len(lines)-1)
+	lineWidth := xansi.StringWidth(lines[row])
+	if lineWidth <= 0 {
+		return viewportSelectionPoint{Row: row, Col: 0}, true
+	}
+	col := clamp(x-innerLeft, 0, lineWidth-1)
+	return viewportSelectionPoint{Row: row, Col: col}, true
+}
+
+func (m model) inputPointFromZone(z *zone.ZoneInfo, x, y int, clampToBounds bool) (viewportSelectionPoint, bool) {
+	col, row := z.Pos(tea.MouseMsg{X: x, Y: y})
+	if (col < 0 || row < 0) && clampToBounds {
+		clampedX := clamp(x, z.StartX, z.EndX)
+		clampedY := clamp(y, z.StartY, z.EndY)
+		col, row = z.Pos(tea.MouseMsg{X: clampedX, Y: clampedY})
+	}
+	if col < 0 || row < 0 {
+		return viewportSelectionPoint{}, false
+	}
+	lines := m.inputSelectionSourceLines("")
+	if len(lines) == 0 {
+		return viewportSelectionPoint{}, false
+	}
+	row = clamp(row, 0, len(lines)-1)
+	lineWidth := xansi.StringWidth(lines[row])
+	if lineWidth <= 0 {
+		return viewportSelectionPoint{Row: row, Col: 0}, true
+	}
+	col = clamp(col, 0, lineWidth-1)
+	return viewportSelectionPoint{Row: row, Col: col}, true
+}
+
+func (m model) inputInnerBounds() (left, right, top, bottom, innerLeft, innerTop int, ok bool) {
+	switch m.screen {
+	case screenChat:
+		if m.width <= 0 {
+			return 0, 0, 0, 0, 0, 0, false
+		}
+		inputRender := m.inputBorderStyle().Width(m.chatPanelInnerWidth()).Render(m.input.View())
+		left = panelStyle.GetHorizontalFrameSize() / 2
+		top = panelStyle.GetVerticalFrameSize()/2 + lipgloss.Height(m.renderMainPanel())
+		if m.approval != nil {
+			top += lipgloss.Height(m.renderApprovalBanner())
+		}
+		if m.startupGuide.Active {
+			top += lipgloss.Height(m.renderStartupGuidePanel())
+		} else if m.promptSearchOpen {
+			top += lipgloss.Height(m.renderPromptSearchPalette())
+		} else if m.mentionOpen {
+			top += lipgloss.Height(m.renderMentionPalette())
+		} else if m.commandOpen {
+			top += lipgloss.Height(m.renderCommandPalette())
+		}
+		right = left + max(1, lipgloss.Width(inputRender)) - 1
+		bottom = top + max(1, lipgloss.Height(inputRender)) - 1
+		innerLeft = left + m.inputBorderStyle().GetHorizontalFrameSize()/2
+		innerTop = top + m.inputBorderStyle().GetVerticalFrameSize()/2
+		return left, right, top, bottom, innerLeft, innerTop, true
+	case screenLanding:
+		if m.height <= 0 || m.width <= 0 {
+			return 0, 0, 0, 0, 0, 0, false
+		}
+		box := landingInputStyle.Copy().
+			BorderForeground(m.modeAccentColor()).
+			Width(m.landingInputShellWidth()).
+			Render(m.input.View())
+		boxW := max(1, lipgloss.Width(box))
+		boxH := max(1, lipgloss.Height(box))
+		logoHeight := lipgloss.Height(landingLogoStyle.Render(strings.Join([]string{
+			"    ____        __                      _           __",
+			"   / __ )__  __/ /____  ____ ___  ____(_)___  ____/ /",
+			"  / __  / / / / __/ _ \\/ __ `__ \\/ __/ / __ \\/ __  / ",
+			" / /_/ / /_/ / /_/  __/ / / / / / /_/ / / / / /_/ /  ",
+			"/_____/\\__, /\\__/\\___/_/ /_/ /_/\\__/_/_/ /_/\\__,_/   ",
+			"      /____/                                          ",
+		}, "\n")))
+		overlayHeight := 0
+		if m.startupGuide.Active {
+			overlayHeight = lipgloss.Height(m.renderStartupGuidePanel()) + 1
+		} else if m.promptSearchOpen {
+			overlayHeight = lipgloss.Height(m.renderPromptSearchPalette()) + 1
+		} else if m.mentionOpen {
+			overlayHeight = lipgloss.Height(m.renderMentionPalette()) + 1
+		} else if m.commandOpen {
+			overlayHeight = lipgloss.Height(m.renderCommandPalette()) + 1
+		}
+		modeTabsHeight := lipgloss.Height(m.renderModeTabs())
+		hintHeight := lipgloss.Height(mutedStyle.Render(footerHintText))
+		contentHeight := logoHeight + 1 + modeTabsHeight + 1 + overlayHeight + boxH + 1 + hintHeight
+		contentTop := max(0, (m.height-contentHeight)/2)
+		top = contentTop + logoHeight + 1 + modeTabsHeight + 1 + overlayHeight
+		left = max(0, (m.width-boxW)/2)
+		right = left + boxW - 1
+		bottom = top + boxH - 1
+		innerLeft = left + landingInputStyle.GetHorizontalFrameSize()/2
+		innerTop = top + landingInputStyle.GetVerticalFrameSize()/2
+		return left, right, top, bottom, innerLeft, innerTop, true
+	default:
+		return 0, 0, 0, 0, 0, 0, false
+	}
 }
 
 func sliceViewportLineByCells(line string, startCol, endCol int) string {

@@ -55,6 +55,7 @@ const (
 	tuiTitleLabel              = "Bytemind TUI"
 	footerHintText             = "tab agents | / commands | drag select | Ctrl+C copy/quit | Ctrl+F history | Ctrl+L sessions"
 	conversationViewportZoneID = "bytemind:conversation:viewport"
+	inputEditorZoneID          = "bytemind:input:editor"
 )
 
 var zoneInitOnce sync.Once
@@ -250,6 +251,10 @@ type model struct {
 	mouseSelectionActive  bool
 	mouseSelectionStart   viewportSelectionPoint
 	mouseSelectionEnd     viewportSelectionPoint
+	inputMouseSelecting   bool
+	inputSelectionActive  bool
+	inputSelectionStart   viewportSelectionPoint
+	inputSelectionEnd     viewportSelectionPoint
 	selectionToast        string
 	selectionToastID      int
 	tokenUsage            tokenUsageComponent
@@ -614,6 +619,7 @@ func (m *model) scrollInput(delta int) {
 }
 
 func (m model) mouseOverInput(y int) bool {
+	ensureZoneManager()
 	switch m.screen {
 	case screenLanding:
 		return m.mouseOverLandingInput(y)
@@ -667,8 +673,7 @@ func (m model) mouseOverLandingInput(y int) bool {
 		"/_____/\\__, /\\__/\\___/_/ /_/ /_/\\__/_/_/ /_/\\__,_/   ",
 		"      /____/                                          ",
 	}, "\n")))
-	titleHeight := 0
-	subtitleHeight := 0
+	modeTabsHeight := lipgloss.Height(m.renderModeTabs())
 	overlayHeight := 0
 	if m.startupGuide.Active {
 		overlayHeight = lipgloss.Height(m.renderStartupGuidePanel()) + 1
@@ -686,9 +691,9 @@ func (m model) mouseOverLandingInput(y int) bool {
 			Render(m.input.View()),
 	)
 	hintHeight := lipgloss.Height(mutedStyle.Render(footerHintText))
-	contentHeight := logoHeight + 1 + titleHeight + subtitleHeight + 1 + overlayHeight + inputHeight + 1 + hintHeight
+	contentHeight := logoHeight + 1 + modeTabsHeight + 1 + overlayHeight + inputHeight + 1 + hintHeight
 	contentTop := max(0, (m.height-contentHeight)/2)
-	inputTop := contentTop + logoHeight + 1 + titleHeight + subtitleHeight + 1 + overlayHeight
+	inputTop := contentTop + logoHeight + 1 + modeTabsHeight + 1 + overlayHeight
 	inputBottom := inputTop + max(1, inputHeight) - 1
 	return y >= inputTop && y <= inputBottom
 }
@@ -716,6 +721,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		if m.hasCopyableSelection() {
 			m.clearMouseSelection()
+			m.clearInputSelection()
 			m.statusNote = "Selection cleared."
 			return m, nil
 		}
@@ -2182,6 +2188,7 @@ func stripANSIText(value string) string {
 }
 
 func (m model) renderLanding() string {
+	ensureZoneManager()
 	logo := landingLogoStyle.Render(strings.Join([]string{
 		"    ____        __                      _           __",
 		"   / __ )__  __/ /____  ____ ___  ____(_)___  ____/ /",
@@ -2193,7 +2200,7 @@ func (m model) renderLanding() string {
 	inputBox := landingInputStyle.Copy().
 		BorderForeground(m.modeAccentColor()).
 		Width(m.landingInputShellWidth()).
-		Render(m.input.View())
+		Render(zone.Mark(inputEditorZoneID, m.renderInputEditorView()))
 	parts := []string{logo, "", m.renderModeTabs(), ""}
 	if m.startupGuide.Active {
 		parts = append(parts, m.renderStartupGuidePanel(), "")
@@ -2210,9 +2217,10 @@ func (m model) renderLanding() string {
 }
 
 func (m model) renderFooter() string {
+	ensureZoneManager()
 	inputBorder := m.inputBorderStyle().
 		Width(m.chatPanelInnerWidth()).
-		Render(m.input.View())
+		Render(zone.Mark(inputEditorZoneID, m.renderInputEditorView()))
 	parts := make([]string, 0, 4)
 	if m.approval != nil {
 		parts = append(parts, m.renderApprovalBanner())

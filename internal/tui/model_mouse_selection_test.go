@@ -141,6 +141,8 @@ func TestMouseSelectionScrollTickAutoScrollsWhileHoldingAtBottomEdge(t *testing.
 func TestHandleMousePressInInputDoesNotStartViewportSelection(t *testing.T) {
 	input := textarea.New()
 	input.Focus()
+	input.ShowLineNumbers = false
+	input.Prompt = ""
 	input.SetWidth(40)
 	input.SetHeight(3)
 
@@ -179,6 +181,265 @@ func TestHandleMousePressInInputDoesNotStartViewportSelection(t *testing.T) {
 	}
 	if updated.mouseSelectionActive {
 		t.Fatalf("expected input press to keep selection inactive")
+	}
+	if !updated.inputMouseSelecting {
+		t.Fatalf("expected input press to arm input selection")
+	}
+}
+
+func TestHandleMouseDragInInputCanBeCopiedWithCtrlC(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.ShowLineNumbers = false
+	input.Prompt = ""
+	input.SetWidth(40)
+	input.SetHeight(3)
+	input.SetValue("hello bytemind")
+
+	writer := &fakeClipboardTextWriter{}
+	m := model{
+		screen:        screenChat,
+		width:         100,
+		height:        26,
+		input:         input,
+		viewport:      viewport.New(60, 10),
+		tokenUsage:    newTokenUsageComponent(),
+		clipboardText: writer,
+	}
+	m.viewport.SetContent("a\nb\nc")
+
+	inputY := -1
+	for y := 0; y < m.height; y++ {
+		if m.mouseOverInput(y) {
+			inputY = y
+			break
+		}
+	}
+	if inputY < 0 {
+		t.Fatalf("expected to find input area")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      3,
+		Y:      inputY,
+	})
+	pressed := got.(model)
+	if !pressed.inputMouseSelecting {
+		t.Fatalf("expected input selection to start")
+	}
+
+	got, _ = pressed.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionMotion,
+		Button: tea.MouseButtonLeft,
+		X:      7,
+		Y:      inputY,
+	})
+	dragged := got.(model)
+
+	got, _ = dragged.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionRelease,
+		Button: tea.MouseButtonLeft,
+		X:      7,
+		Y:      inputY,
+	})
+	released := got.(model)
+	if !released.inputSelectionActive {
+		t.Fatalf("expected input selection to remain active after release")
+	}
+
+	got, cmd := released.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	updated := got.(model)
+	if cmd == nil {
+		t.Fatalf("expected ctrl+c copy command for toast scheduling")
+	}
+	if strings.TrimSpace(writer.last) == "" {
+		t.Fatalf("expected copied input selection text, got empty")
+	}
+	if updated.inputSelectionActive {
+		t.Fatalf("expected successful copy to clear input selection")
+	}
+}
+
+func TestLandingInputSelectionMapsToRenderedInputRow(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.ShowLineNumbers = false
+	input.Prompt = ""
+	input.SetWidth(40)
+	input.SetHeight(2)
+	input.SetValue("nihao")
+
+	writer := &fakeClipboardTextWriter{}
+	m := model{
+		screen:        screenLanding,
+		width:         110,
+		height:        34,
+		input:         input,
+		tokenUsage:    newTokenUsageComponent(),
+		clipboardText: writer,
+	}
+
+	view := m.View()
+	lines := strings.Split(strings.ReplaceAll(view, "\r\n", "\n"), "\n")
+	targetRow, targetCol := -1, -1
+	for row, line := range lines {
+		plain := xansi.Strip(line)
+		byteCol := strings.Index(plain, "nihao")
+		if byteCol >= 0 {
+			targetRow = row
+			targetCol = xansi.StringWidth(plain[:byteCol])
+			break
+		}
+	}
+	if targetRow < 0 || targetCol < 0 {
+		t.Fatalf("expected to locate landing input text in rendered view")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      targetCol,
+		Y:      targetRow,
+	})
+	pressed := got.(model)
+
+	got, _ = pressed.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionMotion,
+		Button: tea.MouseButtonLeft,
+		X:      targetCol + 1,
+		Y:      targetRow,
+	})
+	dragged := got.(model)
+
+	got, _ = dragged.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionRelease,
+		Button: tea.MouseButtonLeft,
+		X:      targetCol + 1,
+		Y:      targetRow,
+	})
+	released := got.(model)
+	if !released.inputSelectionActive {
+		t.Fatalf("expected landing input selection to become active")
+	}
+
+	got, _ = released.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	updated := got.(model)
+	if writer.last != "ni" {
+		t.Fatalf("expected landing input copy %q, got %q", "ni", writer.last)
+	}
+	if updated.inputSelectionActive || updated.inputMouseSelecting {
+		t.Fatalf("expected copy to clear landing input selection state")
+	}
+}
+
+func TestInputPointFromMouseZoneAutoProbeRecoversNearTopMiss(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.ShowLineNumbers = false
+	input.Prompt = ""
+	input.SetWidth(40)
+	input.SetHeight(2)
+	input.SetValue("nihao")
+
+	m := model{
+		screen:     screenLanding,
+		width:      110,
+		height:     34,
+		input:      input,
+		tokenUsage: newTokenUsageComponent(),
+	}
+
+	view := m.View()
+	lines := strings.Split(strings.ReplaceAll(view, "\r\n", "\n"), "\n")
+	targetRow, targetCol := -1, -1
+	for row, line := range lines {
+		plain := xansi.Strip(line)
+		byteCol := strings.Index(plain, "nihao")
+		if byteCol >= 0 {
+			targetRow = row
+			targetCol = xansi.StringWidth(plain[:byteCol])
+			break
+		}
+	}
+	if targetRow < 1 || targetCol < 0 {
+		t.Fatalf("expected to locate landing input text in rendered view")
+	}
+
+	point, ok := m.inputPointFromMouse(targetCol, targetRow-1, false)
+	if !ok {
+		t.Fatalf("expected zone auto-probe to recover near-top miss for landing input")
+	}
+	if point.Row != 0 {
+		t.Fatalf("expected recovered landing input row 0, got %d", point.Row)
+	}
+}
+
+func TestLandingInputSelectionIgnoresGlobalMouseYOffset(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.ShowLineNumbers = false
+	input.Prompt = ""
+	input.SetWidth(40)
+	input.SetHeight(2)
+	input.SetValue("nihao")
+
+	writer := &fakeClipboardTextWriter{}
+	m := model{
+		screen:        screenLanding,
+		width:         110,
+		height:        34,
+		input:         input,
+		tokenUsage:    newTokenUsageComponent(),
+		clipboardText: writer,
+		mouseYOffset:  2,
+	}
+
+	view := m.View()
+	lines := strings.Split(strings.ReplaceAll(view, "\r\n", "\n"), "\n")
+	targetRow, targetCol := -1, -1
+	for row, line := range lines {
+		plain := xansi.Strip(line)
+		byteCol := strings.Index(plain, "nihao")
+		if byteCol >= 0 {
+			targetRow = row
+			targetCol = xansi.StringWidth(plain[:byteCol])
+			break
+		}
+	}
+	if targetRow < 0 || targetCol < 0 {
+		t.Fatalf("expected to locate landing input text in rendered view")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      targetCol,
+		Y:      targetRow,
+	})
+	pressed := got.(model)
+	got, _ = pressed.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionMotion,
+		Button: tea.MouseButtonLeft,
+		X:      targetCol + 1,
+		Y:      targetRow,
+	})
+	dragged := got.(model)
+	got, _ = dragged.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionRelease,
+		Button: tea.MouseButtonLeft,
+		X:      targetCol + 1,
+		Y:      targetRow,
+	})
+	released := got.(model)
+	if !released.inputSelectionActive {
+		t.Fatalf("expected landing input selection to become active")
+	}
+
+	got, _ = released.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if writer.last != "ni" {
+		t.Fatalf("expected landing input copy %q with global y-offset, got %q", "ni", writer.last)
 	}
 }
 

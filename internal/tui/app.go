@@ -7,6 +7,7 @@ import (
 	"bytemind/internal/session"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,6 +33,8 @@ type StartupGuide struct {
 }
 
 func Run(opts Options) error {
+	ensureZoneManager()
+	applyAutoMouseYOffset()
 	programOptions := []tea.ProgramOption{tea.WithAltScreen()}
 	if shouldUseInputTTY() {
 		// Keep direct console input opt-in on Windows.
@@ -74,4 +77,31 @@ func parseInputTTYEnv(value string) bool {
 	default:
 		return false
 	}
+}
+
+func applyAutoMouseYOffset() {
+	if offset, ok := defaultAutoMouseYOffset(
+		runtime.GOOS,
+		os.Getenv("BYTEMIND_WINDOWS_INPUT_TTY"),
+		os.Getenv("WT_SESSION"),
+		os.Getenv("TERM_PROGRAM"),
+		os.Getenv("BYTEMIND_MOUSE_Y_OFFSET"),
+	); ok {
+		_ = os.Setenv("BYTEMIND_MOUSE_Y_OFFSET", strconv.Itoa(offset))
+	}
+}
+
+func defaultAutoMouseYOffset(goos, inputTTY, wtSession, termProgram, existing string) (int, bool) {
+	// Respect explicit user/project override first.
+	if strings.TrimSpace(existing) != "" {
+		return 0, false
+	}
+	// In some Windows terminal hosts (notably Windows Terminal and VSCode
+	// integrated terminal), mouse Y can be reported a couple rows above visual
+	// position when running Bubble Tea fullscreen UIs without input TTY mode.
+	isWindowsTerminalHost := strings.TrimSpace(wtSession) != "" || strings.EqualFold(strings.TrimSpace(termProgram), "vscode")
+	if goos == "windows" && isWindowsTerminalHost && !parseInputTTYEnv(inputTTY) {
+		return 2, true
+	}
+	return 0, false
 }

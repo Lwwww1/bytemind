@@ -24,6 +24,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 type fakeClipboardTextWriter struct {
@@ -58,6 +59,34 @@ func TestHandleMouseScrollsViewport(t *testing.T) {
 	updated := got.(model)
 	if updated.viewport.YOffset == 0 {
 		t.Fatalf("expected viewport to scroll down, got offset %d", updated.viewport.YOffset)
+	}
+}
+
+func TestNormalizeMouseMsgAppliesYOffset(t *testing.T) {
+	m := model{mouseYOffset: 2}
+	msg := tea.MouseMsg{X: 10, Y: 8}
+	got := m.normalizeMouseMsg(msg)
+	if got.X != 10 || got.Y != 10 {
+		t.Fatalf("expected normalized mouse msg to keep X and shift Y by offset, got %+v", got)
+	}
+}
+
+func TestResolveMouseYOffsetFromEnv(t *testing.T) {
+	t.Setenv("BYTEMIND_MOUSE_Y_OFFSET", "2")
+	if got := resolveMouseYOffset(); got != 2 {
+		t.Fatalf("expected env-configured y offset 2, got %d", got)
+	}
+
+	t.Setenv("BYTEMIND_MOUSE_Y_OFFSET", "99")
+	if got := resolveMouseYOffset(); got != 10 {
+		t.Fatalf("expected y offset to clamp to 10, got %d", got)
+	}
+}
+
+func TestResolveMouseYOffsetDefaultIsZero(t *testing.T) {
+	t.Setenv("BYTEMIND_MOUSE_Y_OFFSET", "")
+	if got := resolveMouseYOffset(); got != 0 {
+		t.Fatalf("expected default y offset 0, got %d", got)
 	}
 }
 
@@ -361,6 +390,703 @@ func TestViewportSelectionTextUsesCellCoordinatesForWideRunes(t *testing.T) {
 	}
 }
 
+func TestViewportSelectionTextUsesANSICellCuts(t *testing.T) {
+	styled := lipgloss.NewStyle().Foreground(lipgloss.Color("#6CB6FF")).Render("你好世界")
+	m := model{
+		viewport: viewport.New(32, 6),
+	}
+	m.viewport.SetContent(styled)
+	m.mouseSelectionStart = viewportSelectionPoint{Row: 0, Col: 0}
+	m.mouseSelectionEnd = viewportSelectionPoint{Row: 0, Col: 3}
+
+	got := m.viewportSelectionText()
+	if got != "你好" {
+		t.Fatalf("expected ANSI-aware wide-rune selection %q, got %q", "你好", got)
+	}
+}
+
+func TestViewportPointFromMouseMatchesRenderedConversationCoordinates(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      100,
+		height:     30,
+		input:      input,
+		viewport:   viewport.New(60, 10),
+		tokenUsage: newTokenUsageComponent(),
+	}
+	m.resize()
+	m.viewport.SetContent("__MAP_TOKEN__\nline two")
+
+	view := m.View()
+	lines := strings.Split(strings.ReplaceAll(view, "\r\n", "\n"), "\n")
+	targetRow, targetCol := -1, -1
+	for row, line := range lines {
+		plain := xansi.Strip(line)
+		byteCol := strings.Index(plain, "__MAP_TOKEN__")
+		if byteCol >= 0 {
+			targetRow = row
+			targetCol = xansi.StringWidth(plain[:byteCol])
+			break
+		}
+	}
+	if targetRow < 0 || targetCol < 0 {
+		t.Fatalf("expected to locate token in rendered view")
+	}
+
+	point, ok := m.viewportPointFromMouse(targetCol, targetRow)
+	if !ok {
+		t.Fatalf("expected token screen coordinate to map into viewport")
+	}
+	if point.Row != 0 || point.Col != 0 {
+		t.Fatalf("expected token to map to viewport row=0 col=0, got row=%d col=%d", point.Row, point.Col)
+	}
+}
+
+func TestViewportPointFromMouseZoneAutoProbeRecoversNearTopMiss(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      100,
+		height:     30,
+		input:      input,
+		viewport:   viewport.New(60, 10),
+		tokenUsage: newTokenUsageComponent(),
+	}
+	m.resize()
+	m.viewport.SetContent("__ZONE_AUTO_TOKEN__\nline two")
+
+	view := m.View()
+	lines := strings.Split(strings.ReplaceAll(view, "\r\n", "\n"), "\n")
+	targetRow, targetCol := -1, -1
+	for row, line := range lines {
+		plain := xansi.Strip(line)
+		byteCol := strings.Index(plain, "__ZONE_AUTO_TOKEN__")
+		if byteCol >= 0 {
+			targetRow = row
+			targetCol = xansi.StringWidth(plain[:byteCol])
+			break
+		}
+	}
+	if targetRow < 2 || targetCol < 0 {
+		t.Fatalf("expected token row >= 2 and valid col, got row=%d col=%d", targetRow, targetCol)
+	}
+
+	point, ok := m.viewportPointFromMouse(targetCol, targetRow-2)
+	if !ok {
+		t.Fatalf("expected zone auto probe to recover near-top miss")
+	}
+	if point.Row != 0 || point.Col != 0 {
+		t.Fatalf("expected recovered point row=0 col=0, got row=%d col=%d", point.Row, point.Col)
+	}
+}
+
+func TestConversationViewportTopFromRenderedPanelMatchesRenderedView(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      100,
+		height:     30,
+		input:      input,
+		viewport:   viewport.New(60, 10),
+		tokenUsage: newTokenUsageComponent(),
+	}
+	m.resize()
+	m.viewport.SetContent("__TOP_TOKEN__\nline two")
+
+	vpLines := strings.Split(strings.ReplaceAll(m.viewport.View(), "\r\n", "\n"), "\n")
+	tokenRowInViewport := -1
+	for i, line := range vpLines {
+		if strings.Contains(xansi.Strip(line), "__TOP_TOKEN__") {
+			tokenRowInViewport = i
+			break
+		}
+	}
+	if tokenRowInViewport < 0 {
+		t.Fatalf("expected token row in viewport view")
+	}
+
+	fullLines := strings.Split(strings.ReplaceAll(m.View(), "\r\n", "\n"), "\n")
+	tokenRowInView := -1
+	for i, line := range fullLines {
+		if strings.Contains(xansi.Strip(line), "__TOP_TOKEN__") {
+			tokenRowInView = i
+			break
+		}
+	}
+	if tokenRowInView < 0 {
+		t.Fatalf("expected token row in full view")
+	}
+
+	left, _, layoutTop, _, ok := m.conversationViewportBoundsByLayout()
+	if !ok {
+		t.Fatalf("expected viewport layout bounds")
+	}
+	top, found := m.conversationViewportTopFromRenderedView(left, layoutTop)
+	if !found {
+		t.Fatalf("expected rendered-panel top to be found")
+	}
+	expectedTop := tokenRowInView - tokenRowInViewport
+	if top != expectedTop {
+		t.Fatalf("expected viewport top %d from rendered view, got %d", expectedTop, top)
+	}
+}
+
+func TestConversationViewportTopFromRenderedViewCorrectsWrongExpectedTop(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      100,
+		height:     30,
+		input:      input,
+		viewport:   viewport.New(60, 10),
+		tokenUsage: newTokenUsageComponent(),
+	}
+	m.resize()
+	m.viewport.SetContent("__TOP_SHIFT_TOKEN__\nline two\nline three")
+
+	vpLines := strings.Split(strings.ReplaceAll(m.viewport.View(), "\r\n", "\n"), "\n")
+	tokenRowInViewport := -1
+	for i, line := range vpLines {
+		if strings.Contains(xansi.Strip(line), "__TOP_SHIFT_TOKEN__") {
+			tokenRowInViewport = i
+			break
+		}
+	}
+	if tokenRowInViewport < 0 {
+		t.Fatalf("expected token row in viewport view")
+	}
+
+	fullLines := strings.Split(strings.ReplaceAll(m.View(), "\r\n", "\n"), "\n")
+	tokenRowInView := -1
+	for i, line := range fullLines {
+		if strings.Contains(xansi.Strip(line), "__TOP_SHIFT_TOKEN__") {
+			tokenRowInView = i
+			break
+		}
+	}
+	if tokenRowInView < 0 {
+		t.Fatalf("expected token row in full view")
+	}
+	expectedTop := tokenRowInView - tokenRowInViewport
+
+	left, _, layoutTop, _, ok := m.conversationViewportBoundsByLayout()
+	if !ok {
+		t.Fatalf("expected viewport layout bounds")
+	}
+	// Simulate a wrong layout estimate (for example, by 2 lines).
+	top, found := m.conversationViewportTopFromRenderedView(left, layoutTop+2)
+	if !found {
+		t.Fatalf("expected rendered-panel top to be found")
+	}
+	if top != expectedTop {
+		t.Fatalf("expected corrected top %d, got %d", expectedTop, top)
+	}
+}
+
+func TestConversationViewportTopFromRenderedPanelWithLeadingBlankRows(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      100,
+		height:     30,
+		input:      input,
+		viewport:   viewport.New(60, 10),
+		tokenUsage: newTokenUsageComponent(),
+	}
+	m.resize()
+	m.viewport.SetContent("\n\n__TOP_BLANK_TOKEN__\nline two")
+
+	vpLines := strings.Split(strings.ReplaceAll(m.viewport.View(), "\r\n", "\n"), "\n")
+	tokenRowInViewport := -1
+	for i, line := range vpLines {
+		if strings.Contains(xansi.Strip(line), "__TOP_BLANK_TOKEN__") {
+			tokenRowInViewport = i
+			break
+		}
+	}
+	if tokenRowInViewport < 0 {
+		t.Fatalf("expected token row in viewport view")
+	}
+
+	fullLines := strings.Split(strings.ReplaceAll(m.View(), "\r\n", "\n"), "\n")
+	tokenRowInView := -1
+	for i, line := range fullLines {
+		if strings.Contains(xansi.Strip(line), "__TOP_BLANK_TOKEN__") {
+			tokenRowInView = i
+			break
+		}
+	}
+	if tokenRowInView < 0 {
+		t.Fatalf("expected token row in full view")
+	}
+
+	left, _, layoutTop, _, ok := m.conversationViewportBoundsByLayout()
+	if !ok {
+		t.Fatalf("expected viewport layout bounds")
+	}
+	top, found := m.conversationViewportTopFromRenderedView(left, layoutTop)
+	if !found {
+		t.Fatalf("expected rendered-panel top to be found")
+	}
+	expectedTop := tokenRowInView - tokenRowInViewport
+	if top != expectedTop {
+		t.Fatalf("expected viewport top %d with leading blanks, got %d", expectedTop, top)
+	}
+}
+
+func TestViewportPointFromMouseKeepsExactBlankRowFromMouse(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      100,
+		height:     30,
+		input:      input,
+		viewport:   viewport.New(60, 10),
+		tokenUsage: newTokenUsageComponent(),
+	}
+	m.resize()
+	m.viewport.SetContent("\n\ntarget line")
+
+	left, _, top, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatalf("expected viewport bounds")
+	}
+	point, ok := m.viewportPointFromMouse(left, top)
+	if !ok {
+		t.Fatalf("expected mouse point to resolve")
+	}
+	if point.Row != 0 {
+		t.Fatalf("expected blank-row click to keep exact row 0, got %d", point.Row)
+	}
+}
+
+func TestViewportPointFromMouseKeepsRowWhenClickingTextLineTrailingSpace(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      120,
+		height:     30,
+		input:      input,
+		viewport:   viewport.New(60, 10),
+		tokenUsage: newTokenUsageComponent(),
+	}
+	m.resize()
+	m.viewport.SetContent("title\nshort text\n\nnext line")
+
+	left, _, top, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatalf("expected viewport bounds")
+	}
+	// Click the second line at far-right padding area; row should stay at 1.
+	point, ok := m.viewportPointFromMouse(left+m.viewport.Width-1, top+1)
+	if !ok {
+		t.Fatalf("expected mouse point to resolve")
+	}
+	if point.Row != 1 {
+		t.Fatalf("expected trailing-space click to stay on row 1, got %d", point.Row)
+	}
+}
+
+func TestViewportPointFromMouseKeepsHeadingRowWhenHeadingColumnIsBlank(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      120,
+		height:     30,
+		input:      input,
+		viewport:   viewport.New(60, 10),
+		tokenUsage: newTokenUsageComponent(),
+	}
+	m.resize()
+	m.viewport.SetContent("Bytemind\n\n你好，我是 ByteMind，你的交互式 CLI 编码助手。")
+
+	left, _, top, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatalf("expected viewport bounds")
+	}
+	// Click the heading row using a column where heading is blank but body has text.
+	// Row mapping should remain stable and not jump to nearby body lines.
+	point, ok := m.viewportPointFromMouse(left+24, top)
+	if !ok {
+		t.Fatalf("expected mouse point to resolve")
+	}
+	if point.Row != 0 {
+		t.Fatalf("expected heading-blank column click to stay on heading row 0, got %d", point.Row)
+	}
+}
+
+func TestViewportPointFromMouseMatchesAssistantBodyLineInRenderedView(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	m := model{
+		screen:     screenChat,
+		width:      120,
+		height:     34,
+		input:      input,
+		viewport:   viewport.New(70, 14),
+		tokenUsage: newTokenUsageComponent(),
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "你好，你是谁？", Status: "final"},
+			{Kind: "assistant", Title: assistantLabel, Body: "你好，我是 ByteMind，你的交互式 CLI 编码助手。", Status: "final"},
+		},
+	}
+	m.resize()
+	m.refreshViewport()
+
+	needle := "交互式 CLI 编码助手"
+
+	vpLines := strings.Split(strings.ReplaceAll(m.viewport.View(), "\r\n", "\n"), "\n")
+	expectedRow := -1
+	for i, line := range vpLines {
+		if strings.Contains(xansi.Strip(line), needle) {
+			expectedRow = i
+			break
+		}
+	}
+	if expectedRow < 0 {
+		t.Fatalf("expected to find assistant body needle in viewport")
+	}
+
+	fullLines := strings.Split(strings.ReplaceAll(m.View(), "\r\n", "\n"), "\n")
+	screenRow := -1
+	screenCol := -1
+	for i, line := range fullLines {
+		plain := xansi.Strip(line)
+		byteCol := strings.Index(plain, needle)
+		if byteCol >= 0 {
+			screenRow = i
+			screenCol = xansi.StringWidth(plain[:byteCol])
+			break
+		}
+	}
+	if screenRow < 0 {
+		t.Fatalf("expected to find assistant body needle in full view")
+	}
+
+	point, ok := m.viewportPointFromMouse(screenCol, screenRow)
+	if !ok {
+		t.Fatalf("expected mouse coordinate to map into viewport")
+	}
+	if point.Row != expectedRow {
+		t.Fatalf("expected body row %d, got %d", expectedRow, point.Row)
+	}
+}
+
+func TestViewportPointFromMouseMatchesAssistantBodyLineWhileSelectionPreviewActive(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	m := model{
+		screen:     screenChat,
+		width:      120,
+		height:     34,
+		input:      input,
+		viewport:   viewport.New(70, 14),
+		tokenUsage: newTokenUsageComponent(),
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "你好，你是谁？", Status: "final"},
+			{Kind: "assistant", Title: assistantLabel, Body: "你好，我是 ByteMind，你的交互式 CLI 编码助手。", Status: "final"},
+		},
+		mouseSelecting:      true,
+		mouseSelectionStart: viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:   viewportSelectionPoint{Row: 1, Col: 6},
+	}
+	m.resize()
+	m.refreshViewport()
+
+	needle := "交互式 CLI 编码助手"
+
+	vpLines := strings.Split(strings.ReplaceAll(m.viewport.View(), "\r\n", "\n"), "\n")
+	expectedRow := -1
+	for i, line := range vpLines {
+		if strings.Contains(xansi.Strip(line), needle) {
+			expectedRow = i
+			break
+		}
+	}
+	if expectedRow < 0 {
+		t.Fatalf("expected to find assistant body needle in viewport")
+	}
+
+	fullLines := strings.Split(strings.ReplaceAll(m.View(), "\r\n", "\n"), "\n")
+	screenRow := -1
+	screenCol := -1
+	for i, line := range fullLines {
+		plain := xansi.Strip(line)
+		byteCol := strings.Index(plain, needle)
+		if byteCol >= 0 {
+			screenRow = i
+			screenCol = xansi.StringWidth(plain[:byteCol])
+			break
+		}
+	}
+	if screenRow < 0 {
+		t.Fatalf("expected to find assistant body needle in full view")
+	}
+
+	point, ok := m.viewportPointFromMouse(screenCol, screenRow)
+	if !ok {
+		t.Fatalf("expected mouse coordinate to map into viewport")
+	}
+	if point.Row != expectedRow {
+		t.Fatalf("expected body row %d while selecting, got %d", expectedRow, point.Row)
+	}
+}
+
+func TestViewportPointFromMouseMatchesMarkdownListBodyLineWhileSelectionPreviewActive(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	m := model{
+		screen:     screenChat,
+		width:      120,
+		height:     36,
+		input:      input,
+		viewport:   viewport.New(70, 16),
+		tokenUsage: newTokenUsageComponent(),
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "你好，你是谁？", Status: "final"},
+			{Kind: "assistant", Title: assistantLabel, Body: strings.Join([]string{
+				"你好，我是 ByteMind，你的交互式 CLI 编码助手。",
+				"我可以帮你：",
+				"",
+				"- 阅读和理解仓库代码",
+				"- 实现功能、修复 Bug",
+				"- 做代码审查和问题定位",
+			}, "\n"), Status: "final"},
+		},
+		mouseSelecting:      true,
+		mouseSelectionStart: viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:   viewportSelectionPoint{Row: 4, Col: 10},
+	}
+	m.resize()
+	m.refreshViewport()
+
+	needle := "阅读和理解仓库代码"
+
+	vpLines := strings.Split(strings.ReplaceAll(m.viewport.View(), "\r\n", "\n"), "\n")
+	expectedRow := -1
+	for i, line := range vpLines {
+		if strings.Contains(xansi.Strip(line), needle) {
+			expectedRow = i
+			break
+		}
+	}
+	if expectedRow < 0 {
+		t.Fatalf("expected to find markdown body needle in viewport")
+	}
+
+	fullLines := strings.Split(strings.ReplaceAll(m.View(), "\r\n", "\n"), "\n")
+	screenRow := -1
+	screenCol := -1
+	for i, line := range fullLines {
+		plain := xansi.Strip(line)
+		byteCol := strings.Index(plain, needle)
+		if byteCol >= 0 {
+			screenRow = i
+			screenCol = xansi.StringWidth(plain[:byteCol])
+			break
+		}
+	}
+	if screenRow < 0 {
+		t.Fatalf("expected to find markdown body needle in full view")
+	}
+
+	point, ok := m.viewportPointFromMouse(screenCol, screenRow)
+	if !ok {
+		t.Fatalf("expected mouse coordinate to map into viewport")
+	}
+	if point.Row != expectedRow {
+		t.Fatalf("expected markdown body row %d while selecting, got %d", expectedRow, point.Row)
+	}
+}
+
+func TestConversationViewportTopFromRenderedViewStableWithSelectionPreview(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      120,
+		height:     34,
+		input:      input,
+		viewport:   viewport.New(70, 14),
+		tokenUsage: newTokenUsageComponent(),
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "你好，你是谁？", Status: "final"},
+			{Kind: "assistant", Title: assistantLabel, Body: "你好，我是 ByteMind，你的交互式 CLI 编码助手。", Status: "final"},
+		},
+	}
+	m.resize()
+	m.refreshViewport()
+
+	left, _, layoutTop, _, ok := m.conversationViewportBoundsByLayout()
+	if !ok {
+		t.Fatalf("expected viewport layout bounds")
+	}
+	baseTop, baseFound := m.conversationViewportTopFromRenderedView(left, layoutTop)
+	if !baseFound {
+		t.Fatalf("expected base top from rendered view")
+	}
+
+	m.mouseSelecting = true
+	m.mouseSelectionStart = viewportSelectionPoint{Row: 0, Col: 0}
+	m.mouseSelectionEnd = viewportSelectionPoint{Row: 1, Col: 8}
+
+	previewTop, previewFound := m.conversationViewportTopFromRenderedView(left, layoutTop)
+	if !previewFound {
+		t.Fatalf("expected preview top from rendered view")
+	}
+	if previewTop != baseTop {
+		t.Fatalf("expected stable top with selection preview, base=%d preview=%d", baseTop, previewTop)
+	}
+}
+
+func TestConversationViewportBoundsStableWhileSelectionPreviewActive(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      120,
+		height:     34,
+		input:      input,
+		viewport:   viewport.New(70, 14),
+		tokenUsage: newTokenUsageComponent(),
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "浣犲ソ锛屼綘鏄皝锛?", Status: "final"},
+			{Kind: "assistant", Title: assistantLabel, Body: "浣犲ソ锛屾垜鏄?ByteMind锛屼綘鐨勪氦浜掑紡 CLI 缂栫爜鍔╂墜銆?", Status: "final"},
+		},
+		mouseSelecting:      true,
+		mouseSelectionStart: viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:   viewportSelectionPoint{Row: 4, Col: 12},
+	}
+	m.resize()
+	m.refreshViewport()
+
+	_, _, topBefore, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatalf("expected viewport bounds")
+	}
+
+	m.mouseSelectionEnd = viewportSelectionPoint{Row: 6, Col: 16}
+	_, _, topAfter, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatalf("expected viewport bounds after updating selection")
+	}
+	if topAfter != topBefore {
+		t.Fatalf("expected viewport top stable during selection preview, before=%d after=%d", topBefore, topAfter)
+	}
+}
+
+func TestConversationViewportBoundsByLayoutMatchesRenderedViewTop(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      120,
+		height:     34,
+		input:      input,
+		viewport:   viewport.New(70, 14),
+		tokenUsage: newTokenUsageComponent(),
+		chatItems: []chatEntry{
+			{Kind: "user", Title: "You", Body: "hello", Status: "final"},
+			{Kind: "assistant", Title: assistantLabel, Body: "line-1\nline-2\nline-3\nline-4", Status: "final"},
+		},
+	}
+	m.resize()
+	m.refreshViewport()
+
+	left, _, top, _, ok := m.conversationViewportBoundsByLayout()
+	if !ok {
+		t.Fatalf("expected viewport layout bounds")
+	}
+	renderedTop, found := m.conversationViewportTopFromRenderedView(left, top)
+	if !found {
+		t.Fatalf("expected top from rendered view")
+	}
+	if top != renderedTop {
+		t.Fatalf("expected layout top %d to match rendered top %d", top, renderedTop)
+	}
+
+	m.mouseSelecting = true
+	m.mouseSelectionStart = viewportSelectionPoint{Row: 0, Col: 0}
+	m.mouseSelectionEnd = viewportSelectionPoint{Row: 2, Col: 6}
+
+	left, _, top, _, ok = m.conversationViewportBoundsByLayout()
+	if !ok {
+		t.Fatalf("expected viewport layout bounds with selection preview")
+	}
+	renderedTop, found = m.conversationViewportTopFromRenderedView(left, top)
+	if !found {
+		t.Fatalf("expected top from rendered view with selection preview")
+	}
+	if top != renderedTop {
+		t.Fatalf("expected layout top %d to match rendered top %d while selecting", top, renderedTop)
+	}
+}
+
+func TestRenderFooterOmitsMouseDebugLine(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:     screenChat,
+		width:      120,
+		height:     30,
+		input:      input,
+		viewport:   viewport.New(60, 10),
+		tokenUsage: newTokenUsageComponent(),
+	}
+
+	footer := m.renderFooter()
+	if strings.Contains(footer, "Mouse:") {
+		t.Fatalf("expected footer to omit mouse debug line, got %q", footer)
+	}
+}
+
+func TestConversationViewportBoundsByLayoutStartsAtPanelLeft(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	m := model{
+		screen:     screenChat,
+		width:      120,
+		height:     30,
+		input:      input,
+		viewport:   viewport.New(60, 10),
+		tokenUsage: newTokenUsageComponent(),
+	}
+	m.resize()
+
+	left, right, _, _, ok := m.conversationViewportBoundsByLayout()
+	if !ok {
+		t.Fatalf("expected viewport bounds")
+	}
+	panelLeft := panelStyle.GetHorizontalFrameSize() / 2
+	if left != panelLeft {
+		t.Fatalf("expected left bound %d, got %d", panelLeft, left)
+	}
+	if right-left+1 != m.viewport.Width {
+		t.Fatalf("expected viewport width %d from bounds, got %d", m.viewport.Width, right-left+1)
+	}
+}
+
 func TestRenderConversationCopyUsesPlainMessageText(t *testing.T) {
 	m := model{
 		width:  120,
@@ -385,8 +1111,8 @@ func TestRenderConversationCopyUsesPlainMessageText(t *testing.T) {
 
 func TestRenderConversationViewportShowsHighlightAfterSelection(t *testing.T) {
 	m := model{
-		viewport: viewport.New(16, 3),
-		copyView: viewport.New(16, 3),
+		viewport:             viewport.New(16, 3),
+		copyView:             viewport.New(16, 3),
 		mouseSelectionActive: true,
 		mouseSelectionStart:  viewportSelectionPoint{Row: 0, Col: 0},
 		mouseSelectionEnd:    viewportSelectionPoint{Row: 0, Col: 4},
@@ -402,7 +1128,7 @@ func TestRenderConversationViewportShowsHighlightAfterSelection(t *testing.T) {
 
 func TestRenderConversationViewportHighlightsWhileDraggingAfterRangeExists(t *testing.T) {
 	m := model{
-		viewport: viewport.New(16, 3),
+		viewport:            viewport.New(16, 3),
 		mouseSelecting:      true,
 		mouseSelectionStart: viewportSelectionPoint{Row: 0, Col: 0},
 		mouseSelectionEnd:   viewportSelectionPoint{Row: 0, Col: 4},
@@ -1459,7 +2185,7 @@ func TestChatViewOmitsRedundantChrome(t *testing.T) {
 		"tab agents",
 		"/ commands",
 		"Ctrl+L sessions",
-		"Ctrl+C quit",
+		"Ctrl+C copy/quit",
 		"Build",
 		"Plan",
 	} {
@@ -1832,7 +2558,7 @@ func TestRenderFooterOnlyShowsInputRegion(t *testing.T) {
 		"tab agents",
 		"/ commands",
 		"Ctrl+L sessions",
-		"Ctrl+C quit",
+		"Ctrl+C copy/quit",
 	} {
 		if !strings.Contains(footer, wanted) {
 			t.Fatalf("footer should advertise %q", wanted)

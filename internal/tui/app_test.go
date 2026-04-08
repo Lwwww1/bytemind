@@ -59,3 +59,84 @@ func TestParseInputTTYEnv(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultAutoMouseYOffset(t *testing.T) {
+	tests := []struct {
+		name        string
+		goos        string
+		inputTTY    string
+		wtSession   string
+		termProgram string
+		existing    string
+		wantOffset  int
+		wantApply   bool
+	}{
+		{
+			name:       "windows terminal defaults to +2",
+			goos:       "windows",
+			inputTTY:   "0",
+			wtSession:  "abc",
+			existing:   "",
+			wantOffset: 2,
+			wantApply:  true,
+		},
+		{
+			name:        "vscode terminal defaults to +2",
+			goos:        "windows",
+			inputTTY:    "0",
+			termProgram: "vscode",
+			existing:    "",
+			wantOffset:  2,
+			wantApply:   true,
+		},
+		{
+			name:       "windows terminal input tty disables auto offset",
+			goos:       "windows",
+			inputTTY:   "1",
+			wtSession:  "abc",
+			existing:   "",
+			wantOffset: 0,
+			wantApply:  false,
+		},
+		{
+			name:       "non windows does not auto offset",
+			goos:       "linux",
+			inputTTY:   "0",
+			wtSession:  "abc",
+			existing:   "",
+			wantOffset: 0,
+			wantApply:  false,
+		},
+		{
+			name:       "explicit existing offset wins",
+			goos:       "windows",
+			inputTTY:   "0",
+			wtSession:  "abc",
+			existing:   "3",
+			wantOffset: 0,
+			wantApply:  false,
+		},
+		{
+			name:       "windows unknown host does not auto offset",
+			goos:       "windows",
+			inputTTY:   "0",
+			existing:   "",
+			wantOffset: 0,
+			wantApply:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			gotOffset, gotApply := defaultAutoMouseYOffset(tc.goos, tc.inputTTY, tc.wtSession, tc.termProgram, tc.existing)
+			if gotApply != tc.wantApply || gotOffset != tc.wantOffset {
+				t.Fatalf(
+					"defaultAutoMouseYOffset(%q, %q, %q, %q, %q) = (%d, %v), want (%d, %v)",
+					tc.goos, tc.inputTTY, tc.wtSession, tc.termProgram, tc.existing,
+					gotOffset, gotApply, tc.wantOffset, tc.wantApply,
+				)
+			}
+		})
+	}
+}

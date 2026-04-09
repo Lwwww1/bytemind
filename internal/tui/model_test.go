@@ -1627,7 +1627,6 @@ func TestHelpTextOnlyMentionsSupportedEntryPoints(t *testing.T) {
 		"go run ./cmd/bytemind chat",
 		"go run ./cmd/bytemind run -prompt",
 		"/session",
-		"/skill author",
 		"/skill clear",
 		"/skill delete <name>",
 		"/quit",
@@ -2031,7 +2030,7 @@ func TestHandleSlashSkillActivateAndSwitch(t *testing.T) {
 	}
 }
 
-func TestHandleSlashSkillAuthorCreatesProjectSkill(t *testing.T) {
+func TestHandleSlashSkillAuthorIsUnsupported(t *testing.T) {
 	workspace := t.TempDir()
 
 	store, err := session.NewStore(t.TempDir())
@@ -2057,34 +2056,15 @@ func TestHandleSlashSkillAuthorCreatesProjectSkill(t *testing.T) {
 		input:     textarea.New(),
 	}
 
-	if err := m.handleSlashCommand("/skill author review-plus review backend changes and report risks"); err != nil {
-		t.Fatalf("expected /skill author to succeed, got %v", err)
+	if err := m.handleSlashCommand("/skill author"); err == nil {
+		t.Fatalf("expected /skill author to fail")
+	} else if !strings.Contains(err.Error(), "usage: /skill <clear|delete> ...") {
+		t.Fatalf("unexpected error for /skill author: %v", err)
 	}
-
-	skillDir := filepath.Join(workspace, ".bytemind", "skills", "review-plus")
-	if _, err := os.Stat(filepath.Join(skillDir, "skill.json")); err != nil {
-		t.Fatalf("expected generated skill.json, got %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(skillDir, "SKILL.md")); err != nil {
-		t.Fatalf("expected generated SKILL.md, got %v", err)
-	}
-
-	if len(m.chatItems) < 2 {
-		t.Fatalf("expected command exchange in chat, got %#v", m.chatItems)
-	}
-	response := m.chatItems[len(m.chatItems)-1].Body
-	if !strings.Contains(response, "Skill `review-plus`") {
-		t.Fatalf("expected response to reference authored skill, got %q", response)
-	}
-	if !strings.Contains(response, "Activate with `/review-plus`") {
-		t.Fatalf("expected response to include activation hint, got %q", response)
-	}
-
-	if err := m.handleSlashCommand("/review-plus"); err != nil {
-		t.Fatalf("expected /review-plus activation to succeed, got %v", err)
-	}
-	if m.sess.ActiveSkill == nil || m.sess.ActiveSkill.Name != "review-plus" {
-		t.Fatalf("expected active skill review-plus, got %#v", m.sess.ActiveSkill)
+	if err := m.handleSlashCommand("/skill author review-plus review backend changes and report risks"); err == nil {
+		t.Fatalf("expected /skill author <name> to fail")
+	} else if !strings.Contains(err.Error(), "usage: /skill <clear|delete> ...") {
+		t.Fatalf("unexpected error for /skill author <name>: %v", err)
 	}
 }
 
@@ -2194,125 +2174,15 @@ func TestHandleSlashSkillClearOnlyClearsActiveSkill(t *testing.T) {
 	}
 }
 
-func TestHandleSlashSkillAuthorWithoutNameEntersAuthorMode(t *testing.T) {
-	workspace := t.TempDir()
-
-	store, err := session.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess := session.New(workspace)
-	runner := agent.NewRunner(agent.Options{
-		Workspace: workspace,
-		Config: config.Config{
-			Provider: config.ProviderConfig{Model: "test-model"},
-		},
-		Store:    store,
-		Registry: tools.DefaultRegistry(),
-	})
-
+func TestCommandPaletteDoesNotExposeSkillAuthor(t *testing.T) {
 	input := textarea.New()
-	m := model{
-		runner:    runner,
-		store:     store,
-		sess:      sess,
-		workspace: workspace,
-		screen:    screenChat,
-		input:     input,
-	}
-
-	if err := m.handleSlashCommand("/skill author"); err != nil {
-		t.Fatalf("expected /skill author to enable mode, got %v", err)
-	}
-	if !m.skillAuthorMode {
-		t.Fatalf("expected skillAuthorMode enabled")
-	}
-	if strings.TrimSpace(m.skillAuthorName) != "" {
-		t.Fatalf("expected no skillAuthorName yet, got %q", m.skillAuthorName)
-	}
-	if !strings.Contains(m.input.Placeholder, "step 1/2") {
-		t.Fatalf("expected author-mode placeholder, got %q", m.input.Placeholder)
-	}
-
-	m.input.SetValue("review-ops")
-	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	updated := got.(model)
-
-	if !updated.skillAuthorMode {
-		t.Fatalf("expected author mode to stay active")
-	}
-	if updated.skillAuthorName != "review-ops" {
-		t.Fatalf("expected target skill name review-ops, got %q", updated.skillAuthorName)
-	}
-	if !strings.Contains(updated.input.Placeholder, "step 2/2") || !strings.Contains(updated.input.Placeholder, "review-ops") {
-		t.Fatalf("expected author-mode placeholder to track skill name, got %q", updated.input.Placeholder)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, ".bytemind", "skills", "review-ops", "skill.json")); err != nil {
-		t.Fatalf("expected generated skill scaffold, got %v", err)
-	}
-
-	updated.input.SetValue("Used for code review, prioritizing regression risk and missing tests.")
-	next, _ := updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	updated2 := next.(model)
-	if !updated2.skillAuthorMode {
-		t.Fatalf("expected author mode to stay active after content update")
-	}
-	if !strings.Contains(updated2.chatItems[len(updated2.chatItems)-1].Body, "Current step: 2/2 (content)") {
-		t.Fatalf("expected stage 2 guidance after content update, got %q", updated2.chatItems[len(updated2.chatItems)-1].Body)
-	}
-
-	if err := updated2.handleSlashCommand("/skill author done"); err != nil {
-		t.Fatalf("expected /skill author done to exit mode, got %v", err)
-	}
-	if updated2.skillAuthorMode {
-		t.Fatalf("expected skillAuthorMode disabled")
-	}
-}
-
-func TestSkillAuthorModeShowsVisibleGuidanceOnInvalidName(t *testing.T) {
-	workspace := t.TempDir()
-
-	store, err := session.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess := session.New(workspace)
-	runner := agent.NewRunner(agent.Options{
-		Workspace: workspace,
-		Config: config.Config{
-			Provider: config.ProviderConfig{Model: "test-model"},
-		},
-		Store:    store,
-		Registry: tools.DefaultRegistry(),
-	})
-
-	input := textarea.New()
-	m := model{
-		runner:    runner,
-		store:     store,
-		sess:      sess,
-		workspace: workspace,
-		screen:    screenChat,
-		input:     input,
-	}
-
-	if err := m.handleSlashCommand("/skill author"); err != nil {
-		t.Fatalf("expected /skill author to enable mode, got %v", err)
-	}
-
-	m.input.SetValue("review+skill")
-	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	updated := got.(model)
-
-	if !updated.skillAuthorMode {
-		t.Fatalf("expected author mode to remain enabled")
-	}
-	if len(updated.chatItems) < 2 {
-		t.Fatalf("expected visible assistant guidance, got %#v", updated.chatItems)
-	}
-	body := updated.chatItems[len(updated.chatItems)-1].Body
-	if !strings.Contains(body, "invalid skill name") {
-		t.Fatalf("expected invalid-name guidance in chat, got %q", body)
+	input.SetValue("/skill")
+	m := model{input: input}
+	items := m.filteredCommands()
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.Name), "/skill author") {
+			t.Fatalf("command palette should not expose /skill author, got %+v", item)
+		}
 	}
 }
 

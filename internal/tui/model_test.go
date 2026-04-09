@@ -27,6 +27,24 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+type fakeClipboardTextWriter struct {
+	last       string
+	err        error
+	waitForCtx bool
+}
+
+func (f *fakeClipboardTextWriter) WriteText(ctx context.Context, text string) error {
+	if f.waitForCtx {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if f.err != nil {
+		return f.err
+	}
+	f.last = text
+	return nil
+}
+
 type compactCommandTestClient struct {
 	replies  []llm.Message
 	requests []llm.ChatRequest
@@ -76,6 +94,34 @@ func TestHandleMouseScrollsViewport(t *testing.T) {
 	updated := got.(model)
 	if updated.viewport.YOffset == 0 {
 		t.Fatalf("expected viewport to scroll down, got offset %d", updated.viewport.YOffset)
+	}
+}
+
+func TestNormalizeMouseMsgAppliesYOffset(t *testing.T) {
+	m := model{mouseYOffset: 2}
+	msg := tea.MouseMsg{X: 10, Y: 8}
+	got := m.normalizeMouseMsg(msg)
+	if got.X != 10 || got.Y != 10 {
+		t.Fatalf("expected normalized mouse msg to keep X and shift Y by offset, got %+v", got)
+	}
+}
+
+func TestResolveMouseYOffsetFromEnv(t *testing.T) {
+	t.Setenv("BYTEMIND_MOUSE_Y_OFFSET", "2")
+	if got := resolveMouseYOffset(); got != 2 {
+		t.Fatalf("expected env-configured y offset 2, got %d", got)
+	}
+
+	t.Setenv("BYTEMIND_MOUSE_Y_OFFSET", "99")
+	if got := resolveMouseYOffset(); got != 10 {
+		t.Fatalf("expected y offset to clamp to 10, got %d", got)
+	}
+}
+
+func TestResolveMouseYOffsetDefaultIsZero(t *testing.T) {
+	t.Setenv("BYTEMIND_MOUSE_Y_OFFSET", "")
+	if got := resolveMouseYOffset(); got != 0 {
+		t.Fatalf("expected default y offset 0, got %d", got)
 	}
 }
 
@@ -129,6 +175,278 @@ func TestHandleMouseEnablesViewportMouseForwarding(t *testing.T) {
 	}
 	if updated.viewport.YOffset == 0 {
 		t.Fatalf("expected mouse wheel to scroll viewport")
+	}
+}
+
+func TestHandleMouseDragSelectionArmsCopyableSelection(t *testing.T) {
+	writer := &fakeClipboardTextWriter{}
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:        screenChat,
+		width:         120,
+		height:        28,
+		input:         input,
+		viewport:      viewport.New(60, 10),
+		tokenUsage:    newTokenUsageComponent(),
+		clipboardText: writer,
+	}
+	m.viewport.SetContent("alpha line\nbeta line\ngamma line")
+
+	left, _, top, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatal("expected conversation viewport bounds to be available")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      left,
+		Y:      top,
+	})
+	pressed := got.(model)
+
+	got, _ = pressed.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionMotion,
+		X:      left + 4,
+		Y:      top,
+	})
+	moved := got.(model)
+
+	got, _ = moved.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionRelease,
+		Button: tea.MouseButtonLeft,
+		X:      left + 4,
+		Y:      top,
+	})
+	released := got.(model)
+
+	if writer.last != "" {
+		t.Fatalf("expected drag release not to copy before ctrl+c, got %q", writer.last)
+	}
+	if !released.mouseSelectionActive {
+		t.Fatalf("expected drag release to keep an active selection")
+	}
+	if !strings.Contains(released.statusNote, "Press Ctrl+C to copy") {
+		t.Fatalf("expected copy hint after drag selection, got %q", released.statusNote)
+	}
+}
+
+func TestHandleMouseReleaseAtDifferentPointArmsSelectionWithoutMotion(t *testing.T) {
+	writer := &fakeClipboardTextWriter{}
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:        screenChat,
+		width:         120,
+		height:        28,
+		input:         input,
+		viewport:      viewport.New(60, 10),
+		tokenUsage:    newTokenUsageComponent(),
+		clipboardText: writer,
+	}
+	m.viewport.SetContent("alpha line\nbeta line")
+
+	left, _, top, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatal("expected conversation viewport bounds to be available")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      left,
+		Y:      top,
+	})
+	pressed := got.(model)
+
+	got, _ = pressed.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionRelease,
+		Button: tea.MouseButtonLeft,
+		X:      left + 4,
+		Y:      top,
+	})
+	released := got.(model)
+
+	if writer.last != "" {
+		t.Fatalf("expected release-with-range not to copy before ctrl+c, got %q", writer.last)
+	}
+	if !released.mouseSelectionActive {
+		t.Fatalf("expected release at different point to keep an active selection")
+	}
+	if !strings.Contains(released.statusNote, "Press Ctrl+C to copy") {
+		t.Fatalf("expected copy hint after selection, got %q", released.statusNote)
+	}
+}
+
+func TestHandleMouseSingleClickStartsSelectionWithoutCopy(t *testing.T) {
+	writer := &fakeClipboardTextWriter{}
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:        screenChat,
+		width:         120,
+		height:        28,
+		input:         input,
+		viewport:      viewport.New(60, 10),
+		tokenUsage:    newTokenUsageComponent(),
+		clipboardText: writer,
+	}
+	m.viewport.SetContent("alpha line\nbeta line")
+
+	left, _, top, _, ok := m.conversationViewportBounds()
+	if !ok {
+		t.Fatal("expected conversation viewport bounds to be available")
+	}
+
+	got, _ := m.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      left + 2,
+		Y:      top,
+	})
+	pressed := got.(model)
+
+	got, _ = pressed.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionRelease,
+		Button: tea.MouseButtonLeft,
+		X:      left + 2,
+		Y:      top,
+	})
+	released := got.(model)
+
+	if writer.last != "" {
+		t.Fatalf("expected click without drag not to copy text, got %q", writer.last)
+	}
+	if released.mouseSelecting {
+		t.Fatalf("expected click without drag to leave selection mode")
+	}
+	if released.mouseSelectionActive {
+		t.Fatalf("expected click without drag not to keep an active selection")
+	}
+}
+
+func TestCtrlCCopiesActiveSelectionAndShowsToast(t *testing.T) {
+	writer := &fakeClipboardTextWriter{}
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:               screenChat,
+		width:                120,
+		height:               28,
+		input:                input,
+		viewport:             viewport.New(60, 10),
+		tokenUsage:           newTokenUsageComponent(),
+		clipboardText:        writer,
+		mouseSelectionActive: true,
+		mouseSelectionStart:  viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:    viewportSelectionPoint{Row: 0, Col: 4},
+	}
+	m.viewport.SetContent("alpha line\nbeta line")
+
+	got, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	updated := got.(model)
+
+	if writer.last != "alpha" {
+		t.Fatalf("expected ctrl+c copied selection %q, got %q", "alpha", writer.last)
+	}
+	if updated.mouseSelectionActive {
+		t.Fatalf("expected successful copy to clear active selection")
+	}
+	if updated.selectionToast != "Copied selection" {
+		t.Fatalf("expected copy toast, got %q", updated.selectionToast)
+	}
+	if cmd == nil {
+		t.Fatalf("expected ctrl+c copy to schedule toast expiry")
+	}
+}
+
+func TestCtrlCCopyFailureKeepsSelectionAndSetsStatus(t *testing.T) {
+	writer := &fakeClipboardTextWriter{err: errors.New("clipboard write failed")}
+	input := textarea.New()
+	input.Focus()
+
+	m := model{
+		screen:               screenChat,
+		width:                120,
+		height:               28,
+		input:                input,
+		viewport:             viewport.New(60, 10),
+		tokenUsage:           newTokenUsageComponent(),
+		clipboardText:        writer,
+		mouseSelectionActive: true,
+		mouseSelectionStart:  viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:    viewportSelectionPoint{Row: 0, Col: 2},
+	}
+	m.viewport.SetContent("alpha line\nbeta line")
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	released := got.(model)
+
+	if !strings.Contains(released.statusNote, "clipboard write failed") {
+		t.Fatalf("expected copy error in status note, got %q", released.statusNote)
+	}
+	if !released.mouseSelectionActive {
+		t.Fatalf("expected failed copy to keep active selection")
+	}
+}
+
+func TestCtrlCCopyTimeoutKeepsSelectionAndSetsTimeoutStatus(t *testing.T) {
+	writer := &fakeClipboardTextWriter{waitForCtx: true}
+	input := textarea.New()
+	input.Focus()
+
+	previousTimeout := clipboardWriteTimeout
+	clipboardWriteTimeout = 5 * time.Millisecond
+	defer func() { clipboardWriteTimeout = previousTimeout }()
+
+	m := model{
+		screen:               screenChat,
+		width:                120,
+		height:               28,
+		input:                input,
+		viewport:             viewport.New(60, 10),
+		tokenUsage:           newTokenUsageComponent(),
+		clipboardText:        writer,
+		mouseSelectionActive: true,
+		mouseSelectionStart:  viewportSelectionPoint{Row: 0, Col: 0},
+		mouseSelectionEnd:    viewportSelectionPoint{Row: 0, Col: 2},
+	}
+	m.viewport.SetContent("alpha line\nbeta line")
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	updated := got.(model)
+	if !strings.Contains(updated.statusNote, "timed out") {
+		t.Fatalf("expected timeout status note, got %q", updated.statusNote)
+	}
+	if !updated.mouseSelectionActive {
+		t.Fatalf("expected timeout to keep active selection")
+	}
+}
+
+func TestRenderConversationCopyUsesPlainMessageText(t *testing.T) {
+	m := model{
+		width:  120,
+		height: 28,
+		viewport: func() viewport.Model {
+			vp := viewport.New(60, 10)
+			return vp
+		}(),
+		chatItems: []chatEntry{
+			{Kind: "assistant", Title: assistantLabel, Body: "line one\nline two", Status: "final"},
+		},
+	}
+
+	got := m.renderConversationCopy()
+	if strings.Contains(got, "\u2502") || strings.Contains(got, "\u2503") {
+		t.Fatalf("expected copy conversation without card borders, got %q", got)
+	}
+	if !strings.Contains(got, "line one") || !strings.Contains(got, "line two") {
+		t.Fatalf("expected copy conversation to contain message body, got %q", got)
 	}
 }
 
@@ -783,41 +1101,6 @@ func TestPromptSearchPanelSupportsPageNavigation(t *testing.T) {
 	}
 }
 
-func TestRenderPromptSearchPaletteNoMatchesUsesHighContrastShortcuts(t *testing.T) {
-	m := model{
-		screen:              screenChat,
-		width:               140,
-		promptSearchMode:    promptSearchModeQuick,
-		promptSearchQuery:   "missing",
-		promptSearchMatches: nil,
-	}
-
-	got := m.renderPromptSearchPalette()
-	for _, want := range []string{"ws:<kw>", "workspace", "sid:<kw>", "session", "PgUp/PgDn", "Enter", "Esc"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("expected no-match prompt search palette to contain %q, got %q", want, got)
-		}
-	}
-}
-
-func TestRenderPromptSearchPaletteMetaLineUsesHighContrastShortcuts(t *testing.T) {
-	m := model{
-		screen:           screenChat,
-		width:            140,
-		promptSearchMode: promptSearchModeQuick,
-		promptSearchMatches: []history.PromptEntry{
-			{Prompt: "fix tui", Workspace: "repo-a", SessionID: "sess-1", Timestamp: time.Now()},
-		},
-	}
-
-	got := m.renderPromptSearchPalette()
-	for _, want := range []string{"ws:<kw>", "workspace", "sid:<kw>", "session", "Ctrl+F", "next", "Ctrl+S", "prev"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("expected prompt search meta line to contain %q, got %q", want, got)
-		}
-	}
-}
-
 func TestStartupGuideSequentialFlowAdvancesAndClearsInput(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(configPath, []byte(`{
@@ -1150,7 +1433,7 @@ func TestContinueExecutionInputPreparesPlanAndSubmitsPrompt(t *testing.T) {
 }
 
 func TestIsContinueExecutionInputSupportsPlanAlias(t *testing.T) {
-	for _, input := range []string{"continue plan", "resume execution"} {
+	for _, input := range []string{"continue plan", "\u7ee7\u7eed"} {
 		if !isContinueExecutionInput(input) {
 			t.Fatalf("expected %q to be treated as continue input", input)
 		}
@@ -1228,12 +1511,10 @@ func TestChatViewOmitsRedundantChrome(t *testing.T) {
 		}
 	}
 	for _, wanted := range []string{
-		"tab",
-		"agents",
-		"/",
-		"commands",
+		"tab agents",
+		"/ commands",
 		"Ctrl+L sessions",
-		"Ctrl+C quit",
+		"Ctrl+C copy/quit",
 		"Build",
 		"Plan",
 	} {
@@ -1627,9 +1908,6 @@ func TestHelpTextOnlyMentionsSupportedEntryPoints(t *testing.T) {
 		"go run ./cmd/bytemind chat",
 		"go run ./cmd/bytemind run -prompt",
 		"/session",
-		"/skill author",
-		"/skill clear",
-		"/skill delete <name>",
 		"/quit",
 		"/new",
 		"Ctrl+G",
@@ -1661,12 +1939,10 @@ func TestRenderFooterOnlyShowsInputRegion(t *testing.T) {
 		}
 	}
 	for _, wanted := range []string{
-		"tab",
-		"agents",
-		"/",
-		"commands",
+		"tab agents",
+		"/ commands",
 		"Ctrl+L sessions",
-		"Ctrl+C quit",
+		"Ctrl+C copy/quit",
 	} {
 		if !strings.Contains(footer, wanted) {
 			t.Fatalf("footer should advertise %q", wanted)
@@ -1691,7 +1967,7 @@ func TestRenderFooterInfoLineCombinesModeAndHints(t *testing.T) {
 	lines := strings.Split(footer, "\n")
 	infoLine := ""
 	for _, line := range lines {
-		if strings.Contains(line, "agents") && strings.Contains(line, "Ctrl+L") {
+		if strings.Contains(line, "tab agents") {
 			infoLine = line
 			break
 		}
@@ -1699,7 +1975,7 @@ func TestRenderFooterInfoLineCombinesModeAndHints(t *testing.T) {
 	if infoLine == "" {
 		t.Fatalf("expected footer to contain a quick-hint info line")
 	}
-	for _, want := range []string{"Build", "Plan", "deepseek-chat", "tab", "agents"} {
+	for _, want := range []string{"Build", "Plan", "deepseek-chat", "tab agents"} {
 		if !strings.Contains(infoLine, want) {
 			t.Fatalf("expected combined info line to contain %q, got %q", want, infoLine)
 		}
@@ -1949,7 +2225,6 @@ func TestHandleSlashSkillsListsDiscoveredSkills(t *testing.T) {
 		sess:      sess,
 		workspace: workspace,
 		screen:    screenChat,
-		input:     textarea.New(),
 	}
 	if err := m.handleSlashCommand("/skills"); err != nil {
 		t.Fatalf("expected /skills to succeed, got %v", err)
@@ -1960,12 +2235,9 @@ func TestHandleSlashSkillsListsDiscoveredSkills(t *testing.T) {
 	if !strings.Contains(m.chatItems[len(m.chatItems)-1].Body, "review") {
 		t.Fatalf("expected skills output to contain review, got %q", m.chatItems[len(m.chatItems)-1].Body)
 	}
-	if !strings.Contains(m.chatItems[len(m.chatItems)-1].Body, "Review code for correctness, regression risk, and missing tests.") {
-		t.Fatalf("expected builtin review description to be localized in /skills output, got %q", m.chatItems[len(m.chatItems)-1].Body)
-	}
 }
 
-func TestHandleSlashSkillActivateAndSwitch(t *testing.T) {
+func TestHandleSlashSkillActivateAndClear(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(workspace, "internal", "skills", "bug-investigation"), 0o755); err != nil {
 		t.Fatal(err)
@@ -2012,7 +2284,6 @@ func TestHandleSlashSkillActivateAndSwitch(t *testing.T) {
 		sess:      sess,
 		workspace: workspace,
 		screen:    screenChat,
-		input:     textarea.New(),
 	}
 	if err := m.handleSlashCommand("/bug-investigation"); err != nil {
 		t.Fatalf("expected /bug-investigation to succeed, got %v", err)
@@ -2029,290 +2300,11 @@ func TestHandleSlashSkillActivateAndSwitch(t *testing.T) {
 	if got := m.sess.ActiveSkill.Args["severity"]; got != "high" {
 		t.Fatalf("expected skill arg severity=high, got %q", got)
 	}
-}
-
-func TestHandleSlashSkillAuthorCreatesProjectSkill(t *testing.T) {
-	workspace := t.TempDir()
-
-	store, err := session.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess := session.New(workspace)
-	runner := agent.NewRunner(agent.Options{
-		Workspace: workspace,
-		Config: config.Config{
-			Provider: config.ProviderConfig{Model: "test-model"},
-		},
-		Store:    store,
-		Registry: tools.DefaultRegistry(),
-	})
-
-	m := model{
-		runner:    runner,
-		store:     store,
-		sess:      sess,
-		workspace: workspace,
-		screen:    screenChat,
-		input:     textarea.New(),
-	}
-
-	if err := m.handleSlashCommand("/skill author review-plus review backend changes and report risks"); err != nil {
-		t.Fatalf("expected /skill author to succeed, got %v", err)
-	}
-
-	skillDir := filepath.Join(workspace, ".bytemind", "skills", "review-plus")
-	if _, err := os.Stat(filepath.Join(skillDir, "skill.json")); err != nil {
-		t.Fatalf("expected generated skill.json, got %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(skillDir, "SKILL.md")); err != nil {
-		t.Fatalf("expected generated SKILL.md, got %v", err)
-	}
-
-	if len(m.chatItems) < 2 {
-		t.Fatalf("expected command exchange in chat, got %#v", m.chatItems)
-	}
-	response := m.chatItems[len(m.chatItems)-1].Body
-	if !strings.Contains(response, "Skill `review-plus`") {
-		t.Fatalf("expected response to reference authored skill, got %q", response)
-	}
-	if !strings.Contains(response, "Activate with `/review-plus`") {
-		t.Fatalf("expected response to include activation hint, got %q", response)
-	}
-
-	if err := m.handleSlashCommand("/review-plus"); err != nil {
-		t.Fatalf("expected /review-plus activation to succeed, got %v", err)
-	}
-	if m.sess.ActiveSkill == nil || m.sess.ActiveSkill.Name != "review-plus" {
-		t.Fatalf("expected active skill review-plus, got %#v", m.sess.ActiveSkill)
-	}
-}
-
-func TestHandleSlashSkillDeleteDeletesProjectSkill(t *testing.T) {
-	workspace := t.TempDir()
-	skillDir := filepath.Join(workspace, ".bytemind", "skills", "review-plus")
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "skill.json"), []byte(`{"name":"review-plus","description":"review"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# review-plus"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	store, err := session.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess := session.New(workspace)
-	runner := agent.NewRunner(agent.Options{
-		Workspace: workspace,
-		Config: config.Config{
-			Provider: config.ProviderConfig{Model: "test-model"},
-		},
-		Store:    store,
-		Registry: tools.DefaultRegistry(),
-	})
-
-	m := model{
-		runner:    runner,
-		store:     store,
-		sess:      sess,
-		workspace: workspace,
-		screen:    screenChat,
-		input:     textarea.New(),
-	}
-
-	if _, err := runner.ActivateSkill(sess, "/review-plus", nil); err != nil {
-		t.Fatalf("expected activate before clear, got %v", err)
-	}
-	if err := m.handleSlashCommand("/skill delete review-plus"); err != nil {
-		t.Fatalf("expected /skill delete to succeed, got %v", err)
-	}
-	if _, err := os.Stat(skillDir); !os.IsNotExist(err) {
-		t.Fatalf("expected skill directory removed, stat err=%v", err)
-	}
-	if m.sess.ActiveSkill != nil {
-		t.Fatalf("expected active skill cleared, got %#v", m.sess.ActiveSkill)
-	}
-	if len(m.chatItems) < 2 || !strings.Contains(m.chatItems[len(m.chatItems)-1].Body, "Deleted project skill") {
-		t.Fatalf("expected clear command response, got %#v", m.chatItems)
-	}
-}
-
-func TestHandleSlashSkillClearOnlyClearsActiveSkill(t *testing.T) {
-	workspace := t.TempDir()
-	skillDir := filepath.Join(workspace, ".bytemind", "skills", "review-plus")
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "skill.json"), []byte(`{"name":"review-plus","description":"review"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# review-plus"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	store, err := session.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess := session.New(workspace)
-	runner := agent.NewRunner(agent.Options{
-		Workspace: workspace,
-		Config: config.Config{
-			Provider: config.ProviderConfig{Model: "test-model"},
-		},
-		Store:    store,
-		Registry: tools.DefaultRegistry(),
-	})
-
-	m := model{
-		runner:    runner,
-		store:     store,
-		sess:      sess,
-		workspace: workspace,
-		screen:    screenChat,
-		input:     textarea.New(),
-	}
-
-	if _, err := runner.ActivateSkill(sess, "/review-plus", nil); err != nil {
-		t.Fatalf("expected activate before clear, got %v", err)
-	}
 	if err := m.handleSlashCommand("/skill clear"); err != nil {
 		t.Fatalf("expected /skill clear to succeed, got %v", err)
 	}
-	if _, err := os.Stat(skillDir); err != nil {
-		t.Fatalf("expected skill directory to remain after clear, got %v", err)
-	}
 	if m.sess.ActiveSkill != nil {
-		t.Fatalf("expected active skill cleared, got %#v", m.sess.ActiveSkill)
-	}
-	if len(m.chatItems) < 2 || !strings.Contains(m.chatItems[len(m.chatItems)-1].Body, "Cleared active skill") {
-		t.Fatalf("expected clear status response, got %#v", m.chatItems)
-	}
-}
-
-func TestHandleSlashSkillAuthorWithoutNameEntersAuthorMode(t *testing.T) {
-	workspace := t.TempDir()
-
-	store, err := session.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess := session.New(workspace)
-	runner := agent.NewRunner(agent.Options{
-		Workspace: workspace,
-		Config: config.Config{
-			Provider: config.ProviderConfig{Model: "test-model"},
-		},
-		Store:    store,
-		Registry: tools.DefaultRegistry(),
-	})
-
-	input := textarea.New()
-	m := model{
-		runner:    runner,
-		store:     store,
-		sess:      sess,
-		workspace: workspace,
-		screen:    screenChat,
-		input:     input,
-	}
-
-	if err := m.handleSlashCommand("/skill author"); err != nil {
-		t.Fatalf("expected /skill author to enable mode, got %v", err)
-	}
-	if !m.skillAuthorMode {
-		t.Fatalf("expected skillAuthorMode enabled")
-	}
-	if strings.TrimSpace(m.skillAuthorName) != "" {
-		t.Fatalf("expected no skillAuthorName yet, got %q", m.skillAuthorName)
-	}
-	if !strings.Contains(m.input.Placeholder, "step 1/2") {
-		t.Fatalf("expected author-mode placeholder, got %q", m.input.Placeholder)
-	}
-
-	m.input.SetValue("review-ops")
-	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	updated := got.(model)
-
-	if !updated.skillAuthorMode {
-		t.Fatalf("expected author mode to stay active")
-	}
-	if updated.skillAuthorName != "review-ops" {
-		t.Fatalf("expected target skill name review-ops, got %q", updated.skillAuthorName)
-	}
-	if !strings.Contains(updated.input.Placeholder, "step 2/2") || !strings.Contains(updated.input.Placeholder, "review-ops") {
-		t.Fatalf("expected author-mode placeholder to track skill name, got %q", updated.input.Placeholder)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, ".bytemind", "skills", "review-ops", "skill.json")); err != nil {
-		t.Fatalf("expected generated skill scaffold, got %v", err)
-	}
-
-	updated.input.SetValue("Used for code review, prioritizing regression risk and missing tests.")
-	next, _ := updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	updated2 := next.(model)
-	if !updated2.skillAuthorMode {
-		t.Fatalf("expected author mode to stay active after content update")
-	}
-	if !strings.Contains(updated2.chatItems[len(updated2.chatItems)-1].Body, "Current step: 2/2 (content)") {
-		t.Fatalf("expected stage 2 guidance after content update, got %q", updated2.chatItems[len(updated2.chatItems)-1].Body)
-	}
-
-	if err := updated2.handleSlashCommand("/skill author done"); err != nil {
-		t.Fatalf("expected /skill author done to exit mode, got %v", err)
-	}
-	if updated2.skillAuthorMode {
-		t.Fatalf("expected skillAuthorMode disabled")
-	}
-}
-
-func TestSkillAuthorModeShowsVisibleGuidanceOnInvalidName(t *testing.T) {
-	workspace := t.TempDir()
-
-	store, err := session.NewStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess := session.New(workspace)
-	runner := agent.NewRunner(agent.Options{
-		Workspace: workspace,
-		Config: config.Config{
-			Provider: config.ProviderConfig{Model: "test-model"},
-		},
-		Store:    store,
-		Registry: tools.DefaultRegistry(),
-	})
-
-	input := textarea.New()
-	m := model{
-		runner:    runner,
-		store:     store,
-		sess:      sess,
-		workspace: workspace,
-		screen:    screenChat,
-		input:     input,
-	}
-
-	if err := m.handleSlashCommand("/skill author"); err != nil {
-		t.Fatalf("expected /skill author to enable mode, got %v", err)
-	}
-
-	m.input.SetValue("review+skill")
-	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	updated := got.(model)
-
-	if !updated.skillAuthorMode {
-		t.Fatalf("expected author mode to remain enabled")
-	}
-	if len(updated.chatItems) < 2 {
-		t.Fatalf("expected visible assistant guidance, got %#v", updated.chatItems)
-	}
-	body := updated.chatItems[len(updated.chatItems)-1].Body
-	if !strings.Contains(body, "invalid skill name") {
-		t.Fatalf("expected invalid-name guidance in chat, got %q", body)
+		t.Fatalf("expected active skill to be cleared, got %#v", m.sess.ActiveSkill)
 	}
 }
 
@@ -2357,9 +2349,6 @@ func TestFilteredCommandsIncludeSkillSlashCommands(t *testing.T) {
 	found := false
 	for _, item := range items {
 		if item.Name == "/review" && item.Kind == "skill" {
-			if !strings.Contains(item.Description, "Review code for correctness, regression risk, and missing tests.") {
-				t.Fatalf("expected /review command description localized in command palette, got %+v", item)
-			}
 			found = true
 			break
 		}
@@ -3530,7 +3519,7 @@ func TestBusyEnterQueuesBTWAndCancelsRun(t *testing.T) {
 func TestBusyEnterSuppressedAfterRecentMultilinePaste(t *testing.T) {
 	input := textarea.New()
 	input.Focus()
-	input.SetValue("Build an enterprise plugin platform\n- dynamic plugin loading\n- plugin permission isolation")
+	input.SetValue("Design a plugin platform\n- dynamic plugin loading\n- permission isolation")
 	input.CursorEnd()
 
 	canceled := false
@@ -3561,7 +3550,7 @@ func TestBusyEnterSuppressedAfterRecentMultilinePaste(t *testing.T) {
 func TestBusyEnterSuppressedForRecentPasteBurstSingleLine(t *testing.T) {
 	input := textarea.New()
 	input.Focus()
-	input.SetValue("- dynamic plugin loading")
+	input.SetValue("dynamic plugin loading")
 	input.CursorEnd()
 
 	canceled := false
@@ -4137,7 +4126,7 @@ func TestFormatChatBodyRendersCodeBlockWithoutFences(t *testing.T) {
 func TestFormatChatBodyStripsInlineMarkdownTokens(t *testing.T) {
 	item := chatEntry{
 		Kind: "assistant",
-		Body: "I am **ByteMind** project, supporting `go test ./...` and [docs](https://example.com/docs).",
+		Body: "We are **ByteMind** project, support go test ./... and [docs](https://example.com/docs).",
 	}
 
 	got := formatChatBody(item, 120)
@@ -4467,8 +4456,8 @@ func TestWrapLineSmartBranchCoverage(t *testing.T) {
 		t.Fatalf("expected empty line to remain empty, got %#v", got)
 	}
 
-	wideRune := wrapLineSmart("\uFF38a", 1)
-	if len(wideRune) < 2 || wideRune[0] != "\uFF38" {
+	wideRune := wrapLineSmart("\u4f60\u597d", 1)
+	if len(wideRune) < 2 || wideRune[0] != "\u4f60" {
 		t.Fatalf("expected wide-rune fallback split, got %#v", wideRune)
 	}
 
@@ -4538,27 +4527,6 @@ func TestThinkingFilters(t *testing.T) {
 	}
 	if !shouldRenderThinkingFromDelta("First, I will inspect the failing branch and then patch tests.") {
 		t.Fatalf("expected structured reasoning marker to trigger thinking rendering")
-	}
-	if isMeaningfulThinking("I will use read_file to inspect context first.", "read_file") {
-		t.Fatalf("expected generic Chinese tool-intent phrase not to be treated as meaningful thinking")
-	}
-	if !shouldRenderThinkingFromDelta("I will first inspect the failing branch, then add tests.") {
-		t.Fatalf("expected Chinese structured reasoning marker to trigger thinking rendering")
-	}
-}
-
-func TestCurrentSkillLabelBranches(t *testing.T) {
-	m := model{}
-	if got := m.currentSkillLabel(); got != "none" {
-		t.Fatalf("expected none for nil session, got %q", got)
-	}
-	m.sess = &session.Session{ActiveSkill: &session.ActiveSkill{}}
-	if got := m.currentSkillLabel(); got != "none" {
-		t.Fatalf("expected none for blank skill name, got %q", got)
-	}
-	m.sess.ActiveSkill.Name = "review"
-	if got := m.currentSkillLabel(); got != "review" {
-		t.Fatalf("expected active skill name, got %q", got)
 	}
 }
 

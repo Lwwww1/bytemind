@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -29,25 +31,31 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
+	zone "github.com/lrstanley/bubblezone"
 	"github.com/mattn/go-runewidth"
 )
 
 const (
-	defaultSessionLimit   = 8
-	scrollStep            = 3
-	scrollbarWidth        = 1
-	commandPageSize       = 3
-	mentionPageSize       = 5
-	maxPendingBTW         = 5
-	promptSearchPageSize  = 5
-	promptSearchLoadLimit = 50000
-	promptSearchResultCap = 200
-	pasteSubmitGuard      = 400 * time.Millisecond
-	assistantLabel        = "Bytemind"
-	thinkingLabel         = "Bytemind"
-	chatTitleLabel        = "Bytemind Chat"
-	tuiTitleLabel         = "Bytemind TUI"
-	footerHintText        = "tab agents | / commands | Ctrl+F history | Ctrl+L sessions | Ctrl+C quit"
+	defaultSessionLimit        = 8
+	scrollStep                 = 3
+	scrollbarWidth             = 1
+	mouseZoneAutoProbeMaxDelta = 4
+	commandPageSize            = 3
+	mentionPageSize            = 5
+	maxPendingBTW              = 5
+	promptSearchPageSize       = 5
+	promptSearchLoadLimit      = 50000
+	promptSearchResultCap      = 200
+	pasteSubmitGuard           = 400 * time.Millisecond
+	mouseSelectionScrollTick   = 60 * time.Millisecond
+	assistantLabel             = "Bytemind"
+	thinkingLabel              = "Bytemind"
+	chatTitleLabel             = "Bytemind Chat"
+	tuiTitleLabel              = "Bytemind TUI"
+	footerHintText             = "tab agents | / commands | drag select | Ctrl+C copy/quit | Ctrl+F history | Ctrl+L sessions"
+	conversationViewportZoneID = "bytemind:conversation:viewport"
+	inputEditorZoneID          = "bytemind:input:editor"
 )
 
 type footerShortcutHint struct {
@@ -60,7 +68,7 @@ var footerShortcutHints = []footerShortcutHint{
 	{Key: "/", Label: "commands"},
 	{Key: "Ctrl+F", Label: "history"},
 	{Key: "Ctrl+L", Label: "sessions"},
-	{Key: "Ctrl+C", Label: "quit"},
+	{Key: "Ctrl+C", Label: "copy/quit"},
 }
 
 var promptSearchFilterHints = []footerShortcutHint{
@@ -75,6 +83,8 @@ var promptSearchActionHints = []footerShortcutHint{
 	{Key: "Enter", Label: "apply"},
 	{Key: "Esc", Label: "close"},
 }
+
+var zoneInitOnce sync.Once
 
 type screenKind string
 
@@ -117,6 +127,22 @@ type chatEntry struct {
 	Meta   string
 	Body   string
 	Status string
+}
+
+type viewportSelectionPoint struct {
+	Col int
+	Row int
+}
+
+type viewportTopLookupCache struct {
+	left           int
+	expectedTop    int
+	viewportWidth  int
+	viewportHeight int
+	viewportOffset int
+	top            int
+	found          bool
+	valid          bool
 }
 
 type commandItem struct {
@@ -185,6 +211,14 @@ type tokenUsagePulledMsg struct {
 	Err     error
 }
 
+type selectionToastExpiredMsg struct {
+	ID int
+}
+
+type mouseSelectionScrollTickMsg struct {
+	ID int
+}
+
 var commandItems = []commandItem{
 	{Name: "/help", Usage: "/help", Description: "Show usage and supported commands.", Kind: "command"},
 	{Name: "/session", Usage: "/session", Description: "Open the recent session list.", Kind: "command"},
@@ -193,17 +227,7 @@ var commandItems = []commandItem{
 	{Name: "/btw", Usage: "/btw <message>", Description: "Interject while a run is in progress.", Kind: "command"},
 	{Name: "/quit", Usage: "/quit", Description: "Exit the current TUI window.", Kind: "command"},
 	{Name: "/skills", Usage: "/skills", Description: "List available skills and current active skill.", Kind: "command"},
-	{Name: "/skill author", Usage: "/skill author [name]", Description: "Enter skill author mode and create/update a scaffold.", Kind: "command"},
 	{Name: "/skill clear", Usage: "/skill clear", Description: "Clear active skill for this session.", Kind: "command"},
-	{Name: "/skill delete", Usage: "/skill delete <name>", Description: "Delete a project skill by name.", Kind: "command"},
-}
-
-var builtinSkillDescriptionsCN = map[string]string{
-	"bug-investigation": "Investigate reproducible issues and propose concrete fixes.",
-	"github-pr":         "Analyze PR diffs, review comments, and merge risk with evidence.",
-	"repo-onboarding":   "Build a fast understanding of repository structure and execution flow.",
-	"review":            "Review code for correctness, regression risk, and missing tests.",
-	"write-rfc":         "Draft a structured technical proposal with tradeoffs and rollout plan.",
 }
 
 type model struct {
@@ -219,10 +243,13 @@ type model struct {
 
 	async    chan tea.Msg
 	viewport viewport.Model
+	copyView viewport.Model
 	planView viewport.Model
 	input    textarea.Model
 	spinner  spinner.Model
 
+	viewportContentCache  string
+	viewportTopCache      viewportTopLookupCache
 	chatItems             []chatEntry
 	toolRuns              []toolRun
 	plan                  planpkg.State
@@ -256,6 +283,19 @@ type model struct {
 	chatAutoFollow        bool
 	draggingScrollbar     bool
 	scrollbarDragOffset   int
+	mouseSelecting        bool
+	mouseSelectionMouseX  int
+	mouseSelectionMouseY  int
+	mouseSelectionTickID  int
+	mouseSelectionActive  bool
+	mouseSelectionStart   viewportSelectionPoint
+	mouseSelectionEnd     viewportSelectionPoint
+	inputMouseSelecting   bool
+	inputSelectionActive  bool
+	inputSelectionStart   viewportSelectionPoint
+	inputSelectionEnd     viewportSelectionPoint
+	selectionToast        string
+	selectionToastID      int
 	tokenUsage            tokenUsageComponent
 	tokenUsedTotal        int
 	tokenBudget           int
@@ -282,18 +322,19 @@ type model struct {
 	pastedStateLoaded     bool
 	lastCompressedPasteAt time.Time
 	clipboard             clipboardImageReader
+	clipboardText         clipboardTextWriter
 	runCancel             context.CancelFunc
 	pendingBTW            []string
 	interrupting          bool
 	interruptSafe         bool
-	skillAuthorMode       bool
-	skillAuthorName       string
 	runSeq                int
 	activeRunID           int
 	startupGuide          StartupGuide
+	mouseYOffset          int
 }
 
 func newModel(opts Options) model {
+	ensureZoneManager()
 	async := make(chan tea.Msg, 128)
 
 	input := textarea.New()
@@ -313,6 +354,9 @@ func newModel(opts Options) model {
 	vp.YPosition = 0
 	vp.MouseWheelEnabled = true
 	vp.MouseWheelDelta = scrollStep
+
+	copyVP := viewport.New(0, 0)
+	copyVP.YPosition = 0
 
 	planVP := viewport.New(0, 0)
 	planVP.YPosition = 0
@@ -340,6 +384,7 @@ func newModel(opts Options) model {
 		workspace:          opts.Workspace,
 		async:              async,
 		viewport:           vp,
+		copyView:           copyVP,
 		planView:           planVP,
 		input:              input,
 		spinner:            spin,
@@ -367,7 +412,9 @@ func newModel(opts Options) model {
 		pastedOrder:        make([]string, 0, maxStoredPastedContents),
 		nextPasteID:        1,
 		clipboard:          defaultClipboardImageReader{},
+		clipboardText:      defaultClipboardTextWriter{},
 		startupGuide:       opts.StartupGuide,
+		mouseYOffset:       resolveMouseYOffset(),
 	}
 	if opts.StartupGuide.Active {
 		m.statusNote = opts.StartupGuide.Status
@@ -387,6 +434,24 @@ func newModel(opts Options) model {
 		go m.mentionIndex.Prewarm()
 	}
 	return m
+}
+
+func ensureZoneManager() {
+	zoneInitOnce.Do(func() {
+		zone.NewGlobal()
+	})
+}
+
+func resolveMouseYOffset() int {
+	raw := strings.TrimSpace(os.Getenv("BYTEMIND_MOUSE_Y_OFFSET"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0
+	}
+	return clamp(value, -10, 10)
 }
 
 func (m model) Init() tea.Cmd {
@@ -491,6 +556,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tokenUsagePulledMsg:
 		// Account-level usage is not session-accurate; ignore in session-only mode.
 		return m, nil
+	case selectionToastExpiredMsg:
+		if msg.ID == m.selectionToastID {
+			m.selectionToast = ""
+		}
+		return m, nil
+	case mouseSelectionScrollTickMsg:
+		return m.handleMouseSelectionScrollTick(msg)
 	case tokenMonitorTickMsg:
 		cmd, _ := m.tokenUsage.Update(msg)
 		return m, cmd
@@ -524,97 +596,6 @@ func (m model) shouldKeepStreamingIndexOnRunFinished() bool {
 	}
 	status := strings.TrimSpace(strings.ToLower(item.Status))
 	return status == "streaming" || status == "thinking" || status == "pending"
-}
-
-func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Action == tea.MouseActionRelease {
-		m.draggingScrollbar = false
-	}
-	if m.helpOpen || m.commandOpen || m.mentionOpen || m.promptSearchOpen || m.approval != nil {
-		return m, nil
-	}
-	if m.screen != screenChat && m.screen != screenLanding {
-		return m, nil
-	}
-	if m.screen == screenChat && m.sessionsOpen {
-		return m, nil
-	}
-	if cmd, consumed := m.tokenUsage.Update(msg); consumed {
-		return m, cmd
-	}
-	if m.screen == screenChat {
-		if msg.Action == tea.MouseActionMotion && m.draggingScrollbar {
-			m.dragScrollbarTo(msg.Y)
-			m.chatAutoFollow = false
-			return m, nil
-		}
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			trackX, trackTop, trackBottom, ok := m.scrollbarTrackBounds()
-			if ok && msg.X == trackX && msg.Y >= trackTop && msg.Y <= trackBottom {
-				thumbTop, thumbHeight, _, visible := m.scrollbarLayout(m.viewport.Height, m.viewport.TotalLineCount(), m.viewport.YOffset)
-				if visible && thumbHeight > 0 {
-					absoluteThumbTop := trackTop + thumbTop
-					absoluteThumbBottom := absoluteThumbTop + thumbHeight - 1
-					if msg.Y >= absoluteThumbTop && msg.Y <= absoluteThumbBottom {
-						m.scrollbarDragOffset = msg.Y - absoluteThumbTop
-					} else {
-						// Click on track should jump close to that point, then start drag.
-						m.scrollbarDragOffset = thumbHeight / 2
-						m.dragScrollbarTo(msg.Y)
-					}
-					m.draggingScrollbar = true
-					m.chatAutoFollow = false
-					return m, nil
-				}
-			}
-		}
-	}
-	if m.mouseOverInput(msg.Y) {
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			m.scrollInput(-scrollStep)
-			return m, nil
-		case tea.MouseButtonWheelDown:
-			m.scrollInput(scrollStep)
-			return m, nil
-		default:
-			return m, nil
-		}
-	}
-	if m.screen == screenChat {
-		if m.mouseOverPlan(msg.X, msg.Y) {
-			m.ensurePlanMouse()
-			switch msg.Button {
-			case tea.MouseButtonWheelUp:
-				m.planView.LineUp(scrollStep)
-				return m, nil
-			case tea.MouseButtonWheelDown:
-				m.planView.LineDown(scrollStep)
-				return m, nil
-			default:
-				var cmd tea.Cmd
-				m.planView, cmd = m.planView.Update(msg)
-				return m, cmd
-			}
-		}
-		m.ensureViewportMouse()
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			m.viewport.LineUp(scrollStep)
-			m.chatAutoFollow = false
-			return m, nil
-		case tea.MouseButtonWheelDown:
-			m.viewport.LineDown(scrollStep)
-			m.chatAutoFollow = m.viewport.AtBottom()
-			return m, nil
-		default:
-			var cmd tea.Cmd
-			m.viewport, cmd = m.viewport.Update(msg)
-			m.chatAutoFollow = m.viewport.AtBottom()
-			return m, cmd
-		}
-	}
-	return m, nil
 }
 
 func (m *model) ensureViewportMouse() {
@@ -697,6 +678,7 @@ func (m *model) scrollInput(delta int) {
 }
 
 func (m model) mouseOverInput(y int) bool {
+	ensureZoneManager()
 	switch m.screen {
 	case screenLanding:
 		return m.mouseOverLandingInput(y)
@@ -750,8 +732,7 @@ func (m model) mouseOverLandingInput(y int) bool {
 		"/_____/\\__, /\\__/\\___/_/ /_/ /_/\\__/_/_/ /_/\\__,_/   ",
 		"      /____/                                          ",
 	}, "\n")))
-	titleHeight := 0
-	subtitleHeight := 0
+	modeTabsHeight := lipgloss.Height(m.renderModeTabs())
 	overlayHeight := 0
 	if m.startupGuide.Active {
 		overlayHeight = lipgloss.Height(m.renderStartupGuidePanel()) + 1
@@ -769,9 +750,9 @@ func (m model) mouseOverLandingInput(y int) bool {
 			Render(m.input.View()),
 	)
 	hintHeight := lipgloss.Height(renderFooterShortcutHints())
-	contentHeight := logoHeight + 1 + titleHeight + subtitleHeight + 1 + overlayHeight + inputHeight + 1 + hintHeight
+	contentHeight := logoHeight + 1 + modeTabsHeight + 1 + overlayHeight + inputHeight + 1 + hintHeight
 	contentTop := max(0, (m.height-contentHeight)/2)
-	inputTop := contentTop + logoHeight + 1 + titleHeight + subtitleHeight + 1 + overlayHeight
+	inputTop := contentTop + logoHeight + 1 + modeTabsHeight + 1 + overlayHeight
 	inputBottom := inputTop + max(1, inputHeight) - 1
 	return y >= inputTop && y <= inputBottom
 }
@@ -779,6 +760,9 @@ func (m model) mouseOverLandingInput(y int) bool {
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
+		if m.hasCopyableSelection() {
+			return m, m.copyCurrentSelection()
+		}
 		if m.approval != nil {
 			m.approval.Reply <- approvalDecision{Approved: false}
 		}
@@ -793,6 +777,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "esc":
+		if m.hasCopyableSelection() {
+			m.clearMouseSelection()
+			m.clearInputSelection()
+			m.statusNote = "Selection cleared."
+			return m, nil
+		}
 	case "tab":
 		if m.commandOpen || m.mentionOpen || m.sessionsOpen || m.helpOpen || m.approval != nil {
 			break
@@ -918,10 +909,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadSessionsCmd()
 	case "home":
 		m.viewport.GotoTop()
+		m.syncCopyViewOffset()
 		m.chatAutoFollow = false
 		return m, nil
 	case "end":
 		m.viewport.GotoBottom()
+		m.syncCopyViewOffset()
 		m.chatAutoFollow = true
 		return m, nil
 	}
@@ -1038,9 +1031,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return next, cmd
-		}
-		if m.skillAuthorMode {
-			return m.submitSkillAuthorInput(value)
 		}
 		return m.submitPrompt(value)
 	}
@@ -1970,13 +1960,19 @@ func (m *model) refreshViewport() {
 	m.syncTokenUsageBounds()
 	chatOffset := m.viewport.YOffset
 	keepChatBottom := m.chatAutoFollow || m.viewport.AtBottom()
-	m.viewport.SetContent(m.renderConversation())
+	conversationContent := m.renderConversation()
+	m.viewportContentCache = conversationContent
+	m.viewport.SetContent(conversationContent)
+	m.copyView.SetContent(m.renderConversationCopy())
 	if keepChatBottom {
 		m.viewport.GotoBottom()
+		m.copyView.GotoBottom()
 		m.chatAutoFollow = true
 	} else {
 		m.viewport.SetYOffset(chatOffset)
+		m.copyView.SetYOffset(chatOffset)
 	}
+	m.syncCopyViewOffset()
 
 	planOffset := m.planView.YOffset
 	m.planView.SetContent(m.planPanelContent(max(16, m.planView.Width)))
@@ -2021,6 +2017,7 @@ func (m *model) resize() {
 }
 
 func (m model) View() string {
+	ensureZoneManager()
 	if m.width > 0 {
 		if m.screen == screenLanding {
 			m.input.SetWidth(m.landingInputContentWidth())
@@ -2036,14 +2033,14 @@ func (m model) View() string {
 		base = panelStyle.Width(m.chatPanelWidth()).Render(chatContent)
 	}
 
+	rendered := base
 	switch {
 	case m.helpOpen:
-		return renderModal(m.width, m.height, m.renderHelpModal())
+		rendered = renderModal(m.width, m.height, m.renderHelpModal())
 	case m.sessionsOpen:
-		return renderModal(m.width, m.height, m.renderSessionsModal())
-	default:
-		return base
+		rendered = renderModal(m.width, m.height, m.renderSessionsModal())
 	}
+	return zone.Scan(rendered)
 }
 
 func (m *model) SetUsage(used, total int) tea.Cmd {
@@ -2080,6 +2077,83 @@ func (m model) renderConversation() string {
 	return lipgloss.JoinVertical(lipgloss.Left, blocks...)
 }
 
+func (m model) renderConversationCopy() string {
+	if len(m.chatItems) == 0 {
+		return "No messages yet. Start with an instruction like \"analyze this repo\" or \"implement a TUI shell\"."
+	}
+	width := m.viewport.Width
+	if width <= 0 {
+		width = m.conversationPanelWidth()
+	}
+	width = max(24, width)
+	blocks := make([]string, 0, len(m.chatItems))
+	for i := 0; i < len(m.chatItems); {
+		item := m.chatItems[i]
+		if item.Kind == "user" {
+			blocks = append(blocks, renderChatCopySection(item, width))
+			i++
+			continue
+		}
+
+		j := i
+		for j < len(m.chatItems) && m.chatItems[j].Kind != "user" {
+			j++
+		}
+
+		runParts := make([]string, 0, j-i)
+		for _, runItem := range m.chatItems[i:j] {
+			runParts = append(runParts, renderChatCopySection(runItem, width))
+		}
+		blocks = append(blocks, strings.Join(runParts, "\n\n"))
+		i = j
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func renderChatCopySection(item chatEntry, width int) string {
+	title := strings.TrimSpace(item.Title)
+	status := strings.TrimSpace(item.Status)
+	if status == "final" {
+		status = ""
+	}
+	switch item.Kind {
+	case "assistant":
+		if strings.EqualFold(item.Status, "thinking") {
+			title = "thinking"
+			status = ""
+		}
+	case "user":
+		if strings.TrimSpace(item.Meta) != "" {
+			title = strings.TrimSpace(item.Meta)
+		}
+	}
+
+	if title == "" {
+		switch item.Kind {
+		case "assistant":
+			title = assistantLabel
+		case "user":
+			title = "You"
+		case "tool":
+			title = "Tool"
+		default:
+			title = "Message"
+		}
+	}
+	if status != "" {
+		title += "  " + status
+	}
+
+	body := strings.TrimRight(formatChatBody(item, width), "\n")
+	if item.Kind == "tool" && strings.TrimSpace(body) == "" {
+		return title
+	}
+	if strings.TrimSpace(body) == "" {
+		return title
+	}
+	return title + "\n" + body
+}
+
 func (m *model) syncViewportSize() {
 	if m.width == 0 || m.height == 0 {
 		return
@@ -2096,14 +2170,24 @@ func (m *model) syncViewportSize() {
 	contentHeight := max(3, panelInnerHeight)
 	m.viewport.Width = max(8, m.conversationPanelWidth()-scrollbarWidth)
 	m.viewport.Height = contentHeight
+	m.copyView.Width = m.viewport.Width
+	m.copyView.Height = m.viewport.Height
+	m.syncCopyViewOffset()
+}
+
+func (m *model) syncCopyViewOffset() {
+	if m == nil {
+		return
+	}
+	m.copyView.SetYOffset(m.viewport.YOffset)
 }
 
 func (m model) renderMainPanel() string {
 	width := max(24, m.chatPanelInnerWidth())
-	badge := strings.TrimSpace(m.renderTokenBadge(width))
+	badge := strings.TrimSpace(m.renderTopRightCluster(width))
 	conversation := lipgloss.JoinHorizontal(
 		lipgloss.Top,
-		m.viewport.View(),
+		m.renderConversationViewport(),
 		m.renderScrollbar(m.viewport.Height, m.viewport.TotalLineCount(), m.viewport.YOffset),
 	)
 	if badge == "" {
@@ -2121,6 +2205,17 @@ func (m model) renderMainPanel() string {
 	}
 	parts = append(parts, "", conversation)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+func (m model) renderTopRightCluster(width int) string {
+	parts := make([]string, 0, 2)
+	if toast := strings.TrimSpace(m.selectionToast); toast != "" {
+		parts = append(parts, selectionToastStyle.Render(toast))
+	}
+	if badge := strings.TrimSpace(m.renderTokenBadge(width)); badge != "" {
+		parts = append(parts, badge)
+	}
+	return strings.Join(parts, "  ")
 }
 
 func (m model) renderTokenBadge(width int) string {
@@ -2160,7 +2255,7 @@ func (m model) scrollbarLayout(viewHeight, contentHeight, currentOffset int) (th
 		return 0, viewHeight, 0, true
 	}
 
-	thumbHeight = (viewHeight*viewHeight + contentHeight/2) / contentHeight
+	thumbHeight = roundedScaledDivision(viewHeight, viewHeight, contentHeight)
 	thumbHeight = clamp(thumbHeight, 1, viewHeight)
 
 	trackRange := max(0, viewHeight-thumbHeight)
@@ -2168,7 +2263,7 @@ func (m model) scrollbarLayout(viewHeight, contentHeight, currentOffset int) (th
 		return 0, thumbHeight, maxOffset, true
 	}
 	offset := clamp(currentOffset, 0, maxOffset)
-	thumbTop = (offset*trackRange + maxOffset/2) / maxOffset
+	thumbTop = roundedScaledDivision(offset, trackRange, maxOffset)
 	thumbTop = clamp(thumbTop, 0, trackRange)
 	return thumbTop, thumbHeight, maxOffset, true
 }
@@ -2177,13 +2272,11 @@ func (m model) scrollbarTrackBounds() (x, top, bottom int, ok bool) {
 	if m.screen != screenChat || m.viewport.Width <= 0 || m.viewport.Height <= 0 {
 		return 0, 0, 0, false
 	}
-	panelTop := panelStyle.GetVerticalFrameSize() / 2
-	panelLeft := panelStyle.GetHorizontalFrameSize() / 2
-	mainPanelHeight := lipgloss.Height(m.renderMainPanel())
-	viewportTop := panelTop + max(0, mainPanelHeight-m.viewport.Height)
-	viewportBottom := viewportTop + m.viewport.Height - 1
-	scrollbarX := panelLeft + m.viewport.Width
-	return scrollbarX, viewportTop, viewportBottom, true
+	left, right, top, bottom, ok := m.conversationViewportBoundsByLayout()
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return right + 1, top, bottom, left >= 0
 }
 
 func (m *model) dragScrollbarTo(mouseY int) {
@@ -2198,15 +2291,36 @@ func (m *model) dragScrollbarTo(mouseY int) {
 	trackRange := max(0, m.viewport.Height-thumbHeight)
 	if trackRange == 0 {
 		m.viewport.SetYOffset(0)
+		m.syncCopyViewOffset()
 		return
 	}
 	desiredTop := mouseY - trackTop - m.scrollbarDragOffset
 	desiredTop = clamp(desiredTop, 0, trackRange)
-	offset := (desiredTop*maxOffset + trackRange/2) / trackRange
+	offset := roundedScaledDivision(desiredTop, maxOffset, trackRange)
 	m.viewport.SetYOffset(clamp(offset, 0, maxOffset))
+	m.syncCopyViewOffset()
+}
+
+func roundedScaledDivision(value, scale, denominator int) int {
+	if denominator <= 0 || value <= 0 || scale <= 0 {
+		return 0
+	}
+	// Use int64 math to avoid overflow when terminal dimensions are large.
+	numerator := int64(value)*int64(scale) + int64(denominator)/2
+	result := numerator / int64(denominator)
+	maxInt := int64(^uint(0) >> 1)
+	if result > maxInt {
+		return int(maxInt)
+	}
+	return int(result)
+}
+
+func stripANSIText(value string) string {
+	return xansi.Strip(value)
 }
 
 func (m model) renderLanding() string {
+	ensureZoneManager()
 	logo := landingLogoStyle.Render(strings.Join([]string{
 		"    ____        __                      _           __",
 		"   / __ )__  __/ /____  ____ ___  ____(_)___  ____/ /",
@@ -2218,7 +2332,7 @@ func (m model) renderLanding() string {
 	inputBox := landingInputStyle.Copy().
 		BorderForeground(m.modeAccentColor()).
 		Width(m.landingInputShellWidth()).
-		Render(m.input.View())
+		Render(zone.Mark(inputEditorZoneID, m.renderInputEditorView()))
 	parts := []string{logo, "", m.renderModeTabs(), ""}
 	if m.startupGuide.Active {
 		parts = append(parts, m.renderStartupGuidePanel(), "")
@@ -2235,9 +2349,10 @@ func (m model) renderLanding() string {
 }
 
 func (m model) renderFooter() string {
+	ensureZoneManager()
 	inputBorder := m.inputBorderStyle().
 		Width(m.chatPanelInnerWidth()).
-		Render(m.input.View())
+		Render(zone.Mark(inputEditorZoneID, m.renderInputEditorView()))
 	parts := make([]string, 0, 4)
 	if m.approval != nil {
 		parts = append(parts, m.renderApprovalBanner())
@@ -2655,9 +2770,13 @@ func (m *model) verifyAndFinalizeStartupAPIKey(rawInput string) error {
 	writtenPath, saveErr := config.UpsertProviderAPIKey(m.startupGuide.ConfigPath, apiKey)
 
 	if envName := strings.TrimSpace(checkCfg.APIKeyEnv); envName != "" {
-		_ = os.Setenv(envName, apiKey)
+		if err := os.Setenv(envName, apiKey); err != nil {
+			warnSetenv(envName, err)
+		}
 	} else {
-		_ = os.Setenv("BYTEMIND_API_KEY", apiKey)
+		if err := os.Setenv("BYTEMIND_API_KEY", apiKey); err != nil {
+			warnSetenv("BYTEMIND_API_KEY", err)
+		}
 	}
 
 	client, err := provider.NewClient(checkCfg)
@@ -3121,8 +3240,7 @@ func (m *model) runSkillsListCommand(input string) error {
 	} else {
 		lines = append(lines, "Available skills:")
 		for _, skill := range skillsList {
-			description := localizedSkillDescriptionForTUI(skill.Name, string(skill.Scope), skill.Description)
-			lines = append(lines, fmt.Sprintf("- %s (%s): %s", skill.Name, skill.Scope, description))
+			lines = append(lines, fmt.Sprintf("- %s (%s): %s", skill.Name, skill.Scope, skill.Description))
 		}
 	}
 	if len(diagnostics) > 0 {
@@ -3133,7 +3251,7 @@ func (m *model) runSkillsListCommand(input string) error {
 	}
 
 	m.appendCommandExchange(input, strings.Join(lines, "\n"))
-	m.statusNote = fmt.Sprintf("Discovered %d skills.", len(skillsList))
+	m.statusNote = fmt.Sprintf("Discovered %d skill(s).", len(skillsList))
 	return nil
 }
 
@@ -3141,118 +3259,15 @@ func (m *model) runSkillCommand(input string, fields []string) error {
 	if m.runner == nil {
 		return fmt.Errorf("runner is unavailable")
 	}
-	if len(fields) < 2 {
-		return fmt.Errorf("usage: /skill <author|clear|delete> ...")
-	}
-	switch strings.ToLower(strings.TrimSpace(fields[1])) {
-	case "author":
-		return m.runSkillAuthorCommand(input, fields)
-	case "clear":
-		return m.runSkillStateClearCommand(input, fields)
-	case "delete":
-		return m.runSkillDeleteCommand(input, fields)
-	default:
-		return fmt.Errorf("usage: /skill <author|clear|delete> ...")
-	}
-}
-
-func (m *model) runSkillAuthorCommand(input string, fields []string) error {
-	if len(fields) == 2 {
-		m.skillAuthorMode = true
-		m.skillAuthorName = ""
-		m.syncInputStyle()
-		m.appendCommandExchange(input, strings.Join([]string{
-			"Skill author mode enabled.",
-			"Step 1/2 (name): send only the skill name, for example `review-plus`.",
-			"Step 2/2 (content): after the name is set, send requirements to refine that skill.",
-			"Use `/skill author done` to exit this mode.",
-		}, "\n"))
-		m.statusNote = "Skill author mode: step 1/2 (name)"
-		return nil
-	}
-
-	control := strings.ToLower(strings.TrimSpace(fields[2]))
-	if len(fields) == 3 && (control == "done" || control == "exit" || control == "cancel") {
-		m.skillAuthorMode = false
-		m.skillAuthorName = ""
-		m.syncInputStyle()
-		m.appendCommandExchange(input, "Skill author mode closed.")
-		m.statusNote = "Skill author mode closed"
-		return nil
-	}
-
-	name, brief, err := parseSkillAuthorArgs(fields)
-	if err != nil {
-		return err
-	}
-	response, err := m.authorSkill(name, brief)
-	if err != nil {
-		return err
-	}
-	m.skillAuthorMode = true
-	m.skillAuthorName = name
-	m.syncInputStyle()
-
-	m.appendCommandExchange(input, response+"\nCurrent skill locked: `"+name+"`.\nNow in step 2/2 (content), keep sending requirements.")
-	m.statusNote = "Skill author mode: step 2/2 (content)"
-	return nil
-}
-
-func (m *model) runSkillStateClearCommand(input string, fields []string) error {
-	if len(fields) != 2 {
+	if len(fields) != 2 || fields[1] != "clear" {
 		return fmt.Errorf("usage: /skill clear")
 	}
 
-	activeName := ""
-	if m.sess != nil && m.sess.ActiveSkill != nil {
-		activeName = strings.TrimSpace(m.sess.ActiveSkill.Name)
-	}
 	if err := m.runner.ClearActiveSkill(m.sess); err != nil {
 		return err
 	}
-
-	message := "No active skill in this session; state remains empty."
-	if activeName != "" {
-		message = fmt.Sprintf("Cleared active skill `%s` from this session.", activeName)
-	}
-	m.appendCommandExchange(input, message)
-	m.statusNote = "Skill state cleared"
-	return nil
-}
-
-func (m *model) runSkillDeleteCommand(input string, fields []string) error {
-	if len(fields) < 3 {
-		return fmt.Errorf("usage: /skill delete <name>")
-	}
-	name := strings.TrimSpace(strings.TrimPrefix(fields[2], "/"))
-	if name == "" {
-		return fmt.Errorf("usage: /skill delete <name>")
-	}
-
-	result, err := m.runner.ClearSkill(name)
-	if err != nil {
-		return err
-	}
-
-	lines := []string{
-		fmt.Sprintf("Deleted project skill `%s`.", result.Name),
-		fmt.Sprintf("Dir: %s", result.Dir),
-	}
-
-	if m.sess != nil && m.sess.ActiveSkill != nil && strings.EqualFold(strings.TrimSpace(m.sess.ActiveSkill.Name), strings.TrimSpace(result.Name)) {
-		if clearErr := m.runner.ClearActiveSkill(m.sess); clearErr == nil {
-			lines = append(lines, "Cleared active skill in this session as well.")
-		}
-	}
-	if strings.EqualFold(strings.TrimSpace(m.skillAuthorName), strings.TrimSpace(result.Name)) {
-		m.skillAuthorName = ""
-		m.skillAuthorMode = false
-		m.syncInputStyle()
-		lines = append(lines, "Deleted skill matched author mode target; author mode closed.")
-	}
-
-	m.appendCommandExchange(input, strings.Join(lines, "\n"))
-	m.statusNote = "Skill deleted"
+	m.appendCommandExchange(input, "Active skill cleared.")
+	m.statusNote = "Skill cleared."
 	return nil
 }
 
@@ -3327,7 +3342,7 @@ func (m *model) activateSkillCommand(input, name string, args map[string]string)
 		response += "\nArgs: " + strings.Join(argParts, ", ")
 	}
 	m.appendCommandExchange(input, response)
-	m.statusNote = "Skill activated"
+	m.statusNote = "Skill activated."
 	return nil
 }
 
@@ -3352,147 +3367,6 @@ func parseSkillArgs(parts []string) (map[string]string, error) {
 		return nil, nil
 	}
 	return args, nil
-}
-
-func parseSkillAuthorArgs(fields []string) (string, string, error) {
-	if len(fields) < 3 {
-		return "", "", fmt.Errorf("usage: /skill author [name]")
-	}
-	name := strings.TrimSpace(strings.TrimPrefix(fields[2], "/"))
-	if name == "" {
-		return "", "", fmt.Errorf("usage: /skill author [name]")
-	}
-	brief := strings.TrimSpace(strings.Join(fields[3:], " "))
-	return name, brief, nil
-}
-
-func parseSkillAuthorModeInput(value string) (string, string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", "", fmt.Errorf("please provide a skill name first, for example: review-plus")
-	}
-	fields := strings.Fields(value)
-	if len(fields) == 0 {
-		return "", "", fmt.Errorf("please provide a skill name first, for example: review-plus")
-	}
-	if len(fields) > 1 {
-		return "", "", fmt.Errorf("stage 1/2 expects only a skill name, for example: review-plus")
-	}
-	name := strings.TrimSpace(strings.TrimPrefix(fields[0], "/"))
-	if !isValidSkillAuthorName(name) {
-		return "", "", fmt.Errorf("invalid skill name: use letters, digits, or . _ : - , for example `review-plus`")
-	}
-	brief := strings.TrimSpace(strings.TrimPrefix(value, fields[0]))
-	return name, brief, nil
-}
-
-func isValidSkillAuthorName(name string) bool {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return false
-	}
-
-	runes := []rune(name)
-	for i, r := range runes {
-		isASCIIAlpha := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
-		isASCIIDigit := r >= '0' && r <= '9'
-		if isASCIIAlpha || isASCIIDigit {
-			continue
-		}
-		if i > 0 && (r == '.' || r == '_' || r == ':' || r == '-') {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func (m model) submitSkillAuthorInput(value string) (tea.Model, tea.Cmd) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return m, nil
-	}
-	m.input.Reset()
-
-	name := strings.TrimSpace(m.skillAuthorName)
-	brief := value
-	if name == "" {
-		var err error
-		name, brief, err = parseSkillAuthorModeInput(value)
-		if err != nil {
-			m.statusNote = err.Error()
-			m.appendCommandExchange(value, "Skill author mode notice:\n"+err.Error())
-			return m, nil
-		}
-		response, err := m.authorSkill(name, "")
-		if err != nil {
-			m.statusNote = err.Error()
-			m.appendCommandExchange(value, "Skill author mode notice:\n"+err.Error())
-			return m, nil
-		}
-		m.skillAuthorMode = true
-		m.skillAuthorName = name
-		m.syncInputStyle()
-		response += "\nEntered step 2/2 (content).\nContinue describing requirements; use `/skill author done` to exit."
-		m.appendCommandExchange(value, response)
-		m.statusNote = "Skill author mode: step 2/2 (content)"
-		return m, m.loadSessionsCmd()
-	}
-
-	response, err := m.authorSkill(name, brief)
-	if err != nil {
-		m.statusNote = err.Error()
-		m.appendCommandExchange(value, "Skill author mode notice:\n"+err.Error())
-		return m, nil
-	}
-
-	m.skillAuthorMode = true
-	m.skillAuthorName = name
-	m.syncInputStyle()
-	response += "\nCurrent step: 2/2 (content). Keep sending updates to refine; use `/skill author done` to exit."
-	m.appendCommandExchange(value, response)
-	m.statusNote = "Skill author mode: step 2/2 (content)"
-	return m, m.loadSessionsCmd()
-}
-
-func (m *model) authorSkill(name, brief string) (string, error) {
-	result, err := m.runner.AuthorSkill(name, brief)
-	if err != nil {
-		return "", err
-	}
-
-	state := "updated"
-	if result.Created {
-		state = "created"
-	} else {
-		state = "updated"
-	}
-	lines := []string{
-		fmt.Sprintf("Skill `%s` %s.", result.Name, state),
-		fmt.Sprintf("Dir: %s", result.Dir),
-		fmt.Sprintf("Manifest: %s", result.ManifestPath),
-		fmt.Sprintf("Skill doc: %s", result.SkillPath),
-		fmt.Sprintf("Activate with `/%s`.", result.Name),
-	}
-	if strings.TrimSpace(brief) == "" {
-		lines = append(lines, "Next: describe requirements in natural language and continue refining this skill.")
-	}
-
-	skillsList, diagnostics := m.runner.ListSkills()
-	for _, skill := range skillsList {
-		if !strings.EqualFold(strings.TrimSpace(skill.Name), strings.TrimSpace(result.Name)) {
-			continue
-		}
-		lines = append(lines, fmt.Sprintf("Resolved as: `%s` (%s).", skill.Name, skill.Scope))
-		break
-	}
-	for _, diag := range diagnostics {
-		if !strings.EqualFold(strings.TrimSpace(diag.Skill), strings.TrimSpace(result.Name)) {
-			continue
-		}
-		lines = append(lines, fmt.Sprintf("Diagnostic [%s] %s: %s", diag.Level, diag.Path, diag.Message))
-	}
-	return strings.Join(lines, "\n"), nil
 }
 
 func (m *model) appendCommandExchange(command, response string) {
@@ -3544,12 +3418,9 @@ func (m *model) newSession() error {
 	m.pendingBTW = nil
 	m.interrupting = false
 	m.interruptSafe = false
-	m.skillAuthorMode = false
-	m.skillAuthorName = ""
 	m.runCancel = nil
 	m.activeRunID = 0
 	m.input.Reset()
-	m.syncInputStyle()
 	if m.width > 0 && m.height > 0 {
 		m.syncLayoutForCurrentScreen()
 		m.refreshViewport()
@@ -3596,11 +3467,8 @@ func (m *model) resumeSession(prefix string) error {
 	m.pendingBTW = nil
 	m.interrupting = false
 	m.interruptSafe = false
-	m.skillAuthorMode = false
-	m.skillAuthorName = ""
 	m.runCancel = nil
 	m.activeRunID = 0
-	m.syncInputStyle()
 	if m.width > 0 && m.height > 0 {
 		m.syncLayoutForCurrentScreen()
 		m.refreshViewport()
@@ -4578,6 +4446,12 @@ func shouldRenderThinkingFromDelta(body string) bool {
 		"approach",
 		"systematically",
 		"through build and test",
+		"\u6211\u4f1a\u5148",
+		"\u5148\u4e86\u89e3",
+		"\u7136\u540e",
+		"\u6700\u540e",
+		"\u901a\u8fc7\u6784\u5efa\u548c\u6d4b\u8bd5",
+		"\u7cfb\u7edf\u6027",
 	}
 	for _, marker := range reasoningMarkers {
 		if strings.Contains(lower, marker) || strings.Contains(text, marker) {
@@ -4805,9 +4679,9 @@ func (m model) skillCommandItems() []commandItem {
 		}
 		seen[key] = struct{}{}
 
-		description := localizedSkillDescriptionForTUI(skill.Name, string(skill.Scope), skill.Description)
+		description := strings.TrimSpace(skill.Description)
 		if description == "" {
-			description = fmt.Sprintf("Activate %s in this session.", skill.Name)
+			description = fmt.Sprintf("Activate %s for this session.", skill.Name)
 		}
 		items = append(items, commandItem{
 			Name:        name,
@@ -4820,18 +4694,6 @@ func (m model) skillCommandItems() []commandItem {
 		return items[i].Usage < items[j].Usage
 	})
 	return items
-}
-
-func localizedSkillDescriptionForTUI(name, scope, fallback string) string {
-	fallback = strings.TrimSpace(fallback)
-	if !strings.EqualFold(strings.TrimSpace(scope), "builtin") {
-		return fallback
-	}
-	key := strings.ToLower(strings.TrimSpace(name))
-	if localized, ok := builtinSkillDescriptionsCN[key]; ok {
-		return localized
-	}
-	return fallback
 }
 
 func (m model) commandPaletteWidth() int {
@@ -4900,7 +4762,7 @@ func shouldExecuteFromPalette(item commandItem) bool {
 		return true
 	}
 	switch item.Name {
-	case "/help", "/session", "/skills", "/skill author", "/skill clear", "/new", "/compact", "/quit":
+	case "/help", "/session", "/skills", "/skill clear", "/new", "/compact", "/quit":
 		return true
 	default:
 		return false
@@ -4917,13 +4779,9 @@ func (m model) helpText() string {
 		"Slash commands",
 		"/help: show this help inside the conversation.",
 		"/session: open recent sessions.",
-		"/skills: list available skills and diagnostics.",
+		"/skills: list discovered skills and diagnostics.",
 		"/<skill-name> [k=v...]: activate a skill for this session.",
-		"/skill author: enter skill author mode (name first, then content).",
-		"/skill author [name]: create/update the skill and enter content stage.",
-		"/skill author done: exit skill author mode.",
-		"/skill clear: clear the active skill in this session.",
-		"/skill delete <name>: delete the specified project skill.",
+		"/skill clear: clear the active skill.",
 		"/new: start a fresh session.",
 		"/compact: summarize long history into a compact continuation context.",
 		"/btw <message>: interject while a run is in progress.",
@@ -4934,12 +4792,13 @@ func (m model) helpText() string {
 		"Plan mode keeps the plan panel visible and focused on structured steps.",
 		"Use Ctrl+G to open or close the help panel.",
 		"Use Ctrl+F to search prompt history and restore previous input.",
+		"Drag across the conversation with the left mouse button to select text, then press Ctrl+C to copy it.",
 		"If provider setup is required, paste an API key in the input and press Enter.",
 		"Long pasted code/text is compressed to [Paste #N ~X lines].",
 		"Use [Paste], [Paste #N], [Paste line3], or [Paste #N line3~line7] to expand references.",
 		"After restoring a session with a saved plan, type 'continue execution' to resume it.",
 		"Approval requests appear above the input area when a shell command needs confirmation.",
-		"The footer keeps only the essential shortcuts: tab agents, / commands, Ctrl+F history, Ctrl+L sessions, Ctrl+C quit.",
+		"The footer keeps only the essential shortcuts: tab agents, / commands, drag select, Ctrl+C copy/quit, Ctrl+F history, Ctrl+L sessions.",
 	}, "\n")
 }
 func visibleCommandItems(group string) []commandItem {
@@ -5091,30 +4950,11 @@ func (m model) modeAccentColor() lipgloss.Color {
 func (m *model) syncInputStyle() {
 	if m.startupGuide.Active {
 		m.input.Placeholder = startupGuideInputPlaceholder(m.startupGuide.CurrentField)
-	} else if m.skillAuthorMode {
-		m.input.Placeholder = m.skillAuthorInputPlaceholder()
 	} else {
 		m.input.Placeholder = "Ask Bytemind to inspect, change, or verify this workspace..."
 	}
 	m.input.Prompt = ""
-	setInputHeightSafe(&m.input, 2)
-}
-
-func (m model) skillAuthorInputPlaceholder() string {
-	if strings.TrimSpace(m.skillAuthorName) == "" {
-		return "Skill author mode step 1/2: enter only the skill name, for example: review-plus"
-	}
-	return "Skill author mode step 2/2 (" + strings.TrimSpace(m.skillAuthorName) + "): enter skill content and requirements..."
-}
-
-func setInputHeightSafe(input *textarea.Model, height int) {
-	if input == nil {
-		return
-	}
-	defer func() {
-		_ = recover()
-	}()
-	input.SetHeight(height)
+	m.input.SetHeight(2)
 }
 
 func startupGuideInputHint(field string) string {

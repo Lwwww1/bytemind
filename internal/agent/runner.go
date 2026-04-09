@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"bytemind/internal/config"
 	"bytemind/internal/history"
@@ -15,6 +16,7 @@ import (
 	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 	"bytemind/internal/skills"
+	"bytemind/internal/tokenusage"
 	"bytemind/internal/tools"
 )
 
@@ -24,6 +26,8 @@ const (
 	maxActiveSkillInstructionsChars = 3600
 	emptyAllowlistSentinel          = "__bytemind__no_tools__"
 	emptyReplyFallback              = "Model returned an empty response (no text and no tool calls). Retry the request or switch model if this persists."
+	skillAuthorEnglishFallback      = "Describe the skill goals, workflow, and expected output in concise English."
+	skillAuthorTranslatePrompt      = "Translate the user's skill description into concise English for backend metadata. Return only plain English text with no markdown or quotes."
 )
 
 const (
@@ -44,6 +48,7 @@ type Options struct {
 	Store        *session.Store
 	Registry     *tools.Registry
 	SkillManager *skills.Manager
+	TokenManager *tokenusage.TokenUsageManager
 	Observer     Observer
 	Approval     tools.ApprovalHandler
 	Stdin        io.Reader
@@ -63,10 +68,26 @@ type Runner struct {
 	store        *session.Store
 	registry     *tools.Registry
 	skillManager *skills.Manager
+	tokenManager *tokenusage.TokenUsageManager
 	observer     Observer
 	approval     tools.ApprovalHandler
 	stdin        io.Reader
 	stdout       io.Writer
+}
+
+type TokenRealtimeSnapshot struct {
+	SessionID            string
+	SessionInputTokens   int64
+	SessionOutputTokens  int64
+	SessionContextTokens int64
+	SessionTotalTokens   int64
+	GlobalTotalTokens    int64
+	CurrentTPS           float64
+	PeakTPS              float64
+	ActiveSessions       int
+	ErrorRate            float64
+	AvgLatency           time.Duration
+	GeneratedAt          time.Time
 }
 
 func NewRunner(opts Options) *Runner {
@@ -81,6 +102,7 @@ func NewRunner(opts Options) *Runner {
 		store:        opts.Store,
 		registry:     opts.Registry,
 		skillManager: manager,
+		tokenManager: opts.TokenManager,
 		observer:     opts.Observer,
 		approval:     opts.Approval,
 		stdin:        opts.Stdin,
@@ -96,11 +118,66 @@ func (r *Runner) SetApprovalHandler(handler tools.ApprovalHandler) {
 	r.approval = handler
 }
 
+func (r *Runner) HasTokenManager() bool {
+	return r != nil && r.tokenManager != nil
+}
+
+func (r *Runner) TokenRealtimeEnabled() bool {
+	return r != nil && r.tokenManager != nil && r.config.TokenUsage.EnableRealtime
+}
+
+func (r *Runner) GetTokenRealtimeSnapshot(sessionID string) (TokenRealtimeSnapshot, error) {
+	var snapshot TokenRealtimeSnapshot
+	if r == nil || r.tokenManager == nil {
+		return snapshot, fmt.Errorf("token manager unavailable")
+	}
+	realtime, err := r.tokenManager.GetRealtimeStats()
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.GlobalTotalTokens = realtime.TotalTokens
+	snapshot.CurrentTPS = realtime.Metrics.CurrentTPS
+	snapshot.PeakTPS = realtime.Metrics.PeakTPS
+	snapshot.ActiveSessions = realtime.Metrics.ActiveSessions
+	snapshot.ErrorRate = realtime.Metrics.ErrorRate
+	snapshot.AvgLatency = realtime.Metrics.Latency
+	snapshot.GeneratedAt = realtime.GeneratedAt
+	snapshot.SessionID = strings.TrimSpace(sessionID)
+
+	if snapshot.SessionID != "" {
+		for _, stats := range realtime.Sessions {
+			if stats == nil || stats.SessionID != snapshot.SessionID {
+				continue
+			}
+			snapshot.SessionInputTokens = stats.InputTokens
+			snapshot.SessionOutputTokens = stats.OutputTokens
+			snapshot.SessionTotalTokens = stats.TotalTokens
+			break
+		}
+	}
+	return snapshot, nil
+}
+
 func (r *Runner) ListSkills() ([]skills.Skill, []skills.Diagnostic) {
 	if r.skillManager == nil {
 		return nil, nil
 	}
 	return r.skillManager.List()
+}
+
+func (r *Runner) AuthorSkill(name, brief string) (skills.AuthorResult, error) {
+	if r.skillManager == nil {
+		return skills.AuthorResult{}, fmt.Errorf("skill manager is unavailable")
+	}
+	brief = r.normalizeSkillAuthorBrief(brief)
+	return r.skillManager.Author(name, skills.ScopeProject, brief)
+}
+
+func (r *Runner) ClearSkill(name string) (skills.ClearResult, error) {
+	if r.skillManager == nil {
+		return skills.ClearResult{}, fmt.Errorf("skill manager is unavailable")
+	}
+	return r.skillManager.Clear(name)
 }
 
 func (r *Runner) ActivateSkill(sess *session.Session, name string, args map[string]string) (skills.Skill, error) {
@@ -231,8 +308,9 @@ func (r *Runner) RunPromptWithInput(ctx context.Context, sess *session.Session, 
 	availableTools := toolNames(r.registry.DefinitionsForMode(runMode))
 	instructionText := loadAGENTSInstruction(r.workspace)
 	webLookupInstruction := explicitWebLookupInstruction(userInput)
+	promptTokens := int(tokenusage.ApproximateRequestTokens([]llm.Message{userMessage}))
 
-	for step := 0; step < r.config.MaxIterations; step++ {
+	buildTurnMessages := func() ([]llm.Message, error) {
 		messages := make([]llm.Message, 0, len(sess.Messages)+2)
 		systemMessage := llm.NewTextMessage(llm.RoleSystem, systemPrompt(PromptInput{
 			Workspace:      r.workspace,
@@ -245,17 +323,41 @@ func (r *Runner) RunPromptWithInput(ctx context.Context, sess *session.Session, 
 			Instruction:    instructionText,
 		}))
 		if err := llm.ValidateMessage(systemMessage); err != nil {
-			return "", err
+			return nil, err
 		}
 		messages = append(messages, systemMessage)
 		if webLookupInstruction != "" {
 			webLookupMessage := llm.NewTextMessage(llm.RoleSystem, webLookupInstruction)
 			if err := llm.ValidateMessage(webLookupMessage); err != nil {
-				return "", err
+				return nil, err
 			}
 			messages = append(messages, webLookupMessage)
 		}
 		messages = append(messages, sess.Messages...)
+		return messages, nil
+	}
+
+	for step := 0; step < r.config.MaxIterations; step++ {
+		messages, err := buildTurnMessages()
+		if err != nil {
+			return "", err
+		}
+		if step == 0 {
+			requestTokens := int(tokenusage.ApproximateRequestTokens(messages))
+			compacted, compactErr := r.maybeAutoCompactSession(ctx, sess, promptTokens, requestTokens)
+			if compactErr != nil {
+				return "", compactErr
+			}
+			if compacted {
+				if out != nil {
+					fmt.Fprintf(out, "%scontext compacted to fit long-history budget%s\n", ansiDim, ansiReset)
+				}
+				messages, err = buildTurnMessages()
+				if err != nil {
+					return "", err
+				}
+			}
+		}
 
 		filteredTools := r.registry.DefinitionsForModeWithFilters(runMode, allowedToolNames, deniedToolNames)
 		caps := llm.DefaultModelCapabilities.Resolve(r.config.Provider.Model)
@@ -274,11 +376,18 @@ func (r *Runner) RunPromptWithInput(ctx context.Context, sess *session.Session, 
 		}
 
 		streamedText := false
+		turnStart := time.Now()
 		reply, err := r.completeTurn(ctx, request, out, &streamedText)
+		turnLatency := time.Since(turnStart)
 		if err != nil {
+			estimatedUsage := r.resolveTurnUsage(request, nil)
+			r.recordTokenUsage(ctx, sess, request, estimatedUsage, turnLatency, false)
 			return "", err
 		}
 		reply.Normalize()
+		turnUsage := r.resolveTurnUsage(request, &reply)
+		r.recordTokenUsage(ctx, sess, request, turnUsage, turnLatency, true)
+		r.emitUsageEvent(sess, &turnUsage)
 
 		if len(reply.ToolCalls) == 0 {
 			answer := strings.TrimSpace(reply.Content)
@@ -418,6 +527,85 @@ func (r *Runner) RunPromptWithInput(ctx context.Context, sess *session.Session, 
 	return r.finishWithSummary(sess, summary, out, false)
 }
 
+func (r *Runner) emitUsageEvent(sess *session.Session, usage *llm.Usage) {
+	if sess == nil || usage == nil {
+		return
+	}
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.ContextTokens == 0 && usage.TotalTokens == 0 {
+		return
+	}
+	r.emit(Event{
+		Type:      EventUsageUpdated,
+		SessionID: sess.ID,
+		Usage:     *usage,
+	})
+}
+
+func (r *Runner) recordTokenUsage(ctx context.Context, sess *session.Session, request llm.ChatRequest, usage llm.Usage, latency time.Duration, success bool) {
+	if r.tokenManager == nil || sess == nil {
+		return
+	}
+
+	req := &tokenusage.TokenRecordRequest{
+		SessionID:    sess.ID,
+		ModelName:    request.Model,
+		InputTokens:  int64(max(0, usage.InputTokens+usage.ContextTokens)),
+		OutputTokens: int64(max(0, usage.OutputTokens)),
+		RequestID:    time.Now().UTC().Format("20060102150405.000000000"),
+		Latency:      latency,
+		Success:      success,
+		Metadata: map[string]string{
+			"workspace": sess.Workspace,
+		},
+	}
+	if err := r.tokenManager.RecordTokenUsage(ctx, req); err != nil && r.stdout != nil {
+		fmt.Fprintf(r.stdout, "%swarning%s token usage record failed: %v\n", ansiDim, ansiReset, err)
+	}
+}
+
+func (r *Runner) resolveTurnUsage(request llm.ChatRequest, reply *llm.Message) llm.Usage {
+	if reply != nil && reply.Usage != nil {
+		usage := *reply.Usage
+		input := max(0, usage.InputTokens)
+		output := max(0, usage.OutputTokens)
+		context := max(0, usage.ContextTokens)
+		total := usage.TotalTokens
+		if total <= 0 {
+			total = input + output + context
+		}
+		return llm.Usage{
+			InputTokens:   input,
+			OutputTokens:  output,
+			ContextTokens: context,
+			TotalTokens:   max(0, total),
+		}
+	}
+
+	input := int(tokenusage.ApproximateRequestTokens(request.Messages))
+	output := 0
+	if reply != nil {
+		output += int(tokenusage.ApproximateTokens(reply.Content))
+		for _, call := range reply.ToolCalls {
+			output += int(tokenusage.ApproximateTokens(call.Function.Name))
+			output += int(tokenusage.ApproximateTokens(call.Function.Arguments))
+		}
+	}
+	total := input + output
+	return llm.Usage{
+		InputTokens:   max(0, input),
+		OutputTokens:  max(0, output),
+		ContextTokens: 0,
+		TotalTokens:   max(0, total),
+	}
+}
+
+func (r *Runner) Close() error {
+	if r == nil || r.tokenManager == nil {
+		return nil
+	}
+	return r.tokenManager.Close()
+}
+
 func (r *Runner) completeTurn(ctx context.Context, request llm.ChatRequest, out io.Writer, streamedText *bool) (llm.Message, error) {
 	if !r.config.Stream {
 		return r.client.CreateMessage(ctx, request)
@@ -471,11 +659,20 @@ func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 				Path string `json:"path"`
 				Type string `json:"type"`
 			} `json:"items"`
+			Truncated bool   `json:"truncated"`
+			Reason    string `json:"reason"`
 		}
 		if err := json.Unmarshal([]byte(payload), &result); err == nil {
 			fmt.Fprintf(out, "  %slisted%s %d entries under %s\n", ansiGreen, ansiReset, len(result.Items), emptyDot(result.Root))
 			for _, item := range previewPaths(result.Items) {
 				fmt.Fprintf(out, "    %s\n", item)
+			}
+			if result.Truncated {
+				reason := strings.TrimSpace(result.Reason)
+				if reason == "" {
+					reason = "visit_limit"
+				}
+				fmt.Fprintf(out, "    %sstopped early%s (%s); narrow path/depth for large trees\n", ansiDim, ansiReset, reason)
 			}
 		}
 	case "read_file":
@@ -501,11 +698,20 @@ func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 				Line int    `json:"line"`
 				Text string `json:"text"`
 			} `json:"matches"`
+			Truncated bool   `json:"truncated"`
+			Reason    string `json:"reason"`
 		}
 		if err := json.Unmarshal([]byte(payload), &result); err == nil {
 			fmt.Fprintf(out, "  %sfound%s %d matches for %q\n", ansiGreen, ansiReset, len(result.Matches), result.Query)
 			for _, match := range previewMatches(result.Matches) {
 				fmt.Fprintf(out, "    %s\n", match)
+			}
+			if result.Truncated {
+				reason := strings.TrimSpace(result.Reason)
+				if reason == "" {
+					reason = "scan_budget"
+				}
+				fmt.Fprintf(out, "    %sstopped early%s (%s); narrow the search path and retry\n", ansiDim, ansiReset, reason)
 			}
 		}
 	case "web_search":
@@ -1004,4 +1210,62 @@ func explicitWebLookupInstruction(userInput string) string {
 	}
 
 	return "The user explicitly requested online or GitHub-source lookup. Use web_search/web_fetch first. Do not substitute local-workspace tools (list_files/read_file/search_text) for this request unless the user explicitly asks to inspect the current workspace repository."
+}
+
+func (r *Runner) normalizeSkillAuthorBrief(brief string) string {
+	brief = strings.TrimSpace(brief)
+	if brief == "" {
+		return ""
+	}
+	if !containsHanRune(brief) {
+		return brief
+	}
+
+	translated, err := r.translateSkillBriefToEnglish(brief)
+	if err != nil {
+		return skillAuthorEnglishFallback
+	}
+	translated = strings.TrimSpace(translated)
+	if translated == "" || containsHanRune(translated) {
+		return skillAuthorEnglishFallback
+	}
+	return translated
+}
+
+func (r *Runner) translateSkillBriefToEnglish(brief string) (string, error) {
+	if strings.TrimSpace(brief) == "" {
+		return "", nil
+	}
+	if r.client == nil {
+		return "", fmt.Errorf("llm client is unavailable")
+	}
+	model := strings.TrimSpace(r.config.Provider.Model)
+	if model == "" {
+		return "", fmt.Errorf("model is required for translation")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	reply, err := r.client.CreateMessage(ctx, llm.ChatRequest{
+		Model: model,
+		Messages: []llm.Message{
+			llm.NewTextMessage(llm.RoleSystem, skillAuthorTranslatePrompt),
+			llm.NewUserTextMessage(strings.TrimSpace(brief)),
+		},
+		Temperature: 0,
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(reply.Text()), nil
+}
+
+func containsHanRune(text string) bool {
+	for _, r := range text {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
 }

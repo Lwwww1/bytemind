@@ -71,6 +71,16 @@ var (
 	footerHintStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "246", Dark: "240"})
 
+	footerHintKeyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F5F5F5")).
+				Bold(true)
+
+	footerHintLabelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#8D97A6"))
+
+	footerHintDividerStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#5C6675"))
+
 	modeBuildActiveStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#6CB6FF")).
 				Bold(true)
@@ -105,6 +115,16 @@ var (
 
 	chatBodyStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#D8D8D8"))
+
+	selectionToastStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#DFF7E8")).
+				Background(lipgloss.Color("#163423")).
+				Padding(0, 1).
+				Bold(true)
+
+	selectionHighlightStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#0B1118")).
+				Background(lipgloss.Color("#9CCBFF"))
 
 	assistantHeading1Style = lipgloss.NewStyle().
 				Bold(true).

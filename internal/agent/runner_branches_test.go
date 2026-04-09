@@ -204,12 +204,12 @@ func TestToolNamesDeduplicatesAndSkipsBlank(t *testing.T) {
 }
 
 func TestExplicitWebLookupInstruction(t *testing.T) {
-	got := explicitWebLookupInstruction("请去 GitHub 找这个项目的源码实现")
+	got := explicitWebLookupInstruction("Find the implementation in the GitHub source repository")
 	if !strings.Contains(got, "web_search/web_fetch") {
 		t.Fatalf("expected explicit web lookup instruction, got %q", got)
 	}
 
-	if got := explicitWebLookupInstruction("请在当前仓库用 search_text 找 TODO"); got != "" {
+	if got := explicitWebLookupInstruction("Use search_text in the current workspace to find TODO"); got != "" {
 		t.Fatalf("expected no explicit web lookup instruction, got %q", got)
 	}
 }

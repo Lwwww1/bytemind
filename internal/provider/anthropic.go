@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -92,6 +91,12 @@ func (c *Anthropic) CreateMessage(ctx context.Context, req llm.ChatRequest) (llm
 			Input    json.RawMessage `json:"input"`
 			Thinking string          `json:"thinking"`
 		} `json:"content"`
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &completion); err != nil {
 		return llm.Message{}, err
@@ -126,6 +131,16 @@ func (c *Anthropic) CreateMessage(ctx context.Context, req llm.ChatRequest) (llm
 		}
 	}
 	message.Normalize()
+	contextTokens := max(0, completion.Usage.CacheReadInputTokens) + max(0, completion.Usage.CacheCreationInputTokens)
+	total := max(0, completion.Usage.InputTokens) + max(0, completion.Usage.OutputTokens) + contextTokens
+	if total > 0 {
+		message.Usage = &llm.Usage{
+			InputTokens:   max(0, completion.Usage.InputTokens),
+			OutputTokens:  max(0, completion.Usage.OutputTokens),
+			ContextTokens: contextTokens,
+			TotalTokens:   total,
+		}
+	}
 	return message, nil
 }
 
@@ -197,12 +212,14 @@ func anthropicMessages(req llm.ChatRequest) (string, []map[string]any, error) {
 				case llm.PartText:
 					blocks = append(blocks, map[string]any{"type": "text", "text": part.Text.Value})
 				case llm.PartImageRef:
-					asset, ok := req.Assets[part.Image.AssetID]
-					if !ok {
-						return "", nil, llm.WrapError("anthropic", llm.ErrorCodeAssetNotFound, fmt.Errorf("asset %q not found", part.Image.AssetID))
+					assetID := llm.AssetID("")
+					if part.Image != nil {
+						assetID = part.Image.AssetID
 					}
-					if len(asset.Data) == 0 {
-						return "", nil, llm.WrapError("anthropic", llm.ErrorCodeAssetNotFound, fmt.Errorf("asset %q has empty payload", part.Image.AssetID))
+					asset, ok := req.Assets[assetID]
+					if !ok || len(asset.Data) == 0 {
+						blocks = append(blocks, map[string]any{"type": "text", "text": missingImageAssetFallback(assetID)})
+						continue
 					}
 					mediaType := strings.TrimSpace(asset.MediaType)
 					if mediaType == "" {

@@ -112,6 +112,7 @@ func TestRunPromptStreamsAssistantReplyAndEmitsObserverEvents(t *testing.T) {
 	for _, event := range events {
 		eventTypes = append(eventTypes, event.Type)
 	}
+	eventTypes = stripUsageUpdated(eventTypes)
 	wantTypes := []EventType{
 		EventRunStarted,
 		EventAssistantDelta,
@@ -272,6 +273,7 @@ func TestRunPromptUpdatePlanSyncsSessionAndEmitsPlanEvent(t *testing.T) {
 	for _, event := range events {
 		eventTypes = append(eventTypes, event.Type)
 	}
+	eventTypes = stripUsageUpdated(eventTypes)
 	wantTypes := []EventType{
 		EventRunStarted,
 		EventToolCallStarted,
@@ -283,9 +285,27 @@ func TestRunPromptUpdatePlanSyncsSessionAndEmitsPlanEvent(t *testing.T) {
 	if !slices.Equal(eventTypes, wantTypes) {
 		t.Fatalf("unexpected event sequence: got=%v want=%v", eventTypes, wantTypes)
 	}
-	if len(events[3].Plan.Steps) != 2 || events[3].Plan.Steps[1].Title != "Add tests" {
-		t.Fatalf("expected plan in event, got %#v", events[3])
+	var planEvent *Event
+	for i := range events {
+		if events[i].Type == EventPlanUpdated {
+			planEvent = &events[i]
+			break
+		}
 	}
+	if planEvent == nil || len(planEvent.Plan.Steps) != 2 || planEvent.Plan.Steps[1].Title != "Add tests" {
+		t.Fatalf("expected plan in event, got %#v", events)
+	}
+}
+
+func stripUsageUpdated(in []EventType) []EventType {
+	out := make([]EventType, 0, len(in))
+	for _, t := range in {
+		if t == EventUsageUpdated {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 func TestRunPromptSystemPromptIncludesToolCatalog(t *testing.T) {
@@ -416,7 +436,7 @@ func TestRunPromptInjectsExplicitWebLookupInstruction(t *testing.T) {
 		Stdout:   io.Discard,
 	})
 
-	if _, err := runner.RunPrompt(context.Background(), sess, "去 GitHub 源码里找这个函数实现", "build", io.Discard); err != nil {
+	if _, err := runner.RunPrompt(context.Background(), sess, "Find this function implementation in the GitHub source", "build", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.requests) != 1 {

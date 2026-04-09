@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -29,26 +31,60 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
+	zone "github.com/lrstanley/bubblezone"
 	"github.com/mattn/go-runewidth"
 )
 
 const (
-	defaultSessionLimit   = 8
-	scrollStep            = 3
-	scrollbarWidth        = 1
-	commandPageSize       = 3
-	mentionPageSize       = 5
-	maxPendingBTW         = 5
-	promptSearchPageSize  = 5
-	promptSearchLoadLimit = 50000
-	promptSearchResultCap = 200
-	pasteSubmitGuard      = 400 * time.Millisecond
-	assistantLabel        = "Bytemind"
-	thinkingLabel         = "Bytemind"
-	chatTitleLabel        = "Bytemind Chat"
-	tuiTitleLabel         = "Bytemind TUI"
-	footerHintText        = "tab agents | / commands | Ctrl+F history | Ctrl+L sessions | Ctrl+C quit"
+	defaultSessionLimit        = 8
+	scrollStep                 = 3
+	scrollbarWidth             = 1
+	mouseZoneAutoProbeMaxDelta = 4
+	commandPageSize            = 3
+	mentionPageSize            = 5
+	maxPendingBTW              = 5
+	promptSearchPageSize       = 5
+	promptSearchLoadLimit      = 50000
+	promptSearchResultCap      = 200
+	pasteSubmitGuard           = 400 * time.Millisecond
+	mouseSelectionScrollTick   = 60 * time.Millisecond
+	assistantLabel             = "Bytemind"
+	thinkingLabel              = "Bytemind"
+	chatTitleLabel             = "Bytemind Chat"
+	tuiTitleLabel              = "Bytemind TUI"
+	footerHintText             = "tab agents | / commands | drag select | Ctrl+C copy/quit | Ctrl+F history | Ctrl+L sessions"
+	conversationViewportZoneID = "bytemind:conversation:viewport"
+	inputEditorZoneID          = "bytemind:input:editor"
 )
+
+type footerShortcutHint struct {
+	Key   string
+	Label string
+}
+
+var footerShortcutHints = []footerShortcutHint{
+	{Key: "tab", Label: "agents"},
+	{Key: "/", Label: "commands"},
+	{Key: "Ctrl+F", Label: "history"},
+	{Key: "Ctrl+L", Label: "sessions"},
+	{Key: "Ctrl+C", Label: "copy/quit"},
+}
+
+var promptSearchFilterHints = []footerShortcutHint{
+	{Key: "ws:<kw>", Label: "workspace"},
+	{Key: "sid:<kw>", Label: "session"},
+}
+
+var promptSearchActionHints = []footerShortcutHint{
+	{Key: "PgUp/PgDn", Label: "page"},
+	{Key: "Ctrl+F", Label: "next"},
+	{Key: "Ctrl+S", Label: "prev"},
+	{Key: "Enter", Label: "apply"},
+	{Key: "Esc", Label: "close"},
+}
+
+var zoneInitOnce sync.Once
 
 type screenKind string
 
@@ -91,6 +127,22 @@ type chatEntry struct {
 	Meta   string
 	Body   string
 	Status string
+}
+
+type viewportSelectionPoint struct {
+	Col int
+	Row int
+}
+
+type viewportTopLookupCache struct {
+	left           int
+	expectedTop    int
+	viewportWidth  int
+	viewportHeight int
+	viewportOffset int
+	top            int
+	found          bool
+	valid          bool
 }
 
 type commandItem struct {
@@ -159,10 +211,19 @@ type tokenUsagePulledMsg struct {
 	Err     error
 }
 
+type selectionToastExpiredMsg struct {
+	ID int
+}
+
+type mouseSelectionScrollTickMsg struct {
+	ID int
+}
+
 var commandItems = []commandItem{
 	{Name: "/help", Usage: "/help", Description: "Show usage and supported commands.", Kind: "command"},
 	{Name: "/session", Usage: "/session", Description: "Open the recent session list.", Kind: "command"},
 	{Name: "/new", Usage: "/new", Description: "Start a fresh session in this workspace.", Kind: "command"},
+	{Name: "/compact", Usage: "/compact", Description: "Compress long session history into a continuation summary.", Kind: "command"},
 	{Name: "/btw", Usage: "/btw <message>", Description: "Interject while a run is in progress.", Kind: "command"},
 	{Name: "/quit", Usage: "/quit", Description: "Exit the current TUI window.", Kind: "command"},
 	{Name: "/skills", Usage: "/skills", Description: "List available skills and current active skill.", Kind: "command"},
@@ -182,10 +243,13 @@ type model struct {
 
 	async    chan tea.Msg
 	viewport viewport.Model
+	copyView viewport.Model
 	planView viewport.Model
 	input    textarea.Model
 	spinner  spinner.Model
 
+	viewportContentCache  string
+	viewportTopCache      viewportTopLookupCache
 	chatItems             []chatEntry
 	toolRuns              []toolRun
 	plan                  planpkg.State
@@ -219,12 +283,26 @@ type model struct {
 	chatAutoFollow        bool
 	draggingScrollbar     bool
 	scrollbarDragOffset   int
+	mouseSelecting        bool
+	mouseSelectionMouseX  int
+	mouseSelectionMouseY  int
+	mouseSelectionTickID  int
+	mouseSelectionActive  bool
+	mouseSelectionStart   viewportSelectionPoint
+	mouseSelectionEnd     viewportSelectionPoint
+	inputMouseSelecting   bool
+	inputSelectionActive  bool
+	inputSelectionStart   viewportSelectionPoint
+	inputSelectionEnd     viewportSelectionPoint
+	selectionToast        string
+	selectionToastID      int
 	tokenUsage            tokenUsageComponent
 	tokenUsedTotal        int
 	tokenBudget           int
 	tokenInput            int
 	tokenOutput           int
 	tokenContext          int
+	tokenHasOfficialUsage bool
 	tempEstimatedOutput   int
 	tokenEstimator        *realtimeTokenEstimator
 	promptHistoryLoaded   bool
@@ -238,7 +316,13 @@ type model struct {
 	inputImageMentions    map[string]llm.AssetID
 	orphanedImages        map[llm.AssetID]time.Time
 	nextImageID           int
+	pastedContents        map[string]pastedContent
+	pastedOrder           []string
+	nextPasteID           int
+	pastedStateLoaded     bool
+	lastCompressedPasteAt time.Time
 	clipboard             clipboardImageReader
+	clipboardText         clipboardTextWriter
 	runCancel             context.CancelFunc
 	pendingBTW            []string
 	interrupting          bool
@@ -246,9 +330,11 @@ type model struct {
 	runSeq                int
 	activeRunID           int
 	startupGuide          StartupGuide
+	mouseYOffset          int
 }
 
 func newModel(opts Options) model {
+	ensureZoneManager()
 	async := make(chan tea.Msg, 128)
 
 	input := textarea.New()
@@ -268,6 +354,9 @@ func newModel(opts Options) model {
 	vp.YPosition = 0
 	vp.MouseWheelEnabled = true
 	vp.MouseWheelDelta = scrollStep
+
+	copyVP := viewport.New(0, 0)
+	copyVP.YPosition = 0
 
 	planVP := viewport.New(0, 0)
 	planVP.YPosition = 0
@@ -295,6 +384,7 @@ func newModel(opts Options) model {
 		workspace:          opts.Workspace,
 		async:              async,
 		viewport:           vp,
+		copyView:           copyVP,
 		planView:           planVP,
 		input:              input,
 		spinner:            spin,
@@ -318,8 +408,13 @@ func newModel(opts Options) model {
 		inputImageMentions: make(map[string]llm.AssetID, 8),
 		orphanedImages:     make(map[llm.AssetID]time.Time, 8),
 		nextImageID:        nextSessionImageID(opts.Session),
+		pastedContents:     make(map[string]pastedContent, maxStoredPastedContents),
+		pastedOrder:        make([]string, 0, maxStoredPastedContents),
+		nextPasteID:        1,
 		clipboard:          defaultClipboardImageReader{},
+		clipboardText:      defaultClipboardTextWriter{},
 		startupGuide:       opts.StartupGuide,
+		mouseYOffset:       resolveMouseYOffset(),
 	}
 	if opts.StartupGuide.Active {
 		m.statusNote = opts.StartupGuide.Status
@@ -328,9 +423,11 @@ func newModel(opts Options) model {
 		m.initializeStartupGuide()
 	}
 	m.restoreTokenUsageFromSession(opts.Session)
-	_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, m.tokenBudget)
+	_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, 0)
+	m.tokenUsage.SetUnavailable(!m.tokenHasOfficialUsage)
 	m.tokenUsage.SetBreakdown(m.tokenInput, m.tokenOutput, m.tokenContext)
 	m.ensureSessionImageAssets()
+	m.ensurePastedContentState()
 	m.syncInputStyle()
 	m.syncInputOverlays()
 	if m.mentionIndex != nil {
@@ -339,13 +436,30 @@ func newModel(opts Options) model {
 	return m
 }
 
+func ensureZoneManager() {
+	zoneInitOnce.Do(func() {
+		zone.NewGlobal()
+	})
+}
+
+func resolveMouseYOffset() int {
+	raw := strings.TrimSpace(os.Getenv("BYTEMIND_MOUSE_Y_OFFSET"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0
+	}
+	return clamp(value, -10, 10)
+}
+
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		textarea.Blink,
 		waitForAsync(m.async),
 		m.tokenUsage.tickCmd(),
 		m.loadSessionsCmd(),
-		m.fetchRemoteTokenUsageCmd(),
 	)
 }
 
@@ -440,17 +554,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tokenUsagePulledMsg:
-		if msg.Err != nil {
-			return m, nil
-		}
-		// Prefer remotely pulled account usage, but never reduce live local counters.
-		m.tokenUsedTotal = max(m.tokenUsedTotal, msg.Used)
-		m.tokenInput = max(m.tokenInput, msg.Input)
-		m.tokenOutput = max(m.tokenOutput, msg.Output)
-		m.tokenContext = max(m.tokenContext, msg.Context)
-		_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, m.tokenBudget)
-		m.tokenUsage.SetBreakdown(m.tokenInput, m.tokenOutput, m.tokenContext)
+		// Account-level usage is not session-accurate; ignore in session-only mode.
 		return m, nil
+	case selectionToastExpiredMsg:
+		if msg.ID == m.selectionToastID {
+			m.selectionToast = ""
+		}
+		return m, nil
+	case mouseSelectionScrollTickMsg:
+		return m.handleMouseSelectionScrollTick(msg)
 	case tokenMonitorTickMsg:
 		cmd, _ := m.tokenUsage.Update(msg)
 		return m, cmd
@@ -486,97 +598,6 @@ func (m model) shouldKeepStreamingIndexOnRunFinished() bool {
 	return status == "streaming" || status == "thinking" || status == "pending"
 }
 
-func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Action == tea.MouseActionRelease {
-		m.draggingScrollbar = false
-	}
-	if m.helpOpen || m.commandOpen || m.mentionOpen || m.promptSearchOpen || m.approval != nil {
-		return m, nil
-	}
-	if m.screen != screenChat && m.screen != screenLanding {
-		return m, nil
-	}
-	if m.screen == screenChat && m.sessionsOpen {
-		return m, nil
-	}
-	if cmd, consumed := m.tokenUsage.Update(msg); consumed {
-		return m, cmd
-	}
-	if m.screen == screenChat {
-		if msg.Action == tea.MouseActionMotion && m.draggingScrollbar {
-			m.dragScrollbarTo(msg.Y)
-			m.chatAutoFollow = false
-			return m, nil
-		}
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			trackX, trackTop, trackBottom, ok := m.scrollbarTrackBounds()
-			if ok && msg.X == trackX && msg.Y >= trackTop && msg.Y <= trackBottom {
-				thumbTop, thumbHeight, _, visible := m.scrollbarLayout(m.viewport.Height, m.viewport.TotalLineCount(), m.viewport.YOffset)
-				if visible && thumbHeight > 0 {
-					absoluteThumbTop := trackTop + thumbTop
-					absoluteThumbBottom := absoluteThumbTop + thumbHeight - 1
-					if msg.Y >= absoluteThumbTop && msg.Y <= absoluteThumbBottom {
-						m.scrollbarDragOffset = msg.Y - absoluteThumbTop
-					} else {
-						// Click on track should jump close to that point, then start drag.
-						m.scrollbarDragOffset = thumbHeight / 2
-						m.dragScrollbarTo(msg.Y)
-					}
-					m.draggingScrollbar = true
-					m.chatAutoFollow = false
-					return m, nil
-				}
-			}
-		}
-	}
-	if m.mouseOverInput(msg.Y) {
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			m.scrollInput(-scrollStep)
-			return m, nil
-		case tea.MouseButtonWheelDown:
-			m.scrollInput(scrollStep)
-			return m, nil
-		default:
-			return m, nil
-		}
-	}
-	if m.screen == screenChat {
-		if m.mouseOverPlan(msg.X, msg.Y) {
-			m.ensurePlanMouse()
-			switch msg.Button {
-			case tea.MouseButtonWheelUp:
-				m.planView.LineUp(scrollStep)
-				return m, nil
-			case tea.MouseButtonWheelDown:
-				m.planView.LineDown(scrollStep)
-				return m, nil
-			default:
-				var cmd tea.Cmd
-				m.planView, cmd = m.planView.Update(msg)
-				return m, cmd
-			}
-		}
-		m.ensureViewportMouse()
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			m.viewport.LineUp(scrollStep)
-			m.chatAutoFollow = false
-			return m, nil
-		case tea.MouseButtonWheelDown:
-			m.viewport.LineDown(scrollStep)
-			m.chatAutoFollow = m.viewport.AtBottom()
-			return m, nil
-		default:
-			var cmd tea.Cmd
-			m.viewport, cmd = m.viewport.Update(msg)
-			m.chatAutoFollow = m.viewport.AtBottom()
-			return m, cmd
-		}
-	}
-	return m, nil
-}
-
 func (m *model) ensureViewportMouse() {
 	m.viewport.MouseWheelEnabled = true
 	if m.viewport.MouseWheelDelta <= 0 {
@@ -608,6 +629,31 @@ func isInputNewlineKey(msg tea.KeyMsg) bool {
 	return key == "shift+enter" || key == "shift+return"
 }
 
+func isCtrlVPasteKey(msg tea.KeyMsg) bool {
+	if msg.Type == tea.KeyCtrlV {
+		return true
+	}
+	if len(msg.Runes) == 1 && msg.Runes[0] == []rune(ctrlVMarkerRune)[0] {
+		return true
+	}
+	return normalizeKeyName(msg.String()) == "ctrl+v"
+}
+
+func inputMutationSource(msg tea.KeyMsg) string {
+	source := strings.TrimSpace(msg.String())
+	if !msg.Paste {
+		return source
+	}
+	if source == "" {
+		return "paste"
+	}
+	return source + ":paste"
+}
+
+func isClipboardNoImageNote(note string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(note)), "clipboard has no image")
+}
+
 func isPageUpKey(msg tea.KeyMsg) bool {
 	key := normalizeKeyName(msg.String())
 	return msg.Type == tea.KeyPgUp || key == "pgup" || key == "pageup" || key == "prior"
@@ -632,6 +678,7 @@ func (m *model) scrollInput(delta int) {
 }
 
 func (m model) mouseOverInput(y int) bool {
+	ensureZoneManager()
 	switch m.screen {
 	case screenLanding:
 		return m.mouseOverLandingInput(y)
@@ -685,8 +732,7 @@ func (m model) mouseOverLandingInput(y int) bool {
 		"/_____/\\__, /\\__/\\___/_/ /_/ /_/\\__/_/_/ /_/\\__,_/   ",
 		"      /____/                                          ",
 	}, "\n")))
-	titleHeight := 0
-	subtitleHeight := 0
+	modeTabsHeight := lipgloss.Height(m.renderModeTabs())
 	overlayHeight := 0
 	if m.startupGuide.Active {
 		overlayHeight = lipgloss.Height(m.renderStartupGuidePanel()) + 1
@@ -703,10 +749,10 @@ func (m model) mouseOverLandingInput(y int) bool {
 			Width(m.landingInputShellWidth()).
 			Render(m.input.View()),
 	)
-	hintHeight := lipgloss.Height(mutedStyle.Render(footerHintText))
-	contentHeight := logoHeight + 1 + titleHeight + subtitleHeight + 1 + overlayHeight + inputHeight + 1 + hintHeight
+	hintHeight := lipgloss.Height(renderFooterShortcutHints())
+	contentHeight := logoHeight + 1 + modeTabsHeight + 1 + overlayHeight + inputHeight + 1 + hintHeight
 	contentTop := max(0, (m.height-contentHeight)/2)
-	inputTop := contentTop + logoHeight + 1 + titleHeight + subtitleHeight + 1 + overlayHeight
+	inputTop := contentTop + logoHeight + 1 + modeTabsHeight + 1 + overlayHeight
 	inputBottom := inputTop + max(1, inputHeight) - 1
 	return y >= inputTop && y <= inputBottom
 }
@@ -714,6 +760,9 @@ func (m model) mouseOverLandingInput(y int) bool {
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
+		if m.hasCopyableSelection() {
+			return m, m.copyCurrentSelection()
+		}
 		if m.approval != nil {
 			m.approval.Reply <- approvalDecision{Approved: false}
 		}
@@ -728,6 +777,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "esc":
+		if m.hasCopyableSelection() {
+			m.clearMouseSelection()
+			m.clearInputSelection()
+			m.statusNote = "Selection cleared."
+			return m, nil
+		}
 	case "tab":
 		if m.commandOpen || m.mentionOpen || m.sessionsOpen || m.helpOpen || m.approval != nil {
 			break
@@ -809,10 +865,27 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Preserve multiline input shortcuts without triggering submit.
 		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyEnter})
 		if m.input.Value() != before {
-			m.handleInputMutation(before, m.input.Value(), msg.String())
+			m.handleInputMutation(before, m.input.Value(), inputMutationSource(msg))
 			m.syncInputOverlays()
 		}
 		return m, cmd
+	}
+
+	ctrlVPasteDetected := isCtrlVPasteKey(msg)
+	// Prefer Ctrl+V image paste first. If clipboard has no image, fall through
+	// so regular terminal paste behavior can continue.
+	if ctrlVPasteDetected {
+		if note := m.handleEmptyClipboardPaste(); strings.TrimSpace(note) != "" {
+			m.statusNote = note
+			if strings.Contains(note, "Attached image from clipboard") {
+				m.syncInputOverlays()
+				return m, nil
+			}
+			if !isClipboardNoImageNote(note) {
+				m.syncInputOverlays()
+				return m, nil
+			}
+		}
 	}
 
 	switch msg.String() {
@@ -822,12 +895,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.loadSessionsCmd()
 	case "alt+v":
-		if !m.busy {
-			if note := m.handleEmptyClipboardPaste(); strings.TrimSpace(note) != "" {
-				m.statusNote = note
-			}
-			m.syncInputOverlays()
+		if note := m.handleEmptyClipboardPaste(); strings.TrimSpace(note) != "" {
+			m.statusNote = note
 		}
+		m.syncInputOverlays()
 		return m, nil
 	case "ctrl+n":
 		if !m.busy && m.screen == screenChat {
@@ -838,16 +909,69 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadSessionsCmd()
 	case "home":
 		m.viewport.GotoTop()
+		m.syncCopyViewOffset()
 		m.chatAutoFollow = false
 		return m, nil
 	case "end":
 		m.viewport.GotoBottom()
+		m.syncCopyViewOffset()
 		m.chatAutoFollow = true
 		return m, nil
 	}
 
-	if msg.String() == "enter" {
+	if msg.String() == "enter" && !msg.Paste {
+		if m.shouldSuppressEnterAfterPaste() {
+			if m.busy {
+				return m, nil
+			}
+			before := m.input.Value()
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			if m.input.Value() != before {
+				m.handleInputMutation(before, m.input.Value(), "paste-enter")
+				m.syncInputOverlays()
+			}
+			return m, cmd
+		}
 		rawValue := m.input.Value()
+		if markerChain, ok := extractLeadingCompressedMarker(rawValue); ok {
+			tail := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(rawValue), markerChain))
+			if tail != "" {
+				if m.shouldCompressPastedText(tail, "paste-enter") {
+					marker, content, err := m.compressPastedText(tail)
+					if err != nil {
+						m.statusNote = err.Error()
+						return m, nil
+					}
+					combined := strings.TrimSpace(markerChain) + marker
+					m.setInputValue(combined)
+					m.syncInputOverlays()
+					m.statusNote = fmt.Sprintf("Detected another pasted block and compressed it as %s (%d lines). Press Enter again to send.", marker, content.Lines)
+					return m, nil
+				}
+				if len(tail) >= 24 || strings.Contains(tail, "\n") {
+					m.setInputValue(strings.TrimSpace(markerChain))
+					m.syncInputOverlays()
+					m.statusNote = "Detected continued paste chunk after compressed marker. Kept compressed markers only; press Enter again to send."
+					return m, nil
+				}
+			}
+		}
+		// Check whether the input has already been compressed.
+		isAlreadyCompressed := strings.Contains(rawValue, "[Paste #") || strings.Contains(rawValue, "[Pasted #")
+
+		// Compress long pasted content before sending.
+		if !isAlreadyCompressed && m.shouldCompressPastedText(rawValue, inputMutationSource(msg)) {
+			marker, content, err := m.compressPastedText(rawValue)
+			if err != nil {
+				m.statusNote = err.Error()
+				return m, nil
+			}
+			m.setInputValue(marker)
+			m.syncInputOverlays()
+			m.statusNote = fmt.Sprintf("Long pasted text (%d lines) compressed as %s. Press Enter again to send. Use [Paste #%s] or [Paste #%s line10~line20] later.", content.Lines, marker, content.ID, content.ID)
+			return m, nil
+		}
 		value := strings.TrimSpace(rawValue)
 		if m.startupGuide.Active && !strings.HasPrefix(value, "/") {
 			if err := m.handleStartupGuideSubmission(rawValue); err != nil {
@@ -915,11 +1039,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	after := m.input.Value()
+	mutationSource := inputMutationSource(msg)
 	if after != before {
-		m.handleInputMutation(before, after, msg.String())
+		m.handleInputMutation(before, after, mutationSource)
 		after = m.input.Value()
 	}
-	triggerClipboardImagePaste := shouldTriggerClipboardImagePaste(before, after, msg.String())
+	triggerClipboardImagePaste := shouldTriggerClipboardImagePaste(before, after, mutationSource)
+	if ctrlVPasteDetected {
+		triggerClipboardImagePaste = false
+	}
 	if !triggerClipboardImagePaste && msg.Paste {
 		_, inserted, _ := insertionDiff(before, after)
 		cleanInserted := strings.TrimSpace(strings.ReplaceAll(inserted, ctrlVMarkerRune, ""))
@@ -937,6 +1065,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.syncInputOverlays()
 	return m, cmd
+}
+
+func (m model) shouldSuppressEnterAfterPaste() bool {
+	if m.lastPasteAt.IsZero() {
+		return false
+	}
+	if time.Since(m.lastPasteAt) > pasteSubmitGuard {
+		return false
+	}
+	if strings.Contains(m.input.Value(), "\n") {
+		return true
+	}
+	return time.Since(m.lastInputAt) <= 120*time.Millisecond
 }
 
 func (m model) handleCommandPaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1366,6 +1507,7 @@ func (m *model) noteInputMutation(before, after, source string) {
 
 func (m *model) handleInputMutation(before, after, source string) {
 	m.noteInputMutation(before, after, source)
+
 	updated, note := m.applyInputImagePipeline(before, after, source)
 	if updated == after {
 		fallbackUpdated, fallbackNote := m.applyWholeInputImagePathFallback(after, source)
@@ -1376,6 +1518,15 @@ func (m *model) handleInputMutation(before, after, source string) {
 			note = fallbackNote
 		}
 	}
+
+	pasteUpdated, pasteNote := m.applyLongPastedTextPipeline(before, updated, source)
+	if pasteUpdated != updated {
+		updated = pasteUpdated
+	}
+	if strings.TrimSpace(note) == "" {
+		note = pasteNote
+	}
+
 	if updated != after {
 		m.setInputValue(updated)
 	}
@@ -1525,7 +1676,6 @@ func (m *model) handleAgentEvent(event agent.Event) {
 		m.phase = "responding"
 		m.statusNote = "LLM is responding..."
 		m.llmConnected = true
-		m.applyEstimatedUsage(event.Content)
 		m.appendAssistantDelta(event.Content)
 	case agent.EventAssistantMessage:
 		m.llmConnected = true
@@ -1548,12 +1698,7 @@ func (m *model) handleAgentEvent(event agent.Event) {
 		m.statusNote = "Running tool: " + event.ToolName
 	case agent.EventToolCallCompleted:
 		summary, lines, status := summarizeTool(event.ToolName, event.ToolResult)
-		m.appendChat(chatEntry{
-			Kind:   "tool",
-			Title:  "Tool Result | " + event.ToolName,
-			Body:   joinSummary(summary, lines),
-			Status: status,
-		})
+		m.finishLatestToolCall(event.ToolName, joinSummary(summary, lines), status)
 		if len(m.toolRuns) > 0 {
 			index := len(m.toolRuns) - 1
 			m.toolRuns[index].Summary = summary
@@ -1586,6 +1731,7 @@ func (m *model) handleAgentEvent(event agent.Event) {
 }
 
 func (m *model) applyUsage(usage llm.Usage) {
+	m.tokenHasOfficialUsage = true
 	input := max(0, usage.InputTokens)
 	output := max(0, usage.OutputTokens)
 	context := max(0, usage.ContextTokens)
@@ -1609,22 +1755,8 @@ func (m *model) applyUsage(usage llm.Usage) {
 	m.tokenInput += input
 	m.tokenOutput += output
 	m.tokenContext += context
-	_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, m.tokenBudget)
-	m.tokenUsage.SetBreakdown(m.tokenInput, m.tokenOutput, m.tokenContext)
-}
-
-func (m *model) applyEstimatedUsage(delta string) {
-	if strings.TrimSpace(delta) == "" {
-		return
-	}
-	estimated := estimateDeltaTokens(m.tokenEstimator, delta)
-	if estimated <= 0 {
-		return
-	}
-	m.tempEstimatedOutput += estimated
-	m.tokenUsedTotal += estimated
-	m.tokenOutput += estimated
-	_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, m.tokenBudget)
+	_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, 0)
+	m.tokenUsage.SetUnavailable(false)
 	m.tokenUsage.SetBreakdown(m.tokenInput, m.tokenOutput, m.tokenContext)
 }
 
@@ -1828,13 +1960,19 @@ func (m *model) refreshViewport() {
 	m.syncTokenUsageBounds()
 	chatOffset := m.viewport.YOffset
 	keepChatBottom := m.chatAutoFollow || m.viewport.AtBottom()
-	m.viewport.SetContent(m.renderConversation())
+	conversationContent := m.renderConversation()
+	m.viewportContentCache = conversationContent
+	m.viewport.SetContent(conversationContent)
+	m.copyView.SetContent(m.renderConversationCopy())
 	if keepChatBottom {
 		m.viewport.GotoBottom()
+		m.copyView.GotoBottom()
 		m.chatAutoFollow = true
 	} else {
 		m.viewport.SetYOffset(chatOffset)
+		m.copyView.SetYOffset(chatOffset)
 	}
+	m.syncCopyViewOffset()
 
 	planOffset := m.planView.YOffset
 	m.planView.SetContent(m.planPanelContent(max(16, m.planView.Width)))
@@ -1879,6 +2017,7 @@ func (m *model) resize() {
 }
 
 func (m model) View() string {
+	ensureZoneManager()
 	if m.width > 0 {
 		if m.screen == screenLanding {
 			m.input.SetWidth(m.landingInputContentWidth())
@@ -1894,18 +2033,20 @@ func (m model) View() string {
 		base = panelStyle.Width(m.chatPanelWidth()).Render(chatContent)
 	}
 
+	rendered := base
 	switch {
 	case m.helpOpen:
-		return renderModal(m.width, m.height, m.renderHelpModal())
+		rendered = renderModal(m.width, m.height, m.renderHelpModal())
 	case m.sessionsOpen:
-		return renderModal(m.width, m.height, m.renderSessionsModal())
-	default:
-		return base
+		rendered = renderModal(m.width, m.height, m.renderSessionsModal())
 	}
+	return zone.Scan(rendered)
 }
 
 func (m *model) SetUsage(used, total int) tea.Cmd {
-	return m.tokenUsage.SetUsage(used, total)
+	m.tokenHasOfficialUsage = true
+	m.tokenUsage.SetUnavailable(false)
+	return m.tokenUsage.SetUsage(used, 0)
 }
 
 func (m model) renderConversation() string {
@@ -1936,6 +2077,83 @@ func (m model) renderConversation() string {
 	return lipgloss.JoinVertical(lipgloss.Left, blocks...)
 }
 
+func (m model) renderConversationCopy() string {
+	if len(m.chatItems) == 0 {
+		return "No messages yet. Start with an instruction like \"analyze this repo\" or \"implement a TUI shell\"."
+	}
+	width := m.viewport.Width
+	if width <= 0 {
+		width = m.conversationPanelWidth()
+	}
+	width = max(24, width)
+	blocks := make([]string, 0, len(m.chatItems))
+	for i := 0; i < len(m.chatItems); {
+		item := m.chatItems[i]
+		if item.Kind == "user" {
+			blocks = append(blocks, renderChatCopySection(item, width))
+			i++
+			continue
+		}
+
+		j := i
+		for j < len(m.chatItems) && m.chatItems[j].Kind != "user" {
+			j++
+		}
+
+		runParts := make([]string, 0, j-i)
+		for _, runItem := range m.chatItems[i:j] {
+			runParts = append(runParts, renderChatCopySection(runItem, width))
+		}
+		blocks = append(blocks, strings.Join(runParts, "\n\n"))
+		i = j
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func renderChatCopySection(item chatEntry, width int) string {
+	title := strings.TrimSpace(item.Title)
+	status := strings.TrimSpace(item.Status)
+	if status == "final" {
+		status = ""
+	}
+	switch item.Kind {
+	case "assistant":
+		if strings.EqualFold(item.Status, "thinking") {
+			title = "thinking"
+			status = ""
+		}
+	case "user":
+		if strings.TrimSpace(item.Meta) != "" {
+			title = strings.TrimSpace(item.Meta)
+		}
+	}
+
+	if title == "" {
+		switch item.Kind {
+		case "assistant":
+			title = assistantLabel
+		case "user":
+			title = "You"
+		case "tool":
+			title = "Tool"
+		default:
+			title = "Message"
+		}
+	}
+	if status != "" {
+		title += "  " + status
+	}
+
+	body := strings.TrimRight(formatChatBody(item, width), "\n")
+	if item.Kind == "tool" && strings.TrimSpace(body) == "" {
+		return title
+	}
+	if strings.TrimSpace(body) == "" {
+		return title
+	}
+	return title + "\n" + body
+}
+
 func (m *model) syncViewportSize() {
 	if m.width == 0 || m.height == 0 {
 		return
@@ -1952,14 +2170,24 @@ func (m *model) syncViewportSize() {
 	contentHeight := max(3, panelInnerHeight)
 	m.viewport.Width = max(8, m.conversationPanelWidth()-scrollbarWidth)
 	m.viewport.Height = contentHeight
+	m.copyView.Width = m.viewport.Width
+	m.copyView.Height = m.viewport.Height
+	m.syncCopyViewOffset()
+}
+
+func (m *model) syncCopyViewOffset() {
+	if m == nil {
+		return
+	}
+	m.copyView.SetYOffset(m.viewport.YOffset)
 }
 
 func (m model) renderMainPanel() string {
 	width := max(24, m.chatPanelInnerWidth())
-	badge := strings.TrimSpace(m.renderTokenBadge(width))
+	badge := strings.TrimSpace(m.renderTopRightCluster(width))
 	conversation := lipgloss.JoinHorizontal(
 		lipgloss.Top,
-		m.viewport.View(),
+		m.renderConversationViewport(),
 		m.renderScrollbar(m.viewport.Height, m.viewport.TotalLineCount(), m.viewport.YOffset),
 	)
 	if badge == "" {
@@ -1979,10 +2207,18 @@ func (m model) renderMainPanel() string {
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-func (m model) renderTokenBadge(width int) string {
-	if width < 80 {
-		return m.tokenUsage.CompactView()
+func (m model) renderTopRightCluster(width int) string {
+	parts := make([]string, 0, 2)
+	if toast := strings.TrimSpace(m.selectionToast); toast != "" {
+		parts = append(parts, selectionToastStyle.Render(toast))
 	}
+	if badge := strings.TrimSpace(m.renderTokenBadge(width)); badge != "" {
+		parts = append(parts, badge)
+	}
+	return strings.Join(parts, "  ")
+}
+
+func (m model) renderTokenBadge(width int) string {
 	return m.tokenUsage.View()
 }
 
@@ -2019,7 +2255,7 @@ func (m model) scrollbarLayout(viewHeight, contentHeight, currentOffset int) (th
 		return 0, viewHeight, 0, true
 	}
 
-	thumbHeight = (viewHeight*viewHeight + contentHeight/2) / contentHeight
+	thumbHeight = roundedScaledDivision(viewHeight, viewHeight, contentHeight)
 	thumbHeight = clamp(thumbHeight, 1, viewHeight)
 
 	trackRange := max(0, viewHeight-thumbHeight)
@@ -2027,7 +2263,7 @@ func (m model) scrollbarLayout(viewHeight, contentHeight, currentOffset int) (th
 		return 0, thumbHeight, maxOffset, true
 	}
 	offset := clamp(currentOffset, 0, maxOffset)
-	thumbTop = (offset*trackRange + maxOffset/2) / maxOffset
+	thumbTop = roundedScaledDivision(offset, trackRange, maxOffset)
 	thumbTop = clamp(thumbTop, 0, trackRange)
 	return thumbTop, thumbHeight, maxOffset, true
 }
@@ -2036,13 +2272,11 @@ func (m model) scrollbarTrackBounds() (x, top, bottom int, ok bool) {
 	if m.screen != screenChat || m.viewport.Width <= 0 || m.viewport.Height <= 0 {
 		return 0, 0, 0, false
 	}
-	panelTop := panelStyle.GetVerticalFrameSize() / 2
-	panelLeft := panelStyle.GetHorizontalFrameSize() / 2
-	mainPanelHeight := lipgloss.Height(m.renderMainPanel())
-	viewportTop := panelTop + max(0, mainPanelHeight-m.viewport.Height)
-	viewportBottom := viewportTop + m.viewport.Height - 1
-	scrollbarX := panelLeft + m.viewport.Width
-	return scrollbarX, viewportTop, viewportBottom, true
+	left, right, top, bottom, ok := m.conversationViewportBoundsByLayout()
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return right + 1, top, bottom, left >= 0
 }
 
 func (m *model) dragScrollbarTo(mouseY int) {
@@ -2057,15 +2291,36 @@ func (m *model) dragScrollbarTo(mouseY int) {
 	trackRange := max(0, m.viewport.Height-thumbHeight)
 	if trackRange == 0 {
 		m.viewport.SetYOffset(0)
+		m.syncCopyViewOffset()
 		return
 	}
 	desiredTop := mouseY - trackTop - m.scrollbarDragOffset
 	desiredTop = clamp(desiredTop, 0, trackRange)
-	offset := (desiredTop*maxOffset + trackRange/2) / trackRange
+	offset := roundedScaledDivision(desiredTop, maxOffset, trackRange)
 	m.viewport.SetYOffset(clamp(offset, 0, maxOffset))
+	m.syncCopyViewOffset()
+}
+
+func roundedScaledDivision(value, scale, denominator int) int {
+	if denominator <= 0 || value <= 0 || scale <= 0 {
+		return 0
+	}
+	// Use int64 math to avoid overflow when terminal dimensions are large.
+	numerator := int64(value)*int64(scale) + int64(denominator)/2
+	result := numerator / int64(denominator)
+	maxInt := int64(^uint(0) >> 1)
+	if result > maxInt {
+		return int(maxInt)
+	}
+	return int(result)
+}
+
+func stripANSIText(value string) string {
+	return xansi.Strip(value)
 }
 
 func (m model) renderLanding() string {
+	ensureZoneManager()
 	logo := landingLogoStyle.Render(strings.Join([]string{
 		"    ____        __                      _           __",
 		"   / __ )__  __/ /____  ____ ___  ____(_)___  ____/ /",
@@ -2077,7 +2332,7 @@ func (m model) renderLanding() string {
 	inputBox := landingInputStyle.Copy().
 		BorderForeground(m.modeAccentColor()).
 		Width(m.landingInputShellWidth()).
-		Render(m.input.View())
+		Render(zone.Mark(inputEditorZoneID, m.renderInputEditorView()))
 	parts := []string{logo, "", m.renderModeTabs(), ""}
 	if m.startupGuide.Active {
 		parts = append(parts, m.renderStartupGuidePanel(), "")
@@ -2088,15 +2343,16 @@ func (m model) renderLanding() string {
 	} else if m.commandOpen {
 		parts = append(parts, m.renderCommandPalette(), "")
 	}
-	parts = append(parts, inputBox, "", mutedStyle.Render(footerHintText))
+	parts = append(parts, inputBox, "", renderFooterShortcutHints())
 	content := lipgloss.JoinVertical(lipgloss.Center, parts...)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
 func (m model) renderFooter() string {
+	ensureZoneManager()
 	inputBorder := m.inputBorderStyle().
 		Width(m.chatPanelInnerWidth()).
-		Render(m.input.View())
+		Render(zone.Mark(inputEditorZoneID, m.renderInputEditorView()))
 	parts := make([]string, 0, 4)
 	if m.approval != nil {
 		parts = append(parts, m.renderApprovalBanner())
@@ -2135,12 +2391,11 @@ func (m model) renderModeTabs() string {
 func (m model) renderFooterInfoLine() string {
 	width := max(24, m.chatPanelInnerWidth())
 	left := m.renderModeTabs()
-	rightParts := []string{footerHintText}
-	if modelName := strings.TrimSpace(m.currentModelLabel()); modelName != "" && modelName != "-" {
-		rightParts = append([]string{modelName}, rightParts...)
+	modelName := strings.TrimSpace(m.currentModelLabel())
+	if modelName == "-" {
+		modelName = ""
 	}
-	rightRaw := strings.Join(rightParts, "  |  ")
-	right := mutedStyle.Render(rightRaw)
+	right := renderFooterInfoRight(modelName, 1<<30)
 
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
@@ -2148,15 +2403,116 @@ func (m model) renderFooterInfoLine() string {
 	if gap < 2 {
 		available := max(10, width-leftW-2)
 		if available <= 10 {
-			return lipgloss.NewStyle().Width(width).Render(mutedStyle.Render(compact(rightRaw, width)))
+			return lipgloss.NewStyle().Width(width).Render(renderFooterInfoRight(modelName, width))
 		}
-		compacted := mutedStyle.Render(compact(rightRaw, available))
+		compacted := renderFooterInfoRight(modelName, available)
 		gap = width - leftW - lipgloss.Width(compacted)
 		return lipgloss.NewStyle().Width(width).Render(left + strings.Repeat(" ", max(2, gap)) + compacted)
 	}
 
 	return lipgloss.NewStyle().Width(width).Render(left + strings.Repeat(" ", gap) + right)
 }
+
+func renderFooterInfoRight(modelName string, maxWidth int) string {
+	maxWidth = max(1, maxWidth)
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return renderInlineShortcutHintsCompacted(footerShortcutHints, maxWidth)
+	}
+	modelText := compact(modelName, maxWidth)
+	modelWidth := runewidth.StringWidth(modelText)
+	if modelWidth >= maxWidth {
+		return mutedStyle.Render(modelText)
+	}
+	dividerPlain := "  |  "
+	dividerWidth := runewidth.StringWidth(dividerPlain)
+	remaining := maxWidth - modelWidth - dividerWidth
+	if remaining <= 0 {
+		return mutedStyle.Render(modelText)
+	}
+	hints := renderInlineShortcutHintsCompacted(footerShortcutHints, remaining)
+	if strings.TrimSpace(hints) == "" {
+		return mutedStyle.Render(modelText)
+	}
+	return mutedStyle.Render(modelText) + footerHintDividerStyle.Render(dividerPlain) + hints
+}
+
+func renderFooterShortcutHints() string {
+	return renderInlineShortcutHints(footerShortcutHints)
+}
+
+func renderInlineShortcutHints(hints []footerShortcutHint) string {
+	parts := make([]string, 0, len(hints))
+	for _, hint := range hints {
+		parts = append(parts, footerHintKeyStyle.Render(hint.Key)+" "+footerHintLabelStyle.Render(hint.Label))
+	}
+	return strings.Join(parts, footerHintDividerStyle.Render("  |  "))
+}
+
+func renderInlineShortcutHintsCompacted(hints []footerShortcutHint, maxWidth int) string {
+	maxWidth = max(1, maxWidth)
+	dividerPlain := "  |  "
+	dividerWidth := runewidth.StringWidth(dividerPlain)
+
+	used := 0
+	parts := make([]string, 0, len(hints)*2)
+	for _, hint := range hints {
+		key := strings.TrimSpace(hint.Key)
+		label := strings.TrimSpace(hint.Label)
+		if key == "" {
+			continue
+		}
+		segmentPlain := key
+		segmentStyled := footerHintKeyStyle.Render(key)
+		if label != "" {
+			segmentPlain += " " + label
+			segmentStyled += " " + footerHintLabelStyle.Render(label)
+		}
+		needDivider := len(parts) > 0
+		prefixWidth := 0
+		if needDivider {
+			prefixWidth = dividerWidth
+		}
+		segmentWidth := runewidth.StringWidth(segmentPlain)
+		if used+prefixWidth+segmentWidth <= maxWidth {
+			if needDivider {
+				parts = append(parts, footerHintDividerStyle.Render(dividerPlain))
+				used += dividerWidth
+			}
+			parts = append(parts, segmentStyled)
+			used += segmentWidth
+			continue
+		}
+
+		remaining := maxWidth - used - prefixWidth
+		if remaining <= 0 {
+			break
+		}
+		if needDivider {
+			parts = append(parts, footerHintDividerStyle.Render(dividerPlain))
+			used += dividerWidth
+		}
+
+		keyWidth := runewidth.StringWidth(key)
+		if keyWidth >= remaining {
+			parts = append(parts, footerHintKeyStyle.Render(compact(key, remaining)))
+			break
+		}
+		if label == "" {
+			parts = append(parts, footerHintKeyStyle.Render(key))
+			break
+		}
+		labelSpace := remaining - keyWidth - 1
+		if labelSpace <= 0 {
+			parts = append(parts, footerHintKeyStyle.Render(key))
+			break
+		}
+		parts = append(parts, footerHintKeyStyle.Render(key)+" "+footerHintLabelStyle.Render(compact(label, labelSpace)))
+		break
+	}
+	return strings.Join(parts, "")
+}
+
 func (m model) renderSessionsModal() string {
 	lines := []string{modalTitleStyle.Render("Recent Sessions"), mutedStyle.Render("Up/Down to select, Enter to resume, Esc to close"), ""}
 	if len(m.sessions) == 0 {
@@ -2282,9 +2638,14 @@ func (m model) renderPromptSearchPalette() string {
 		}
 		content := []string{
 			commandPaletteMetaStyle.Render("Prompt history " + modeLabel),
-			commandPaletteMetaStyle.Render("query: " + query + "  (filters: ws:<kw> sid:<kw>)"),
+			commandPaletteMetaStyle.Render("query: "+query+"  (filters: ") + renderInlineShortcutHints(promptSearchFilterHints) + commandPaletteMetaStyle.Render(")"),
 			commandPaletteMetaStyle.Render("No matching prompts."),
-			commandPaletteMetaStyle.Render("Type to filter  PgUp/PgDn page  Enter apply  Esc close"),
+			commandPaletteMetaStyle.Render("Type to filter  ") +
+				renderInlineShortcutHints([]footerShortcutHint{
+					{Key: "PgUp/PgDn", Label: "page"},
+					{Key: "Enter", Label: "apply"},
+					{Key: "Esc", Label: "close"},
+				}),
 		}
 		return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, content...))
 	}
@@ -2319,8 +2680,12 @@ func (m model) renderPromptSearchPalette() string {
 	if query == "" {
 		query = "(all)"
 	}
-	meta := fmt.Sprintf("%s  query:%s  |  ws:<kw> sid:<kw>  PgUp/PgDn page  Ctrl+F next  Ctrl+S prev  Enter apply  Esc close", modeLabel, compact(query, 24))
-	rows = append(rows, commandPaletteMetaStyle.Render(meta))
+	meta := commandPaletteMetaStyle.Render(fmt.Sprintf("%s  query:%s", modeLabel, compact(query, 24))) +
+		footerHintDividerStyle.Render("  |  ") +
+		renderInlineShortcutHints(promptSearchFilterHints) +
+		footerHintDividerStyle.Render("  |  ") +
+		renderInlineShortcutHints(promptSearchActionHints)
+	rows = append(rows, meta)
 	return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
 }
 
@@ -2405,9 +2770,13 @@ func (m *model) verifyAndFinalizeStartupAPIKey(rawInput string) error {
 	writtenPath, saveErr := config.UpsertProviderAPIKey(m.startupGuide.ConfigPath, apiKey)
 
 	if envName := strings.TrimSpace(checkCfg.APIKeyEnv); envName != "" {
-		_ = os.Setenv(envName, apiKey)
+		if err := os.Setenv(envName, apiKey); err != nil {
+			warnSetenv(envName, err)
+		}
 	} else {
-		_ = os.Setenv("BYTEMIND_API_KEY", apiKey)
+		if err := os.Setenv("BYTEMIND_API_KEY", apiKey); err != nil {
+			warnSetenv("BYTEMIND_API_KEY", err)
+		}
 	}
 
 	client, err := provider.NewClient(checkCfg)
@@ -2837,6 +3206,8 @@ func (m *model) handleSlashCommand(input string) error {
 		return m.runSkillCommand(input, fields)
 	case "/new":
 		return m.newSession()
+	case "/compact":
+		return m.runCompactCommand(input)
 	default:
 		return m.runDirectSkillCommand(input, fields)
 	}
@@ -2897,6 +3268,40 @@ func (m *model) runSkillCommand(input string, fields []string) error {
 	}
 	m.appendCommandExchange(input, "Active skill cleared.")
 	m.statusNote = "Skill cleared."
+	return nil
+}
+
+func (m *model) runCompactCommand(input string) error {
+	if m.runner == nil {
+		return fmt.Errorf("runner is unavailable")
+	}
+	if m.sess == nil {
+		return fmt.Errorf("session is unavailable")
+	}
+	type sessionCompactor interface {
+		CompactSession(ctx context.Context, sess *session.Session) (string, bool, error)
+	}
+	compactor, ok := any(m.runner).(sessionCompactor)
+	if !ok {
+		return fmt.Errorf("compact is unavailable in this build")
+	}
+	summary, changed, err := compactor.CompactSession(context.Background(), m.sess)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		m.appendCommandExchange(input, "No compaction needed yet. Start a longer conversation first.")
+		m.statusNote = "No compaction needed."
+		return nil
+	}
+	preview := compact(summary, 360)
+	response := "Conversation compacted for long-context continuation."
+	if strings.TrimSpace(preview) != "" {
+		response += "\nSummary preview: " + preview
+	}
+	m.chatItems, m.toolRuns = rebuildSessionTimeline(m.sess)
+	m.appendCommandExchange(input, response)
+	m.statusNote = "Conversation compacted."
 	return nil
 }
 
@@ -2996,13 +3401,20 @@ func (m *model) newSession() error {
 	m.statusNote = "Started a new session."
 	m.chatAutoFollow = true
 	m.restoreTokenUsageFromSession(next)
-	_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, m.tokenBudget)
+	_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, 0)
+	m.tokenUsage.SetUnavailable(!m.tokenHasOfficialUsage)
 	m.tokenUsage.SetBreakdown(m.tokenInput, m.tokenOutput, m.tokenContext)
 	m.inputImageRefs = make(map[int]llm.AssetID, 8)
 	m.inputImageMentions = make(map[string]llm.AssetID, 8)
 	m.orphanedImages = make(map[llm.AssetID]time.Time, 8)
 	m.nextImageID = nextSessionImageID(next)
 	m.ensureSessionImageAssets()
+	m.pastedContents = make(map[string]pastedContent, maxStoredPastedContents)
+	m.pastedOrder = make([]string, 0, maxStoredPastedContents)
+	m.nextPasteID = 1
+	m.pastedStateLoaded = false
+	m.lastCompressedPasteAt = time.Time{}
+	m.ensurePastedContentState()
 	m.pendingBTW = nil
 	m.interrupting = false
 	m.interruptSafe = false
@@ -3037,13 +3449,20 @@ func (m *model) resumeSession(prefix string) error {
 	m.statusNote = "Resumed session " + shortID(next.ID)
 	m.chatAutoFollow = true
 	m.restoreTokenUsageFromSession(next)
-	_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, m.tokenBudget)
+	_ = m.tokenUsage.SetUsage(m.tokenUsedTotal, 0)
+	m.tokenUsage.SetUnavailable(!m.tokenHasOfficialUsage)
 	m.tokenUsage.SetBreakdown(m.tokenInput, m.tokenOutput, m.tokenContext)
 	m.inputImageRefs = make(map[int]llm.AssetID, 8)
 	m.inputImageMentions = make(map[string]llm.AssetID, 8)
 	m.orphanedImages = make(map[llm.AssetID]time.Time, 8)
 	m.nextImageID = nextSessionImageID(next)
 	m.ensureSessionImageAssets()
+	m.pastedContents = make(map[string]pastedContent, maxStoredPastedContents)
+	m.pastedOrder = make([]string, 0, maxStoredPastedContents)
+	m.nextPasteID = 1
+	m.pastedStateLoaded = false
+	m.lastCompressedPasteAt = time.Time{}
+	m.ensurePastedContentState()
 	m.syncInputImageRefs("")
 	m.pendingBTW = nil
 	m.interrupting = false
@@ -3094,31 +3513,13 @@ func (m model) fetchRemoteTokenUsageCmd() tea.Cmd {
 
 func (m *model) restoreTokenUsageFromSession(sess *session.Session) {
 	m.tempEstimatedOutput = 0
+	m.tokenHasOfficialUsage = false
 	m.tokenUsedTotal = 0
 	m.tokenInput = 0
 	m.tokenOutput = 0
 	m.tokenContext = 0
 
-	countedAny := false
-	if m.store != nil {
-		summaries, _, err := m.store.List(0)
-		if err == nil {
-			for _, summary := range summaries {
-				if !sameWorkspace(m.workspace, summary.Workspace) {
-					continue
-				}
-				stored, loadErr := m.store.Load(summary.ID)
-				if loadErr != nil || stored == nil {
-					continue
-				}
-				m.accumulateTokenUsage(stored.Messages)
-				countedAny = true
-			}
-		}
-	}
-
-	// Fallback for tests or when store data is unavailable.
-	if !countedAny && sess != nil {
+	if sess != nil {
 		m.accumulateTokenUsage(sess.Messages)
 	}
 }
@@ -3128,6 +3529,7 @@ func (m *model) accumulateTokenUsage(messages []llm.Message) {
 		if msg.Usage == nil {
 			continue
 		}
+		m.tokenHasOfficialUsage = true
 		used := msg.Usage.TotalTokens
 		if used <= 0 {
 			used = msg.Usage.InputTokens + msg.Usage.OutputTokens + msg.Usage.ContextTokens
@@ -3169,7 +3571,7 @@ func rebuildSessionTimeline(sess *session.Session) ([]chatEntry, []toolRun) {
 				summary, lines, status := summarizeTool(name, part.ToolResult.Content)
 				items = append(items, chatEntry{
 					Kind:   "tool",
-					Title:  "Tool Result | " + name,
+					Title:  "Tool Call | " + name,
 					Body:   joinSummary(summary, lines),
 					Status: status,
 				})
@@ -3194,7 +3596,7 @@ func rebuildSessionTimeline(sess *session.Session) ([]chatEntry, []toolRun) {
 			summary, lines, status := summarizeTool(name, message.Content)
 			items = append(items, chatEntry{
 				Kind:   "tool",
-				Title:  "Tool Result | " + name,
+				Title:  "Tool Call | " + name,
 				Body:   joinSummary(summary, lines),
 				Status: status,
 			})
@@ -3224,7 +3626,7 @@ func renderChatCard(item chatEntry, width int) string {
 		return rendered
 	}
 
-	sep := lipgloss.NewStyle().Foreground(colorTool).Render("│")
+	sep := lipgloss.NewStyle().Foreground(colorTool).Render("|")
 	lines := strings.Split(rendered, "\n")
 	for i := range lines {
 		if strings.TrimSpace(lines[i]) == "" {
@@ -4011,17 +4413,12 @@ func isMeaningfulThinking(body, toolName string) bool {
 	}
 
 	cnPrefixes := []string{
-		"鎴戝皢璋冪敤",
-		"鎴戜細璋冪敤",
-		"鎴戝厛璋冪敤",
-		"鎴戣璋冪敤",
-		"先调用",
-		"鎴戝皢浣跨敤",
-		"鎴戜細浣跨敤",
-		"鎴戝厛浣跨敤",
-		"鎴戝皢杩愯",
-		"鎴戜細杩愯",
-		"鍏堟鏌ョ浉鍏充笂涓嬫枃",
+		"i will call",
+		"i will use",
+		"let me call",
+		"let me use",
+		"let me run",
+		"tool result",
 	}
 	for _, prefix := range cnPrefixes {
 		if strings.HasPrefix(raw, prefix) {
@@ -4049,12 +4446,12 @@ func shouldRenderThinkingFromDelta(body string) bool {
 		"approach",
 		"systematically",
 		"through build and test",
-		"我会先",
-		"先了解",
-		"鐒跺悗",
-		"最后",
-		"通过构建和测试",
-		"系统性",
+		"\u6211\u4f1a\u5148",
+		"\u5148\u4e86\u89e3",
+		"\u7136\u540e",
+		"\u6700\u540e",
+		"\u901a\u8fc7\u6784\u5efa\u548c\u6d4b\u8bd5",
+		"\u7cfb\u7edf\u6027",
 	}
 	for _, marker := range reasoningMarkers {
 		if strings.Contains(lower, marker) || strings.Contains(text, marker) {
@@ -4365,7 +4762,7 @@ func shouldExecuteFromPalette(item commandItem) bool {
 		return true
 	}
 	switch item.Name {
-	case "/help", "/session", "/skills", "/skill clear", "/new", "/quit":
+	case "/help", "/session", "/skills", "/skill clear", "/new", "/compact", "/quit":
 		return true
 	default:
 		return false
@@ -4386,6 +4783,7 @@ func (m model) helpText() string {
 		"/<skill-name> [k=v...]: activate a skill for this session.",
 		"/skill clear: clear the active skill.",
 		"/new: start a fresh session.",
+		"/compact: summarize long history into a compact continuation context.",
 		"/btw <message>: interject while a run is in progress.",
 		"/quit: exit the TUI.",
 		"",
@@ -4394,10 +4792,13 @@ func (m model) helpText() string {
 		"Plan mode keeps the plan panel visible and focused on structured steps.",
 		"Use Ctrl+G to open or close the help panel.",
 		"Use Ctrl+F to search prompt history and restore previous input.",
+		"Drag across the conversation with the left mouse button to select text, then press Ctrl+C to copy it.",
 		"If provider setup is required, paste an API key in the input and press Enter.",
+		"Long pasted code/text is compressed to [Paste #N ~X lines].",
+		"Use [Paste], [Paste #N], [Paste line3], or [Paste #N line3~line7] to expand references.",
 		"After restoring a session with a saved plan, type 'continue execution' to resume it.",
 		"Approval requests appear above the input area when a shell command needs confirmation.",
-		"The footer keeps only the essential shortcuts: tab agents, / commands, Ctrl+F history, Ctrl+L sessions, Ctrl+C quit.",
+		"The footer keeps only the essential shortcuts: tab agents, / commands, drag select, Ctrl+C copy/quit, Ctrl+F history, Ctrl+L sessions.",
 	}, "\n")
 }
 func visibleCommandItems(group string) []commandItem {
@@ -4959,7 +5360,7 @@ func (m model) sessionText() string {
 func statusGlyph(status string) string {
 	switch planpkg.NormalizeStepStatus(status) {
 	case planpkg.StepCompleted:
-		return doneStyle.Render("✓")
+		return doneStyle.Render("v")
 	case planpkg.StepInProgress:
 		return accentStyle.Render(">")
 	case planpkg.StepBlocked:

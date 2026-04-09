@@ -31,6 +31,11 @@ func TestOpenAICompatibleCreateMessageReturnsFirstChoice(t *testing.T) {
 					"content": "done",
 				},
 			}},
+			"usage": map[string]any{
+				"prompt_tokens":     12,
+				"completion_tokens": 5,
+				"total_tokens":      17,
+			},
 		})
 	}))
 	defer server.Close()
@@ -54,6 +59,9 @@ func TestOpenAICompatibleCreateMessageReturnsFirstChoice(t *testing.T) {
 	}
 	if msg.Role != "assistant" || msg.Content != "done" {
 		t.Fatalf("unexpected message: %#v", msg)
+	}
+	if msg.Usage == nil || msg.Usage.TotalTokens != 17 || msg.Usage.InputTokens != 12 || msg.Usage.OutputTokens != 5 {
+		t.Fatalf("expected usage payload in message, got %#v", msg.Usage)
 	}
 	if authHeader != "Bearer test-key" {
 		t.Fatalf("unexpected authorization header %q", authHeader)
@@ -106,6 +114,7 @@ func TestOpenAICompatibleStreamMessageAssemblesContentAndToolCalls(t *testing.T)
 			`data: {"choices":[{"delta":{"role":"assistant","content":"Hello "}}]}`,
 			`data: {"choices":[{"delta":{"content":"world","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"list_","arguments":"{\"path\":\"src"}}]}}]}`,
 			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"files","arguments":"\"}"}}]}}]}`,
+			`data: {"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":8,"total_tokens":28}}`,
 			`data: [DONE]`,
 			"",
 		}, "\n")))
@@ -141,6 +150,9 @@ func TestOpenAICompatibleStreamMessageAssemblesContentAndToolCalls(t *testing.T)
 	}
 	if call.Function.Arguments != "{\"path\":\"src\"}" {
 		t.Fatalf("expected tool arguments concatenation, got %q", call.Function.Arguments)
+	}
+	if msg.Usage == nil || msg.Usage.TotalTokens != 28 || msg.Usage.InputTokens != 20 || msg.Usage.OutputTokens != 8 {
+		t.Fatalf("expected stream usage parse result, got %#v", msg.Usage)
 	}
 }
 
@@ -357,8 +369,8 @@ func TestOpenAIMessagesMapsThinkingAndToolResultParts(t *testing.T) {
 	}
 }
 
-func TestOpenAIMessagesRejectsMissingImageAsset(t *testing.T) {
-	_, err := openAIMessages(llm.ChatRequest{
+func TestOpenAIMessagesDegradesMissingImageAsset(t *testing.T) {
+	messages, err := openAIMessages(llm.ChatRequest{
 		Messages: []llm.Message{{
 			Role: llm.RoleUser,
 			Parts: []llm.Part{{
@@ -367,12 +379,19 @@ func TestOpenAIMessagesRejectsMissingImageAsset(t *testing.T) {
 			}},
 		}},
 	})
-	if err == nil {
-		t.Fatal("expected missing image asset error")
+	if err != nil {
+		t.Fatalf("openAIMessages: %v", err)
 	}
-	var providerErr *llm.ProviderError
-	if !errors.As(err, &providerErr) || providerErr.Code != llm.ErrorCodeAssetNotFound {
-		t.Fatalf("unexpected error: %#v", err)
+	if len(messages) != 1 {
+		t.Fatalf("expected a single converted message, got %#v", messages)
+	}
+	content, _ := messages[0]["content"].([]map[string]any)
+	if len(content) != 1 || content[0]["type"] != "text" {
+		t.Fatalf("expected missing image to degrade to text block, got %#v", messages[0])
+	}
+	text, _ := content[0]["text"].(string)
+	if !strings.Contains(text, "unavailable asset asset-1") {
+		t.Fatalf("expected fallback text to include asset id, got %#v", content[0]["text"])
 	}
 }
 

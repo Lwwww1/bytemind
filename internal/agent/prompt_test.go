@@ -169,6 +169,33 @@ func TestFormatSkillsLimitsAndSummarizesOverflow(t *testing.T) {
 	}
 }
 
+func TestFormatSkillsKeepsSkillDescriptionsAsIs(t *testing.T) {
+	got := formatSkills([]PromptSkill{
+		{Name: "review", Description: "Review with strict correctness focus.", Enabled: true},
+	})
+
+	assertContains(t, got, "- review: Review with strict correctness focus. enabled=true")
+}
+
+func TestRenderActiveSkillPromptKeepsSkillFieldsAsIs(t *testing.T) {
+	out := renderActiveSkillPrompt(&PromptActiveSkill{
+		Name:         "review",
+		Description:  "Review code changes with a strict correctness focus.",
+		WhenToUse:    "Use when the user asks for a code review.",
+		Instructions: "Prioritize regression risk and missing tests.",
+		Args: map[string]string{
+			"base_ref": "main",
+		},
+		ToolPolicy: "allowlist",
+		Tools:      []string{"read_file"},
+	})
+
+	assertContains(t, out, "Description: Review code changes with a strict correctness focus.")
+	assertContains(t, out, "When To Use: Use when the user asks for a code review.")
+	assertContains(t, out, "- base_ref=main")
+	assertContains(t, out, "Prioritize regression risk and missing tests.")
+}
+
 func TestIsGitRepository(t *testing.T) {
 	workspace := t.TempDir()
 	if isGitRepository(workspace) {

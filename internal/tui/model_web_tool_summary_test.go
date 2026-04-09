@@ -3,8 +3,6 @@ package tui
 import (
 	"strings"
 	"testing"
-
-	"bytemind/internal/session"
 )
 
 func TestSummarizeToolForWebSearchAndWebFetch(t *testing.T) {
@@ -37,17 +35,3 @@ func TestSummarizeToolForWebSearchAndWebFetch(t *testing.T) {
 	}
 }
 
-func TestCurrentSkillLabelBranches(t *testing.T) {
-	m := model{}
-	if got := m.currentSkillLabel(); got != "none" {
-		t.Fatalf("expected none for nil session, got %q", got)
-	}
-	m.sess = &session.Session{ActiveSkill: &session.ActiveSkill{}}
-	if got := m.currentSkillLabel(); got != "none" {
-		t.Fatalf("expected none for blank skill name, got %q", got)
-	}
-	m.sess.ActiveSkill.Name = "review"
-	if got := m.currentSkillLabel(); got != "review" {
-		t.Fatalf("expected active skill name, got %q", got)
-	}
-}

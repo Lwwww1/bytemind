@@ -165,9 +165,12 @@ func formatSkills(skills []PromptSkill) string {
 	lines := make([]string, 0, len(skills))
 	for _, skill := range skills {
 		name := strings.TrimSpace(skill.Name)
-		description := strings.TrimSpace(skill.Description)
-		if name == "" || description == "" {
+		if name == "" {
 			continue
+		}
+		description := strings.TrimSpace(skill.Description)
+		if description == "" {
+			description = "No description provided."
 		}
 		description = trimPromptText(description, maxPromptSkillDescriptionRune)
 		lines = append(lines, fmt.Sprintf("- %s: %s enabled=%t", name, description, skill.Enabled))

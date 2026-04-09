@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"bytemind/internal/llm"
@@ -36,6 +37,12 @@ func TestAnthropicCreateMessageParsesTextAndToolUse(t *testing.T) {
 			"content": []map[string]any{
 				{"type": "text", "text": "Plan ready. "},
 				{"type": "tool_use", "id": "tool-1", "name": "list_files", "input": map[string]any{"path": "."}},
+			},
+			"usage": map[string]any{
+				"input_tokens":                42,
+				"output_tokens":               11,
+				"cache_read_input_tokens":     3,
+				"cache_creation_input_tokens": 2,
 			},
 		})
 	}))
@@ -84,6 +91,9 @@ func TestAnthropicCreateMessageParsesTextAndToolUse(t *testing.T) {
 	}
 	if msg.ToolCalls[0].Function.Name != "list_files" || msg.ToolCalls[0].Function.Arguments != "{\"path\":\".\"}" {
 		t.Fatalf("unexpected tool call: %#v", msg.ToolCalls[0])
+	}
+	if msg.Usage == nil || msg.Usage.InputTokens != 42 || msg.Usage.OutputTokens != 11 || msg.Usage.ContextTokens != 5 || msg.Usage.TotalTokens != 58 {
+		t.Fatalf("unexpected usage parse result: %#v", msg.Usage)
 	}
 }
 
@@ -183,8 +193,8 @@ func TestParseJSONObjectFallsBackToRawValue(t *testing.T) {
 	}
 }
 
-func TestAnthropicMessagesRejectsMissingImageAsset(t *testing.T) {
-	_, _, err := anthropicMessages(llm.ChatRequest{
+func TestAnthropicMessagesDegradesMissingImageAsset(t *testing.T) {
+	_, converted, err := anthropicMessages(llm.ChatRequest{
 		Messages: []llm.Message{{
 			Role: llm.RoleUser,
 			Parts: []llm.Part{{
@@ -193,12 +203,19 @@ func TestAnthropicMessagesRejectsMissingImageAsset(t *testing.T) {
 			}},
 		}},
 	})
-	if err == nil {
-		t.Fatal("expected missing image asset error")
+	if err != nil {
+		t.Fatalf("anthropicMessages: %v", err)
 	}
-	var providerErr *llm.ProviderError
-	if !errors.As(err, &providerErr) || providerErr.Code != llm.ErrorCodeAssetNotFound {
-		t.Fatalf("unexpected error: %#v", err)
+	if len(converted) != 1 {
+		t.Fatalf("expected single converted message, got %#v", converted)
+	}
+	blocks := converted[0]["content"].([]map[string]any)
+	if len(blocks) != 1 || blocks[0]["type"] != "text" {
+		t.Fatalf("expected missing image to degrade to text block, got %#v", converted[0])
+	}
+	text, _ := blocks[0]["text"].(string)
+	if !strings.Contains(text, "unavailable asset asset-1") {
+		t.Fatalf("expected fallback text to include asset id, got %#v", blocks[0]["text"])
 	}
 }
 

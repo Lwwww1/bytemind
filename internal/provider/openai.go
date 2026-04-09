@@ -58,6 +58,7 @@ func (c *OpenAICompatible) CreateMessage(ctx context.Context, req llm.ChatReques
 		Choices []struct {
 			Message json.RawMessage `json:"message"`
 		} `json:"choices"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &completion); err != nil {
 		return llm.Message{}, err
@@ -65,7 +66,9 @@ func (c *OpenAICompatible) CreateMessage(ctx context.Context, req llm.ChatReques
 	if len(completion.Choices) == 0 {
 		return llm.Message{}, fmt.Errorf("provider returned no choices")
 	}
-	return parseOpenAIMessage(completion.Choices[0].Message), nil
+	msg := parseOpenAIMessage(completion.Choices[0].Message)
+	msg.Usage = parseOpenAIUsage(completion.Usage)
+	return msg, nil
 }
 
 func (c *OpenAICompatible) StreamMessage(ctx context.Context, req llm.ChatRequest, onDelta func(string)) (llm.Message, error) {
@@ -115,6 +118,7 @@ func (c *OpenAICompatible) StreamMessage(ctx context.Context, req llm.ChatReques
 			Choices []struct {
 				Delta json.RawMessage `json:"delta"`
 			} `json:"choices"`
+			Usage json.RawMessage `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			return llm.Message{}, err
@@ -154,6 +158,9 @@ func (c *OpenAICompatible) StreamMessage(ctx context.Context, req llm.ChatReques
 				}
 			}
 		}
+		if usage := parseOpenAIUsage(chunk.Usage); usage != nil {
+			assembled.Usage = usage
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return llm.Message{}, err
@@ -190,6 +197,43 @@ func (c *OpenAICompatible) StreamMessage(ctx context.Context, req llm.ChatReques
 
 	assembled.Normalize()
 	return assembled, nil
+}
+
+func parseOpenAIUsage(raw json.RawMessage) *llm.Usage {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	var usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+		PromptDetails    struct {
+			CachedTokens int `json:"cached_tokens"`
+			AudioTokens  int `json:"audio_tokens"`
+		} `json:"prompt_tokens_details"`
+		CompletionDetails struct {
+			AudioTokens int `json:"audio_tokens"`
+		} `json:"completion_tokens_details"`
+	}
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		return nil
+	}
+	input := max(0, usage.PromptTokens) + max(0, usage.PromptDetails.AudioTokens)
+	output := max(0, usage.CompletionTokens) + max(0, usage.CompletionDetails.AudioTokens)
+	context := max(0, usage.PromptDetails.CachedTokens)
+	total := usage.TotalTokens
+	if total <= 0 {
+		total = input + output + context
+	}
+	if input == 0 && output == 0 && context == 0 && total == 0 {
+		return nil
+	}
+	return &llm.Usage{
+		InputTokens:   input,
+		OutputTokens:  output,
+		ContextTokens: context,
+		TotalTokens:   max(0, total),
+	}
 }
 
 type streamDelta struct {
@@ -492,12 +536,14 @@ func openAIMessages(req llm.ChatRequest) ([]map[string]any, error) {
 			case llm.PartThinking:
 				content = append(content, map[string]any{"type": "text", "text": part.Thinking.Value})
 			case llm.PartImageRef:
-				asset, ok := req.Assets[part.Image.AssetID]
-				if !ok {
-					return nil, llm.WrapError("openai", llm.ErrorCodeAssetNotFound, fmt.Errorf("asset %q not found", part.Image.AssetID))
+				assetID := llm.AssetID("")
+				if part.Image != nil {
+					assetID = part.Image.AssetID
 				}
-				if len(asset.Data) == 0 {
-					return nil, llm.WrapError("openai", llm.ErrorCodeAssetNotFound, fmt.Errorf("asset %q has empty payload", part.Image.AssetID))
+				asset, ok := req.Assets[assetID]
+				if !ok || len(asset.Data) == 0 {
+					content = append(content, map[string]any{"type": "text", "text": missingImageAssetFallback(assetID)})
+					continue
 				}
 				mediaType := strings.TrimSpace(asset.MediaType)
 				if mediaType == "" {
@@ -561,6 +607,14 @@ func openAIMessages(req llm.ChatRequest) ([]map[string]any, error) {
 	}
 
 	return result, nil
+}
+
+func missingImageAssetFallback(assetID llm.AssetID) string {
+	id := strings.TrimSpace(string(assetID))
+	if id == "" {
+		return "[image omitted: unavailable asset]"
+	}
+	return fmt.Sprintf("[image omitted: unavailable asset %s]", id)
 }
 
 func (c *OpenAICompatible) postJSON(ctx context.Context, url string, payload map[string]any) ([]byte, error) {

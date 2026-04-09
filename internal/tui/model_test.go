@@ -27,6 +27,36 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+type compactCommandTestClient struct {
+	replies  []llm.Message
+	requests []llm.ChatRequest
+	index    int
+}
+
+func (c *compactCommandTestClient) CreateMessage(_ context.Context, req llm.ChatRequest) (llm.Message, error) {
+	c.requests = append(c.requests, req)
+	if len(c.replies) == 0 {
+		return llm.Message{}, nil
+	}
+	if c.index >= len(c.replies) {
+		return c.replies[len(c.replies)-1], nil
+	}
+	reply := c.replies[c.index]
+	c.index++
+	return reply, nil
+}
+
+func (c *compactCommandTestClient) StreamMessage(ctx context.Context, req llm.ChatRequest, onDelta func(string)) (llm.Message, error) {
+	reply, err := c.CreateMessage(ctx, req)
+	if err != nil {
+		return llm.Message{}, err
+	}
+	if onDelta != nil && strings.TrimSpace(reply.Content) != "" {
+		onDelta(reply.Content)
+	}
+	return reply, nil
+}
+
 func TestHandleMouseScrollsViewport(t *testing.T) {
 	m := model{
 		screen: screenChat,
@@ -1496,6 +1526,61 @@ func TestImmediateEnterAfterPasteStillSubmits(t *testing.T) {
 	}
 }
 
+func TestPasteEnterDoesNotSubmitAndKeepsNewline(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.SetWidth(40)
+	input.SetHeight(3)
+	input.SetValue("first line")
+	input.CursorEnd()
+
+	m := model{
+		screen:    screenChat,
+		input:     input,
+		workspace: "E:\\bytemind",
+		sess:      session.New("E:\\bytemind"),
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter, Paste: true})
+	updated := got.(model)
+
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected paste enter not to submit, got %d chat items", len(updated.chatItems))
+	}
+	if !strings.Contains(updated.input.Value(), "\n") {
+		t.Fatalf("expected pasted enter to be inserted as newline, got %q", updated.input.Value())
+	}
+}
+
+func TestSuppressedEnterAfterPasteIsInsertedAsNewline(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.SetWidth(40)
+	input.SetHeight(3)
+	input.SetValue("line1")
+	input.CursorEnd()
+
+	m := model{
+		screen:         screenChat,
+		input:          input,
+		workspace:      "E:\\bytemind",
+		sess:           session.New("E:\\bytemind"),
+		lastPasteAt:    time.Now(),
+		lastInputAt:    time.Now(),
+		inputBurstSize: 12,
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := got.(model)
+
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected suppressed enter not to submit, got %d chat items", len(updated.chatItems))
+	}
+	if updated.input.Value() != "line1\n" {
+		t.Fatalf("expected suppressed enter to become newline, got %q", updated.input.Value())
+	}
+}
+
 func TestEnterSubmitsMultilinePrompt(t *testing.T) {
 	input := textarea.New()
 	input.Focus()
@@ -1747,7 +1832,7 @@ func TestFilteredCommandsShowsRootSelectorGroups(t *testing.T) {
 		usages = append(usages, item.Usage)
 	}
 
-	for _, want := range []string{"/help", "/session", "/new", "/quit"} {
+	for _, want := range []string{"/help", "/session", "/new", "/compact", "/quit"} {
 		if !containsString(usages, want) {
 			t.Fatalf("expected root selector to contain %q, got %v", want, usages)
 		}
@@ -1756,6 +1841,65 @@ func TestFilteredCommandsShowsRootSelectorGroups(t *testing.T) {
 		if containsString(usages, unwanted) {
 			t.Fatalf("did not expect root selector to contain %q", unwanted)
 		}
+	}
+}
+
+func TestHandleSlashCompactCompactsSession(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	sess.Messages = append(sess.Messages,
+		llm.NewUserTextMessage("first ask"),
+		llm.NewAssistantTextMessage(strings.Repeat("history details ", 30)),
+		llm.NewUserTextMessage("second ask"),
+		llm.NewAssistantTextMessage(strings.Repeat("more details ", 30)),
+	)
+	if err := store.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &compactCommandTestClient{
+		replies: []llm.Message{
+			{Role: llm.RoleAssistant, Content: "Goal: keep building\nDone: reviewed history\nPending: continue coding"},
+		},
+	}
+	runner := agent.NewRunner(agent.Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider: config.ProviderConfig{Model: "test-model"},
+			Stream:   false,
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	m := model{
+		runner:    runner,
+		store:     store,
+		sess:      sess,
+		workspace: workspace,
+		screen:    screenChat,
+	}
+	if err := m.handleSlashCommand("/compact"); err != nil {
+		t.Fatalf("expected /compact to succeed, got %v", err)
+	}
+	if m.statusNote != "Conversation compacted." {
+		t.Fatalf("expected compacted status note, got %q", m.statusNote)
+	}
+	if len(sess.Messages) != 1 || sess.Messages[0].Role != llm.RoleAssistant {
+		t.Fatalf("expected compacted session summary message, got %#v", sess.Messages)
+	}
+	if !strings.Contains(sess.Messages[0].Text(), "Goal: keep building") {
+		t.Fatalf("expected persisted summary content, got %q", sess.Messages[0].Text())
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one compaction LLM request, got %d", len(client.requests))
 	}
 }
 

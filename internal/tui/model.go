@@ -189,6 +189,7 @@ var commandItems = []commandItem{
 	{Name: "/help", Usage: "/help", Description: "Show usage and supported commands.", Kind: "command"},
 	{Name: "/session", Usage: "/session", Description: "Open the recent session list.", Kind: "command"},
 	{Name: "/new", Usage: "/new", Description: "Start a fresh session in this workspace.", Kind: "command"},
+	{Name: "/compact", Usage: "/compact", Description: "Compress long session history into a continuation summary.", Kind: "command"},
 	{Name: "/btw", Usage: "/btw <message>", Description: "Interject while a run is in progress.", Kind: "command"},
 	{Name: "/quit", Usage: "/quit", Description: "Exit the current TUI window.", Kind: "command"},
 	{Name: "/skills", Usage: "/skills", Description: "List available skills and current active skill.", Kind: "command"},
@@ -265,6 +266,11 @@ type model struct {
 	inputImageMentions    map[string]llm.AssetID
 	orphanedImages        map[llm.AssetID]time.Time
 	nextImageID           int
+	pastedContents        map[string]pastedContent
+	pastedOrder           []string
+	nextPasteID           int
+	pastedStateLoaded     bool
+	lastCompressedPasteAt time.Time
 	clipboard             clipboardImageReader
 	runCancel             context.CancelFunc
 	pendingBTW            []string
@@ -345,6 +351,9 @@ func newModel(opts Options) model {
 		inputImageMentions: make(map[string]llm.AssetID, 8),
 		orphanedImages:     make(map[llm.AssetID]time.Time, 8),
 		nextImageID:        nextSessionImageID(opts.Session),
+		pastedContents:     make(map[string]pastedContent, maxStoredPastedContents),
+		pastedOrder:        make([]string, 0, maxStoredPastedContents),
+		nextPasteID:        1,
 		clipboard:          defaultClipboardImageReader{},
 		startupGuide:       opts.StartupGuide,
 	}
@@ -359,6 +368,7 @@ func newModel(opts Options) model {
 	m.tokenUsage.SetUnavailable(!m.tokenHasOfficialUsage)
 	m.tokenUsage.SetBreakdown(m.tokenInput, m.tokenOutput, m.tokenContext)
 	m.ensureSessionImageAssets()
+	m.ensurePastedContentState()
 	m.syncInputStyle()
 	m.syncInputOverlays()
 	if m.mentionIndex != nil {
@@ -636,6 +646,17 @@ func isCtrlVPasteKey(msg tea.KeyMsg) bool {
 	return normalizeKeyName(msg.String()) == "ctrl+v"
 }
 
+func inputMutationSource(msg tea.KeyMsg) string {
+	source := strings.TrimSpace(msg.String())
+	if !msg.Paste {
+		return source
+	}
+	if source == "" {
+		return "paste"
+	}
+	return source + ":paste"
+}
+
 func isClipboardNoImageNote(note string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(note)), "clipboard has no image")
 }
@@ -841,7 +862,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Preserve multiline input shortcuts without triggering submit.
 		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyEnter})
 		if m.input.Value() != before {
-			m.handleInputMutation(before, m.input.Value(), msg.String())
+			m.handleInputMutation(before, m.input.Value(), inputMutationSource(msg))
 			m.syncInputOverlays()
 		}
 		return m, cmd
@@ -893,11 +914,59 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if msg.String() == "enter" {
+	if msg.String() == "enter" && !msg.Paste {
 		if m.shouldSuppressEnterAfterPaste() {
-			return m, nil
+			if m.busy {
+				return m, nil
+			}
+			before := m.input.Value()
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			if m.input.Value() != before {
+				m.handleInputMutation(before, m.input.Value(), "paste-enter")
+				m.syncInputOverlays()
+			}
+			return m, cmd
 		}
 		rawValue := m.input.Value()
+		if markerChain, ok := extractLeadingCompressedMarker(rawValue); ok {
+			tail := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(rawValue), markerChain))
+			if tail != "" {
+				if m.shouldCompressPastedText(tail, "paste-enter") {
+					marker, content, err := m.compressPastedText(tail)
+					if err != nil {
+						m.statusNote = err.Error()
+						return m, nil
+					}
+					combined := strings.TrimSpace(markerChain) + marker
+					m.setInputValue(combined)
+					m.syncInputOverlays()
+					m.statusNote = fmt.Sprintf("Detected another pasted block and compressed it as %s (%d lines). Press Enter again to send.", marker, content.Lines)
+					return m, nil
+				}
+				if len(tail) >= 24 || strings.Contains(tail, "\n") {
+					m.setInputValue(strings.TrimSpace(markerChain))
+					m.syncInputOverlays()
+					m.statusNote = "Detected continued paste chunk after compressed marker. Kept compressed markers only; press Enter again to send."
+					return m, nil
+				}
+			}
+		}
+		// Check whether the input has already been compressed.
+		isAlreadyCompressed := strings.Contains(rawValue, "[Paste #") || strings.Contains(rawValue, "[Pasted #")
+
+		// Compress long pasted content before sending.
+		if !isAlreadyCompressed && m.shouldCompressPastedText(rawValue, inputMutationSource(msg)) {
+			marker, content, err := m.compressPastedText(rawValue)
+			if err != nil {
+				m.statusNote = err.Error()
+				return m, nil
+			}
+			m.setInputValue(marker)
+			m.syncInputOverlays()
+			m.statusNote = fmt.Sprintf("Long pasted text (%d lines) compressed as %s. Press Enter again to send. Use [Paste #%s] or [Paste #%s line10~line20] later.", content.Lines, marker, content.ID, content.ID)
+			return m, nil
+		}
 		value := strings.TrimSpace(rawValue)
 		if m.startupGuide.Active && !strings.HasPrefix(value, "/") {
 			if err := m.handleStartupGuideSubmission(rawValue); err != nil {
@@ -965,11 +1034,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	after := m.input.Value()
+	mutationSource := inputMutationSource(msg)
 	if after != before {
-		m.handleInputMutation(before, after, msg.String())
+		m.handleInputMutation(before, after, mutationSource)
 		after = m.input.Value()
 	}
-	triggerClipboardImagePaste := shouldTriggerClipboardImagePaste(before, after, msg.String())
+	triggerClipboardImagePaste := shouldTriggerClipboardImagePaste(before, after, mutationSource)
 	if ctrlVPasteDetected {
 		triggerClipboardImagePaste = false
 	}
@@ -1432,6 +1502,7 @@ func (m *model) noteInputMutation(before, after, source string) {
 
 func (m *model) handleInputMutation(before, after, source string) {
 	m.noteInputMutation(before, after, source)
+
 	updated, note := m.applyInputImagePipeline(before, after, source)
 	if updated == after {
 		fallbackUpdated, fallbackNote := m.applyWholeInputImagePathFallback(after, source)
@@ -1442,6 +1513,15 @@ func (m *model) handleInputMutation(before, after, source string) {
 			note = fallbackNote
 		}
 	}
+
+	pasteUpdated, pasteNote := m.applyLongPastedTextPipeline(before, updated, source)
+	if pasteUpdated != updated {
+		updated = pasteUpdated
+	}
+	if strings.TrimSpace(note) == "" {
+		note = pasteNote
+	}
+
 	if updated != after {
 		m.setInputValue(updated)
 	}
@@ -2992,6 +3072,8 @@ func (m *model) handleSlashCommand(input string) error {
 		return m.runSkillCommand(input, fields)
 	case "/new":
 		return m.newSession()
+	case "/compact":
+		return m.runCompactCommand(input)
 	default:
 		return m.runDirectSkillCommand(input, fields)
 	}
@@ -3052,6 +3134,33 @@ func (m *model) runSkillCommand(input string, fields []string) error {
 	}
 	m.appendCommandExchange(input, "Active skill cleared.")
 	m.statusNote = "Skill cleared."
+	return nil
+}
+
+func (m *model) runCompactCommand(input string) error {
+	if m.runner == nil {
+		return fmt.Errorf("runner is unavailable")
+	}
+	if m.sess == nil {
+		return fmt.Errorf("session is unavailable")
+	}
+	summary, changed, err := m.runner.CompactSession(context.Background(), m.sess)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		m.appendCommandExchange(input, "No compaction needed yet. Start a longer conversation first.")
+		m.statusNote = "No compaction needed."
+		return nil
+	}
+	preview := compact(summary, 360)
+	response := "Conversation compacted for long-context continuation."
+	if strings.TrimSpace(preview) != "" {
+		response += "\nSummary preview: " + preview
+	}
+	m.chatItems, m.toolRuns = rebuildSessionTimeline(m.sess)
+	m.appendCommandExchange(input, response)
+	m.statusNote = "Conversation compacted."
 	return nil
 }
 
@@ -3159,6 +3268,12 @@ func (m *model) newSession() error {
 	m.orphanedImages = make(map[llm.AssetID]time.Time, 8)
 	m.nextImageID = nextSessionImageID(next)
 	m.ensureSessionImageAssets()
+	m.pastedContents = make(map[string]pastedContent, maxStoredPastedContents)
+	m.pastedOrder = make([]string, 0, maxStoredPastedContents)
+	m.nextPasteID = 1
+	m.pastedStateLoaded = false
+	m.lastCompressedPasteAt = time.Time{}
+	m.ensurePastedContentState()
 	m.pendingBTW = nil
 	m.interrupting = false
 	m.interruptSafe = false
@@ -3201,6 +3316,12 @@ func (m *model) resumeSession(prefix string) error {
 	m.orphanedImages = make(map[llm.AssetID]time.Time, 8)
 	m.nextImageID = nextSessionImageID(next)
 	m.ensureSessionImageAssets()
+	m.pastedContents = make(map[string]pastedContent, maxStoredPastedContents)
+	m.pastedOrder = make([]string, 0, maxStoredPastedContents)
+	m.nextPasteID = 1
+	m.pastedStateLoaded = false
+	m.lastCompressedPasteAt = time.Time{}
+	m.ensurePastedContentState()
 	m.syncInputImageRefs("")
 	m.pendingBTW = nil
 	m.interrupting = false
@@ -3364,7 +3485,7 @@ func renderChatCard(item chatEntry, width int) string {
 		return rendered
 	}
 
-	sep := lipgloss.NewStyle().Foreground(colorTool).Render("│")
+	sep := lipgloss.NewStyle().Foreground(colorTool).Render("|")
 	lines := strings.Split(rendered, "\n")
 	for i := range lines {
 		if strings.TrimSpace(lines[i]) == "" {
@@ -4151,17 +4272,12 @@ func isMeaningfulThinking(body, toolName string) bool {
 	}
 
 	cnPrefixes := []string{
-		"鎴戝皢璋冪敤",
-		"鎴戜細璋冪敤",
-		"鎴戝厛璋冪敤",
-		"鎴戣璋冪敤",
-		"先调用",
-		"鎴戝皢浣跨敤",
-		"鎴戜細浣跨敤",
-		"鎴戝厛浣跨敤",
-		"鎴戝皢杩愯",
-		"鎴戜細杩愯",
-		"鍏堟鏌ョ浉鍏充笂涓嬫枃",
+		"i will call",
+		"i will use",
+		"let me call",
+		"let me use",
+		"let me run",
+		"tool result",
 	}
 	for _, prefix := range cnPrefixes {
 		if strings.HasPrefix(raw, prefix) {
@@ -4189,12 +4305,6 @@ func shouldRenderThinkingFromDelta(body string) bool {
 		"approach",
 		"systematically",
 		"through build and test",
-		"我会先",
-		"先了解",
-		"鐒跺悗",
-		"最后",
-		"通过构建和测试",
-		"系统性",
 	}
 	for _, marker := range reasoningMarkers {
 		if strings.Contains(lower, marker) || strings.Contains(text, marker) {
@@ -4505,7 +4615,7 @@ func shouldExecuteFromPalette(item commandItem) bool {
 		return true
 	}
 	switch item.Name {
-	case "/help", "/session", "/skills", "/skill clear", "/new", "/quit":
+	case "/help", "/session", "/skills", "/skill clear", "/new", "/compact", "/quit":
 		return true
 	default:
 		return false
@@ -4526,6 +4636,7 @@ func (m model) helpText() string {
 		"/<skill-name> [k=v...]: activate a skill for this session.",
 		"/skill clear: clear the active skill.",
 		"/new: start a fresh session.",
+		"/compact: summarize long history into a compact continuation context.",
 		"/btw <message>: interject while a run is in progress.",
 		"/quit: exit the TUI.",
 		"",
@@ -4535,6 +4646,8 @@ func (m model) helpText() string {
 		"Use Ctrl+G to open or close the help panel.",
 		"Use Ctrl+F to search prompt history and restore previous input.",
 		"If provider setup is required, paste an API key in the input and press Enter.",
+		"Long pasted code/text is compressed to [Paste #N ~X lines].",
+		"Use [Paste], [Paste #N], [Paste line3], or [Paste #N line3~line7] to expand references.",
 		"After restoring a session with a saved plan, type 'continue execution' to resume it.",
 		"Approval requests appear above the input area when a shell command needs confirmation.",
 		"The footer keeps only the essential shortcuts: tab agents, / commands, Ctrl+F history, Ctrl+L sessions, Ctrl+C quit.",
@@ -5099,7 +5212,7 @@ func (m model) sessionText() string {
 func statusGlyph(status string) string {
 	switch planpkg.NormalizeStepStatus(status) {
 	case planpkg.StepCompleted:
-		return doneStyle.Render("✓")
+		return doneStyle.Render("v")
 	case planpkg.StepInProgress:
 		return accentStyle.Render(">")
 	case planpkg.StepBlocked:

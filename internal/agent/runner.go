@@ -290,8 +290,9 @@ func (r *Runner) RunPromptWithInput(ctx context.Context, sess *session.Session, 
 	availableTools := toolNames(r.registry.DefinitionsForMode(runMode))
 	instructionText := loadAGENTSInstruction(r.workspace)
 	webLookupInstruction := explicitWebLookupInstruction(userInput)
+	promptTokens := int(tokenusage.ApproximateRequestTokens([]llm.Message{userMessage}))
 
-	for step := 0; step < r.config.MaxIterations; step++ {
+	buildTurnMessages := func() ([]llm.Message, error) {
 		messages := make([]llm.Message, 0, len(sess.Messages)+2)
 		systemMessage := llm.NewTextMessage(llm.RoleSystem, systemPrompt(PromptInput{
 			Workspace:      r.workspace,
@@ -304,17 +305,41 @@ func (r *Runner) RunPromptWithInput(ctx context.Context, sess *session.Session, 
 			Instruction:    instructionText,
 		}))
 		if err := llm.ValidateMessage(systemMessage); err != nil {
-			return "", err
+			return nil, err
 		}
 		messages = append(messages, systemMessage)
 		if webLookupInstruction != "" {
 			webLookupMessage := llm.NewTextMessage(llm.RoleSystem, webLookupInstruction)
 			if err := llm.ValidateMessage(webLookupMessage); err != nil {
-				return "", err
+				return nil, err
 			}
 			messages = append(messages, webLookupMessage)
 		}
 		messages = append(messages, sess.Messages...)
+		return messages, nil
+	}
+
+	for step := 0; step < r.config.MaxIterations; step++ {
+		messages, err := buildTurnMessages()
+		if err != nil {
+			return "", err
+		}
+		if step == 0 {
+			requestTokens := int(tokenusage.ApproximateRequestTokens(messages))
+			compacted, compactErr := r.maybeAutoCompactSession(ctx, sess, promptTokens, requestTokens)
+			if compactErr != nil {
+				return "", compactErr
+			}
+			if compacted {
+				if out != nil {
+					fmt.Fprintf(out, "%scontext compacted to fit long-history budget%s\n", ansiDim, ansiReset)
+				}
+				messages, err = buildTurnMessages()
+				if err != nil {
+					return "", err
+				}
+			}
+		}
 
 		filteredTools := r.registry.DefinitionsForModeWithFilters(runMode, allowedToolNames, deniedToolNames)
 		caps := llm.DefaultModelCapabilities.Resolve(r.config.Provider.Model)

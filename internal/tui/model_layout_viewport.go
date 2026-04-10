@@ -87,31 +87,6 @@ func (m *model) storeViewportTopLookup(left, expectedTop, top int, found bool) (
 	return top, found
 }
 
-func candidateOriginsNear(expectedTop, maxOrigin, window int) []int {
-	if maxOrigin < 0 {
-		return nil
-	}
-	expectedTop = clamp(expectedTop, 0, maxOrigin)
-	out := make([]int, 0, window*2+1)
-	seen := make(map[int]struct{}, window*2+1)
-	add := func(candidate int) {
-		if candidate < 0 || candidate > maxOrigin {
-			return
-		}
-		if _, ok := seen[candidate]; ok {
-			return
-		}
-		seen[candidate] = struct{}{}
-		out = append(out, candidate)
-	}
-	add(expectedTop)
-	for delta := 1; delta <= window; delta++ {
-		add(expectedTop - delta)
-		add(expectedTop + delta)
-	}
-	return out
-}
-
 func (m model) viewportMatchScore(fullLines, viewportLines []string, left, candidate int) int {
 	score := 0
 	for row := 0; row < len(viewportLines); row++ {

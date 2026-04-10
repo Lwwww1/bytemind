@@ -620,6 +620,11 @@ func normalizeSelectionForRowLimit(start, end viewportSelectionPoint, maxRow int
 // Zone lookup auto-probes up to +/-4 rows to recover from terminal row drift.
 func (m model) inputPointFromMouse(x, y int, clampToBounds bool) (viewportSelectionPoint, bool) {
 	ensureZoneManager()
+	if m.screen == screenLanding {
+		if point, ok := m.inputPointFromBounds(x, y, clampToBounds); ok {
+			return point, true
+		}
+	}
 	if z := zone.Get(inputEditorZoneID); z != nil {
 		if point, ok := m.inputPointFromZone(z, x, y, clampToBounds); ok {
 			return point, true
@@ -638,6 +643,10 @@ func (m model) inputPointFromMouse(x, y int, clampToBounds bool) (viewportSelect
 		}
 	}
 
+	return m.inputPointFromBounds(x, y, clampToBounds)
+}
+
+func (m model) inputPointFromBounds(x, y int, clampToBounds bool) (viewportSelectionPoint, bool) {
 	left, right, top, bottom, innerLeft, innerTop, ok := m.inputInnerBounds()
 	if !ok {
 		return viewportSelectionPoint{}, false

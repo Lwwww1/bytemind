@@ -2138,7 +2138,7 @@ func (m model) renderScrollbar(viewHeight, contentHeight, currentOffset int) str
 	if !visible {
 		return ""
 	}
-	trackStyle := scrollbarTrackStyle.Copy().Background(lipgloss.Color("#1B1D22"))
+	trackStyle := scrollbarTrackStyle.Copy().Background(lipgloss.Color("#000000"))
 	thumbStyle := scrollbarThumbIdleStyle.Copy().Background(lipgloss.Color("#C2C7CF"))
 	if m.draggingScrollbar {
 		thumbStyle = scrollbarThumbActiveStyle.Copy().Background(lipgloss.Color("#E5E7EB"))

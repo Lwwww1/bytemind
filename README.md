@@ -118,3 +118,11 @@ Anthropic 示例：
 ## 开源
 
 本项目采用MIT开源协议。
+
+## Environment Variables
+
+See [docs/environment-variables.md](docs/environment-variables.md) for runtime TUI env vars:
+
+- `BYTEMIND_ENABLE_MOUSE`
+- `BYTEMIND_WINDOWS_INPUT_TTY`
+- `BYTEMIND_MOUSE_Y_OFFSET`

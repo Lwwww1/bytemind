@@ -40,15 +40,17 @@ flowchart TB
     PV["provider"]
     PO["policy"]
     RT["runtime"]
-    TO["tools"]
+    TO["tools (SkillTool/MCPTool/...)"]
   end
 
   subgraph S2["扩展与存储层"]
-    EX["extensions (MCP/Skills)"]
+    EX["extensions/plugins"]
+    SK["skill registry"]
+    MCP["MCP client/server"]
     ST["storage (session/task/audit)"]
   end
 
-  CORE["core(shared types)"]
+  CORE["core (shared types)"]
 
   AG --> SE
   AG --> CTX
@@ -56,12 +58,19 @@ flowchart TB
   AG --> PO
   AG --> RT
   AG --> TO
-  RT --> ST
-  TO --> EX
+
+  EX --> SK
+  EX --> MCP
+
+  TO --> SK
+  TO --> MCP
+
   AG --> ST
   RT --> ST
   SE --> ST
 
+  CORE --- AG
+  CORE --- TO
 
 ```
 ## 7. 目录结构（Go）

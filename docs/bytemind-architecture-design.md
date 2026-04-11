@@ -31,21 +31,48 @@
 ## 6. 总体架构
 
 ```mermaid
-flowchart LR
-    U["User (CLI)"] --> APP["app"]
-    APP --> AG["agent"]
+flowchart TB
+    subgraph L0["接入层"]
+      U["User (CLI)"] --> APP["app"]
+    end
 
-    AG --> TO["tools"]
-    AG --> RT["runtime"]
-    AG --> PL["policy"]
-    AG --> ST["storage"]
-    AG --> OB["observability"]
+    subgraph L1["编排层"]
+      AG["agent"]
+    end
 
-    TO --> EX["extensions"]
-    RT --> PL
-    RT --> ST
+    subgraph L2["能力层"]
+      TO["tools"]
+      RT["runtime"]
+      PL["policy"]
+    end
+
+    subgraph L3["基础设施层"]
+      ST["storage"]
+      OB["observability"]
+    end
+
+    subgraph L4["扩展层"]
+      EX["extensions (MCP/Skills/Plugin)"]
+    end
+
+    APP --> AG
+    AG --> TO
+    AG --> RT
+    AG --> PL
+    AG --> ST
+
     TO --> PL
     TO --> ST
+    TO --> EX
+    RT --> PL
+    RT --> ST
+
+    AG -.telemetry.-> OB
+    TO -.telemetry.-> OB
+    RT -.telemetry.-> OB
+    PL -.audit.-> OB
+    ST -.metrics.-> OB
+
 ```
 
 ## 7. 模块拆分与目录结构（Go）

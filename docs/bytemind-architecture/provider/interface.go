@@ -23,7 +23,7 @@ const (
 
 type Message struct {
 	Role       core.Role
-	Content    string
+	Parts      []core.MessagePart
 	Name       string
 	ToolCallID string
 }
@@ -36,6 +36,7 @@ type ToolSpec struct {
 
 type Request struct {
 	SessionID       core.SessionID
+	TraceID         core.TraceID
 	ModelID         ModelID
 	Messages        []Message
 	Tools           []ToolSpec
@@ -64,11 +65,11 @@ type Usage struct {
 
 type Event struct {
 	Type      EventType
-	EventID   string
+	Meta      core.EventMeta
 	Payload   json.RawMessage
 	Usage     *Usage
 	ErrorCode string
-	Timestamp time.Time
+	Retryable bool
 }
 
 type ModelInfo struct {
@@ -78,6 +79,13 @@ type ModelInfo struct {
 	MaxInputTokens  int
 	MaxOutputTokens int
 	SupportsTools   bool
+	UpdatedAt       time.Time
+}
+
+type RouteResult struct {
+	ProviderID ProviderID
+	ModelID    ModelID
+	Fallbacks  []ModelID
 }
 
 type Client interface {
@@ -93,10 +101,9 @@ type Registry interface {
 }
 
 type Router interface {
-	Route(ctx context.Context, requestedModel ModelID, metadata map[string]string) (ProviderID, ModelID, error)
+	Route(ctx context.Context, requestedModel ModelID, metadata map[string]string) (RouteResult, error)
 }
 
 type HealthChecker interface {
 	Check(ctx context.Context, id ProviderID) error
 }
-

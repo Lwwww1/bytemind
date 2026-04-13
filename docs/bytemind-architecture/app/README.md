@@ -19,6 +19,7 @@
 - `Bootstrapper`：根据配置构建模块集合 `ModuleSet`。
 - `LifecycleManager`：按依赖拓扑启动和关闭模块。
 - `Application`：应用进程入口（`Run/Shutdown`）。
+- 配置中的会话模式复用 `core.SessionMode`，避免跨模块常量漂移。
 
 ## 4. 启停策略
 - 启动顺序建议：`storage -> session -> policy -> tools/extensions -> context -> provider -> runtime -> agent`。

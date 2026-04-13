@@ -19,22 +19,30 @@ const (
 )
 
 type SessionEvent struct {
-	SessionID core.SessionID
-	EventID   string
-	Offset    int64
-	Type      string
-	Payload   []byte
-	CreatedAt time.Time
+	Meta    core.EventMeta
+	Offset  int64
+	Type    string
+	Payload []byte
 }
 
 type TaskLogRecord struct {
-	TaskID    core.TaskID
-	EventID   string
-	Offset    int64
-	Level     string
-	Message   string
-	Payload   []byte
-	CreatedAt time.Time
+	Meta    core.EventMeta
+	Offset  int64
+	Level   string
+	Message string
+	Payload []byte
+}
+
+type AuditEvent struct {
+	Meta       core.EventMeta
+	Actor      string
+	Action     string
+	Decision   core.Decision
+	ReasonCode string
+	RiskLevel  core.RiskLevel
+	Result     string
+	LatencyMS  int64
+	Payload    []byte
 }
 
 type SessionStore interface {
@@ -47,20 +55,26 @@ type TaskStore interface {
 	ReadLogFrom(ctx context.Context, taskID core.TaskID, offset int64, limit int) ([]TaskLogRecord, int64, error)
 }
 
+type AuditStore interface {
+	Append(ctx context.Context, event AuditEvent) error
+	ReadFrom(ctx context.Context, day time.Time, offset int64, limit int) ([]AuditEvent, int64, error)
+}
+
 type Locker interface {
 	LockSession(ctx context.Context, sessionID core.SessionID) (UnlockFunc, error)
 	LockTask(ctx context.Context, taskID core.TaskID) (UnlockFunc, error)
+	LockAuditDay(ctx context.Context, day time.Time) (UnlockFunc, error)
 }
 
 type UnlockFunc func() error
 
 type Deduplicator interface {
-	Seen(ctx context.Context, stream string, eventID string) (bool, error)
-	Mark(ctx context.Context, stream string, eventID string) error
+	Seen(ctx context.Context, stream string, eventID core.EventID) (bool, error)
+	Mark(ctx context.Context, stream string, eventID core.EventID) error
 }
 
 type Replayer interface {
 	ReplaySession(ctx context.Context, sessionID core.SessionID, fromOffset int64) (<-chan SessionEvent, error)
 	ReplayTask(ctx context.Context, taskID core.TaskID, fromOffset int64) (<-chan TaskLogRecord, error)
+	ReplayAudit(ctx context.Context, day time.Time, fromOffset int64) (<-chan AuditEvent, error)
 }
-

@@ -8,6 +8,12 @@ import (
 	"bytemind/internal/core"
 )
 
+const (
+	WarningBudgetThreshold  = 0.85
+	CriticalBudgetThreshold = 0.95
+	ReactiveRetryLimit      = 1
+)
+
 type ErrorCode string
 
 const (
@@ -19,7 +25,7 @@ const (
 
 type Message struct {
 	Role       core.Role
-	Content    string
+	Parts      []core.MessagePart
 	Name       string
 	ToolCallID string
 	CreatedAt  time.Time
@@ -43,9 +49,18 @@ type ProviderLimit struct {
 	MaxOutputTokens int
 }
 
+type CompactionMode string
+
+const (
+	CompactionWarning  CompactionMode = "warning"
+	CompactionCritical CompactionMode = "critical"
+	CompactionReactive CompactionMode = "reactive"
+)
+
 type BuildRequest struct {
 	SessionID      core.SessionID
-	UserInput      string
+	TraceID        core.TraceID
+	UserInputParts []core.MessagePart
 	History        []Message
 	SystemPrompts  []Message
 	Tools          []ToolDescriptor
@@ -55,13 +70,14 @@ type BuildRequest struct {
 }
 
 type BuildResult struct {
-	Messages       []Message
-	Tools          []ToolDescriptor
-	InputTokens    int
-	OutputTokens   int
-	UsageRatio     float64
-	CompactApplied bool
-	CompactMode    string
+	Messages         []Message
+	Tools            []ToolDescriptor
+	InputTokens      int
+	OutputTokens     int
+	UsageRatio       float64
+	CompactApplied   bool
+	CompactMode      CompactionMode
+	ReactiveRetryUse int
 }
 
 type BuildEventType string
@@ -76,10 +92,9 @@ const (
 
 type BuildEvent struct {
 	Type      BuildEventType
-	EventID   string
+	Meta      core.EventMeta
 	Payload   json.RawMessage
 	ErrorCode string
-	Timestamp time.Time
 }
 
 type BudgetPlan struct {
@@ -87,7 +102,7 @@ type BudgetPlan struct {
 	MaxInputTokens    int
 	UsageRatio        float64
 	NeedCompact       bool
-	CompactMode       string
+	CompactMode       CompactionMode
 	PreserveToolPairs bool
 }
 
@@ -101,10 +116,9 @@ type Budgeter interface {
 }
 
 type Compactor interface {
-	Compact(ctx stdctx.Context, history []Message, mode string, preserveToolPairs bool) ([]Message, error)
+	Compact(ctx stdctx.Context, history []Message, mode CompactionMode, preserveToolPairs bool) ([]Message, error)
 }
 
 type InvariantChecker interface {
 	Check(ctx stdctx.Context, messages []Message) error
 }
-

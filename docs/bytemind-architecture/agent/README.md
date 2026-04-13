@@ -6,6 +6,7 @@
 ## 2. 职责边界
 做什么：
 - 接收用户输入并读取会话快照。
+- 支持多模态消息（text/image/file/audio）进入主闭环。
 - 调用 `context` 构建模型请求并执行预算/压缩。
 - 调用 `provider` 消费流式模型事件。
 - 工具调用前走 `policy` 决策，再调度 `tools`。
@@ -24,6 +25,7 @@
 - `PolicyGateway`：执行工具调用前权限决策。
 - `ToolGateway`：执行工具并返回工具结果事件流。
 - `RuntimeGateway`：创建和等待子代理任务。
+- `StorageGateway`：写入任务日志与审计事件。
 
 ## 4. 主闭环
 1. 读取 `session` 快照。  
@@ -31,7 +33,7 @@
 3. 调用 `provider`。  
 4. 工具意图先过 `policy`。  
 5. 调用 `tools/runtime`。  
-6. 写入 `session/storage` 并返回终态。  
+6. 写入 `session/storage/audit` 并返回终态。  
 
 ## 5. 测试策略
 - 主循环契约测试：事件顺序与终态一致性。

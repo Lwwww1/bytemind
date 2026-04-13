@@ -33,7 +33,6 @@ const (
 )
 
 type ToolMetadata struct {
-	Layer            string
 	SideEffectLevel  SideEffectLevel
 	IdempotencyLevel IdempotencyLevel
 	DefaultTimeout   time.Duration
@@ -47,6 +46,7 @@ type ToolMetadataProvider interface {
 type ToolUseContext struct {
 	SessionID core.SessionID
 	TaskID    core.TaskID
+	TraceID   core.TraceID
 	Workspace string
 	Invoker   string
 	Attempt   int
@@ -67,11 +67,10 @@ type ToolEvent struct {
 	Type      ToolEventType
 	ToolName  string
 	CallID    string
-	EventID   string
+	Meta      core.EventMeta
 	Offset    int64
 	Payload   json.RawMessage
 	ErrorCode string
-	Timestamp time.Time
 }
 
 type ErrorCode string
@@ -106,4 +105,3 @@ type Validator interface {
 type Executor interface {
 	Run(ctx context.Context, tool Tool, args json.RawMessage, tctx ToolUseContext) (<-chan ToolEvent, error)
 }
-

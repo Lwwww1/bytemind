@@ -20,11 +20,13 @@
 - `Registry`：工具注册、查询、枚举。
 - `Validator`：参数与 schema 校验。
 - `Executor`：工具执行调度与事件流封装。
+- 统一事件元字段复用 `core.EventMeta`，支持 trace 贯通。
 
 ## 4. 三层体系
 - 原子层：ReadFile/EditFile/WriteFile/Glob/Grep/Bash。
 - 组合层：TestRunner/GitWorkflow/TaskOutputReader。
 - 协作层：AgentTool/MCPTool/SkillTool/TeamTool。
+- 该分层用于架构分类与文档沟通，不作为 `Tool` 运行时必填字段。
 
 ## 5. 测试策略
 - Contract Test：schema 与事件流一致性。

@@ -34,13 +34,13 @@ const (
 	ErrCodeToolBridge      ErrorCode = "tool_bridge_failed"
 )
 
-type ExtensionInfo struct {
+type Manifest struct {
 	ID          string
 	Name        string
 	Kind        ExtensionKind
 	Version     string
-	Status      ExtensionStatus
 	Description string
+	Entry       string
 	UpdatedAt   time.Time
 }
 
@@ -48,6 +48,12 @@ type Capability struct {
 	Name        string
 	Description string
 	SideEffects []string
+}
+
+type ExtensionInfo struct {
+	Manifest     Manifest
+	Status       ExtensionStatus
+	Capabilities []Capability
 }
 
 type ActivateOptions struct {
@@ -58,7 +64,6 @@ type ActivateOptions struct {
 
 type Extension interface {
 	Info() ExtensionInfo
-	Capabilities() []Capability
 	Activate(ctx context.Context, opts ActivateOptions) error
 	Deactivate(ctx context.Context) error
 	Health(ctx context.Context) (ExtensionStatus, error)
@@ -67,6 +72,7 @@ type Extension interface {
 type ToolUseContext struct {
 	SessionID core.SessionID
 	TaskID    core.TaskID
+	TraceID   core.TraceID
 	Workspace string
 	Metadata  map[string]string
 }
@@ -74,10 +80,9 @@ type ToolUseContext struct {
 type ToolEvent struct {
 	Type      string
 	CallID    string
-	EventID   string
+	Meta      core.EventMeta
 	Payload   json.RawMessage
 	ErrorCode string
-	Timestamp time.Time
 }
 
 type ExtensionTool interface {
@@ -101,4 +106,3 @@ type Manager interface {
 type Resolver interface {
 	ResolveTools(ctx context.Context, extensionID string) ([]ExtensionTool, error)
 }
-

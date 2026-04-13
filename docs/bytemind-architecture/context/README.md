@@ -5,7 +5,7 @@
 
 ## 2. 职责边界
 做什么：
-- 组合系统指令、会话历史、用户输入、工具 schema、运行时提示。
+- 组合系统指令、会话历史、多模态用户输入、工具 schema、运行时提示。
 - 计算 token 预算并输出预算计划。
 - 按 warning/critical/reactive 策略执行压缩。
 - 校验工具调用配对和系统约束不变量。
@@ -25,6 +25,7 @@
 - warning：`>= 85%`。
 - critical：`>= 95%`。
 - `prompt_too_long` 时允许一次 reactive compact + 重试。
+- 压缩后必须保留 `tool_use` / `tool_result` 成对语义。
 
 ## 5. 测试策略
 - 预算测试：不同模型上限下稳定。

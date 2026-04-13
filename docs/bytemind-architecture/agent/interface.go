@@ -21,15 +21,16 @@ const (
 
 type Message struct {
 	Role       core.Role
-	Content    string
-	Name       string // message source name, e.g. tool or sub-agent name
+	Parts      []core.MessagePart
+	Name       string
 	ToolCallID string
 	CreatedAt  time.Time
 }
 
 type TurnRequest struct {
 	SessionID       core.SessionID
-	Input           string
+	TraceID         core.TraceID
+	InputParts      []core.MessagePart
 	MaxInputTokens  int
 	MaxOutputTokens int
 	Metadata        map[string]string
@@ -49,11 +50,9 @@ const (
 type TurnEvent struct {
 	Type      TurnEventType
 	TurnID    string
-	SessionID core.SessionID
-	TaskID    core.TaskID
+	Meta      core.EventMeta
 	Payload   json.RawMessage
 	ErrorCode string
-	Timestamp time.Time
 }
 
 type ToolCall struct {
@@ -65,6 +64,7 @@ type ToolCall struct {
 type PermissionDecision struct {
 	Decision   core.Decision
 	ReasonCode string
+	RiskLevel  core.RiskLevel
 }
 
 type Engine interface {
@@ -73,7 +73,7 @@ type Engine interface {
 
 type SessionSnapshot struct {
 	SessionID core.SessionID
-	Mode      string
+	Mode      core.SessionMode
 	Messages  []Message
 	Metadata  map[string]string
 }
@@ -127,7 +127,9 @@ type RuntimeGateway interface {
 
 type SubAgentRequest struct {
 	ParentSessionID core.SessionID
-	Mode            string
+	ParentTaskID    core.TaskID
+	TraceID         core.TraceID
+	Mode            core.SessionMode
 	Prompt          string
 	Background      bool
 }
@@ -142,3 +144,18 @@ type SubAgentResult struct {
 	ErrorCode string
 }
 
+type AuditRecord struct {
+	Meta       core.EventMeta
+	Actor      string
+	Action     string
+	Decision   core.Decision
+	ReasonCode string
+	RiskLevel  core.RiskLevel
+	Result     string
+	LatencyMS  int64
+}
+
+type StorageGateway interface {
+	WriteAudit(ctx context.Context, record AuditRecord) error
+	WriteTaskLog(ctx context.Context, taskID core.TaskID, payload json.RawMessage) error
+}

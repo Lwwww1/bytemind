@@ -1,6 +1,10 @@
 package app
 
-import "context"
+import (
+	"context"
+
+	"bytemind/internal/core"
+)
 
 type ErrorCode string
 
@@ -21,7 +25,7 @@ type ConfigSource struct {
 
 type Config struct {
 	WorkspaceRoot string
-	SessionMode   string
+	SessionMode   core.SessionMode
 	LogLevel      string
 }
 
@@ -61,4 +65,3 @@ type Application interface {
 	Run(ctx context.Context) error
 	Shutdown(ctx context.Context) error
 }
-

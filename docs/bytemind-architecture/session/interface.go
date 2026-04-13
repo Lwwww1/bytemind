@@ -7,15 +7,6 @@ import (
 	"bytemind/internal/core"
 )
 
-type SessionMode string
-
-const (
-	ModeDefault           SessionMode = "default"
-	ModeAcceptEdits       SessionMode = "acceptEdits"
-	ModeBypassPermissions SessionMode = "bypassPermissions"
-	ModePlan              SessionMode = "plan"
-)
-
 type SessionStatus string
 
 const (
@@ -34,10 +25,12 @@ const (
 )
 
 type Message struct {
-	ID        string
-	Role      core.Role
-	Content   string
-	CreatedAt time.Time
+	ID         string
+	Role       core.Role
+	Parts      []core.MessagePart
+	Name       string
+	ToolCallID string
+	CreatedAt  time.Time
 }
 
 type TurnRecord struct {
@@ -56,11 +49,12 @@ type UsageStat struct {
 
 type SessionSnapshot struct {
 	ID           core.SessionID
-	Mode         SessionMode
+	Mode         core.SessionMode
 	Status       SessionStatus
 	Messages     []Message
 	Usage        UsageStat
 	ActiveTasks  []core.TaskID
+	Metadata     map[string]string
 	CreatedAt    time.Time
 	LastActiveAt time.Time
 }
@@ -77,23 +71,21 @@ const (
 
 type SessionEvent struct {
 	Type      SessionEventType
-	SessionID core.SessionID
-	EventID   string
+	Meta      core.EventMeta
 	Offset    int64
 	Payload   []byte
 	ErrorCode string
-	Timestamp time.Time
 }
 
 type CreateRequest struct {
-	Mode     SessionMode
+	Mode     core.SessionMode
 	Metadata map[string]string
 }
 
 type Manager interface {
 	Create(ctx context.Context, req CreateRequest) (SessionSnapshot, error)
 	Get(ctx context.Context, id core.SessionID) (SessionSnapshot, error)
-	SwitchMode(ctx context.Context, id core.SessionID, mode SessionMode) error
+	SwitchMode(ctx context.Context, id core.SessionID, mode core.SessionMode) error
 	AppendTurn(ctx context.Context, id core.SessionID, turn TurnRecord) error
 	AttachTask(ctx context.Context, id core.SessionID, taskID core.TaskID) error
 	DetachTask(ctx context.Context, id core.SessionID, taskID core.TaskID) error
@@ -105,4 +97,3 @@ type Reader interface {
 	ReadEvents(ctx context.Context, id core.SessionID, fromOffset int64, limit int) ([]SessionEvent, int64, error)
 	Replay(ctx context.Context, id core.SessionID, fromOffset int64) (<-chan SessionEvent, error)
 }
-

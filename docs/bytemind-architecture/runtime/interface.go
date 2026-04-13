@@ -20,6 +20,7 @@ const (
 
 type TaskSpec struct {
 	SessionID        core.SessionID
+	TraceID          core.TraceID
 	Name             string
 	Kind             string
 	Input            []byte
@@ -28,6 +29,7 @@ type TaskSpec struct {
 	MaxRetries       int
 	Background       bool
 	IsolatedWorktree bool
+	Metadata         map[string]string
 }
 
 type Task struct {
@@ -50,12 +52,11 @@ type TaskResult struct {
 }
 
 type TaskLogEntry struct {
-	TaskID    core.TaskID
-	Offset    int64
-	Level     string
-	Message   string
-	EventID   string
-	Timestamp time.Time
+	TaskID  core.TaskID
+	Offset  int64
+	Level   string
+	Message string
+	Meta    core.EventMeta
 }
 
 type TaskEventType string
@@ -73,8 +74,8 @@ type TaskEvent struct {
 	Status    core.TaskStatus
 	Log       *TaskLogEntry
 	Result    *TaskResult
+	Meta      core.EventMeta
 	ErrorCode string
-	Timestamp time.Time
 }
 
 type TaskManager interface {
@@ -82,6 +83,7 @@ type TaskManager interface {
 	Get(ctx context.Context, id core.TaskID) (Task, error)
 	Cancel(ctx context.Context, id core.TaskID, reason string) error
 	Retry(ctx context.Context, id core.TaskID) (core.TaskID, error)
+	Wait(ctx context.Context, id core.TaskID) (TaskResult, error)
 	Stream(ctx context.Context, id core.TaskID) (<-chan TaskEvent, error)
 }
 
@@ -105,4 +107,3 @@ type QuotaManager interface {
 	Acquire(ctx context.Context, key string, n int) error
 	Release(ctx context.Context, key string, n int) error
 }
-

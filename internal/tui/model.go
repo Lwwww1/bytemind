@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"bytemind/internal/agent"
 	"bytemind/internal/assets"
@@ -222,6 +221,7 @@ type mouseSelectionScrollTickMsg struct {
 var commandItems = []commandItem{
 	{Name: "/help", Usage: "/help", Description: "Show usage and supported commands.", Kind: "command"},
 	{Name: "/session", Usage: "/session", Description: "Open the recent session list.", Kind: "command"},
+	{Name: "/skills-select", Usage: "/skills-select", Description: "Open the loaded skills picker.", Kind: "command"},
 	{Name: "/new", Usage: "/new", Description: "Start a fresh session in this workspace.", Kind: "command"},
 	{Name: "/compact", Usage: "/compact", Description: "Compress long session history into a continuation summary.", Kind: "command"},
 	{Name: "/btw", Usage: "/btw <message>", Description: "Interject while a run is in progress.", Kind: "command"},
@@ -261,6 +261,7 @@ type model struct {
 	screen                screenKind
 	mode                  agentMode
 	sessionsOpen          bool
+	skillsOpen            bool
 	helpOpen              bool
 	commandOpen           bool
 	mentionOpen           bool
@@ -796,10 +797,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "ctrl+f":
-		if m.approval != nil || m.helpOpen || m.sessionsOpen || m.commandOpen || m.mentionOpen {
+		if m.approval != nil || m.helpOpen || m.sessionsOpen || m.skillsOpen || m.commandOpen || m.mentionOpen {
 			return m, nil
 		}
 		m.openPromptSearch(promptSearchModeQuick)
+		return m, nil
+	case "ctrl+k":
+		if m.approval != nil || m.helpOpen || m.sessionsOpen || m.commandOpen || m.mentionOpen || m.busy {
+			return m, nil
+		}
+		if err := m.openSkillsPicker(); err != nil {
+			m.statusNote = err.Error()
+		}
 		return m, nil
 	}
 
@@ -828,6 +837,44 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.commandOpen {
 		return m.handleCommandPaletteKey(msg)
+	}
+
+	if m.skillsOpen {
+		items := m.skillPickerItems()
+		switch {
+		case isPageUpKey(msg):
+			if len(items) > 0 {
+				m.commandCursor = max(0, m.commandCursor-commandPageSize)
+			}
+			return m, nil
+		case isPageDownKey(msg):
+			if len(items) > 0 {
+				m.commandCursor = min(len(items)-1, m.commandCursor+commandPageSize)
+			}
+			return m, nil
+		}
+
+		switch msg.String() {
+		case "esc":
+			m.skillsOpen = false
+			m.commandCursor = 0
+		case "up", "k":
+			if len(items) > 0 {
+				m.commandCursor = max(0, m.commandCursor-1)
+			}
+		case "down", "j":
+			if len(items) > 0 {
+				m.commandCursor = min(len(items)-1, m.commandCursor+1)
+			}
+		case "enter":
+			if err := m.activateSelectedSkill(); err != nil {
+				m.statusNote = err.Error()
+				return m, nil
+			}
+			m.skillsOpen = false
+			m.commandCursor = 0
+		}
+		return m, nil
 	}
 
 	if m.mentionOpen {
@@ -1335,6 +1382,7 @@ func (m *model) bindMentionImageAsset(path string, assetID llm.AssetID) {
 
 func (m *model) openCommandPalette() {
 	m.commandOpen = true
+	m.skillsOpen = false
 	m.commandCursor = 0
 	m.setInputValue("/")
 	m.closeMentionPalette()
@@ -2059,6 +2107,8 @@ func (m model) View() string {
 		rendered = renderModal(m.width, m.height, m.renderHelpModal())
 	case m.sessionsOpen:
 		rendered = renderModal(m.width, m.height, m.renderSessionsModal())
+	case m.skillsOpen:
+		rendered = renderModal(m.width, m.height, m.renderSkillsModal())
 	}
 	return zone.Scan(rendered)
 }
@@ -2067,111 +2117,6 @@ func (m *model) SetUsage(used, total int) tea.Cmd {
 	m.tokenHasOfficialUsage = true
 	m.tokenUsage.SetUnavailable(false)
 	return m.tokenUsage.SetUsage(used, 0)
-}
-
-func (m model) renderConversation() string {
-	if len(m.chatItems) == 0 {
-		return mutedStyle.Render("No messages yet. Start with an instruction like \"analyze this repo\" or \"implement a TUI shell\".")
-	}
-	width := m.viewport.Width
-	if width <= 0 {
-		width = m.conversationPanelWidth()
-	}
-	width = max(24, width)
-	blocks := make([]string, 0, len(m.chatItems))
-	for i := 0; i < len(m.chatItems); {
-		item := m.chatItems[i]
-		if item.Kind == "user" {
-			blocks = append(blocks, renderChatRow(item, width))
-			i++
-			continue
-		}
-
-		j := i
-		for j < len(m.chatItems) && m.chatItems[j].Kind != "user" {
-			j++
-		}
-		blocks = append(blocks, renderBytemindRunRow(m.chatItems[i:j], width))
-		i = j
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, blocks...)
-}
-
-func (m model) renderConversationCopy() string {
-	if len(m.chatItems) == 0 {
-		return "No messages yet. Start with an instruction like \"analyze this repo\" or \"implement a TUI shell\"."
-	}
-	width := m.viewport.Width
-	if width <= 0 {
-		width = m.conversationPanelWidth()
-	}
-	width = max(24, width)
-	blocks := make([]string, 0, len(m.chatItems))
-	for i := 0; i < len(m.chatItems); {
-		item := m.chatItems[i]
-		if item.Kind == "user" {
-			blocks = append(blocks, renderChatCopySection(item, width))
-			i++
-			continue
-		}
-
-		j := i
-		for j < len(m.chatItems) && m.chatItems[j].Kind != "user" {
-			j++
-		}
-
-		runParts := make([]string, 0, j-i)
-		for _, runItem := range m.chatItems[i:j] {
-			runParts = append(runParts, renderChatCopySection(runItem, width))
-		}
-		blocks = append(blocks, strings.Join(runParts, "\n\n"))
-		i = j
-	}
-	return strings.Join(blocks, "\n\n")
-}
-
-func renderChatCopySection(item chatEntry, width int) string {
-	title := strings.TrimSpace(item.Title)
-	status := strings.TrimSpace(item.Status)
-	if status == "final" {
-		status = ""
-	}
-	switch item.Kind {
-	case "assistant":
-		if strings.EqualFold(item.Status, "thinking") {
-			title = "thinking"
-			status = ""
-		}
-	case "user":
-		if strings.TrimSpace(item.Meta) != "" {
-			title = strings.TrimSpace(item.Meta)
-		}
-	}
-
-	if title == "" {
-		switch item.Kind {
-		case "assistant":
-			title = assistantLabel
-		case "user":
-			title = "You"
-		case "tool":
-			title = "Tool"
-		default:
-			title = "Message"
-		}
-	}
-	if status != "" {
-		title += "  " + status
-	}
-
-	body := strings.TrimRight(formatChatBody(item, width), "\n")
-	if item.Kind == "tool" && strings.TrimSpace(body) == "" {
-		return title
-	}
-	if strings.TrimSpace(body) == "" {
-		return title
-	}
-	return title + "\n" + body
 }
 
 func (m *model) syncViewportSize() {
@@ -2368,171 +2313,6 @@ func (m model) renderLanding() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
-func (m model) renderFooter() string {
-	ensureZoneManager()
-	inputBorder := m.inputBorderStyle().
-		Width(m.chatPanelInnerWidth()).
-		Render(zone.Mark(inputEditorZoneID, m.renderInputEditorView()))
-	parts := make([]string, 0, 4)
-	if m.approval != nil {
-		parts = append(parts, m.renderApprovalBanner())
-	}
-	if m.startupGuide.Active {
-		parts = append(parts, m.renderStartupGuidePanel())
-	} else if m.promptSearchOpen {
-		parts = append(parts, m.renderPromptSearchPalette())
-	} else if m.mentionOpen {
-		parts = append(parts, m.renderMentionPalette())
-	} else if m.commandOpen {
-		parts = append(parts, m.renderCommandPalette())
-	}
-	if banner := m.renderActiveSkillBanner(); banner != "" {
-		parts = append(parts, banner)
-	}
-	parts = append(parts, inputBorder, m.renderFooterInfoLine())
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
-}
-
-func (m model) renderModeTabs() string {
-	buildStyle := modeTabStyle.Copy().Foreground(colorMuted)
-	planStyle := modeTabStyle.Copy().Foreground(colorMuted)
-	if m.mode == modeBuild {
-		buildStyle = buildStyle.Copy().Foreground(colorAccent).Bold(true)
-	} else {
-		planStyle = planStyle.Copy().Foreground(colorThinking).Bold(true)
-	}
-	parts := []string{
-		buildStyle.Render("Build"),
-		planStyle.Render("Plan"),
-	}
-	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
-}
-
-func (m model) renderFooterInfoLine() string {
-	width := max(24, m.chatPanelInnerWidth())
-	left := m.renderModeTabs()
-	modelName := strings.TrimSpace(m.currentModelLabel())
-	if modelName == "-" {
-		modelName = ""
-	}
-	right := renderFooterInfoRight(modelName, 1<<30)
-
-	leftW := lipgloss.Width(left)
-	rightW := lipgloss.Width(right)
-	gap := width - leftW - rightW
-	if gap < 2 {
-		available := max(10, width-leftW-2)
-		if available <= 10 {
-			return lipgloss.NewStyle().Width(width).Render(renderFooterInfoRight(modelName, width))
-		}
-		compacted := renderFooterInfoRight(modelName, available)
-		gap = width - leftW - lipgloss.Width(compacted)
-		return lipgloss.NewStyle().Width(width).Render(left + strings.Repeat(" ", max(2, gap)) + compacted)
-	}
-
-	return lipgloss.NewStyle().Width(width).Render(left + strings.Repeat(" ", gap) + right)
-}
-
-func renderFooterInfoRight(modelName string, maxWidth int) string {
-	maxWidth = max(1, maxWidth)
-	modelName = strings.TrimSpace(modelName)
-	if modelName == "" {
-		return renderInlineShortcutHintsCompacted(footerShortcutHints, maxWidth)
-	}
-	modelText := compact(modelName, maxWidth)
-	modelWidth := runewidth.StringWidth(modelText)
-	if modelWidth >= maxWidth {
-		return mutedStyle.Render(modelText)
-	}
-	dividerPlain := "  |  "
-	dividerWidth := runewidth.StringWidth(dividerPlain)
-	remaining := maxWidth - modelWidth - dividerWidth
-	if remaining <= 0 {
-		return mutedStyle.Render(modelText)
-	}
-	hints := renderInlineShortcutHintsCompacted(footerShortcutHints, remaining)
-	if strings.TrimSpace(hints) == "" {
-		return mutedStyle.Render(modelText)
-	}
-	return mutedStyle.Render(modelText) + footerHintDividerStyle.Render(dividerPlain) + hints
-}
-
-func renderFooterShortcutHints() string {
-	return renderInlineShortcutHints(footerShortcutHints)
-}
-
-func renderInlineShortcutHints(hints []footerShortcutHint) string {
-	parts := make([]string, 0, len(hints))
-	for _, hint := range hints {
-		parts = append(parts, footerHintKeyStyle.Render(hint.Key)+" "+footerHintLabelStyle.Render(hint.Label))
-	}
-	return strings.Join(parts, footerHintDividerStyle.Render("  |  "))
-}
-
-func renderInlineShortcutHintsCompacted(hints []footerShortcutHint, maxWidth int) string {
-	maxWidth = max(1, maxWidth)
-	dividerPlain := "  |  "
-	dividerWidth := runewidth.StringWidth(dividerPlain)
-
-	used := 0
-	parts := make([]string, 0, len(hints)*2)
-	for _, hint := range hints {
-		key := strings.TrimSpace(hint.Key)
-		label := strings.TrimSpace(hint.Label)
-		if key == "" {
-			continue
-		}
-		segmentPlain := key
-		segmentStyled := footerHintKeyStyle.Render(key)
-		if label != "" {
-			segmentPlain += " " + label
-			segmentStyled += " " + footerHintLabelStyle.Render(label)
-		}
-		needDivider := len(parts) > 0
-		prefixWidth := 0
-		if needDivider {
-			prefixWidth = dividerWidth
-		}
-		segmentWidth := runewidth.StringWidth(segmentPlain)
-		if used+prefixWidth+segmentWidth <= maxWidth {
-			if needDivider {
-				parts = append(parts, footerHintDividerStyle.Render(dividerPlain))
-				used += dividerWidth
-			}
-			parts = append(parts, segmentStyled)
-			used += segmentWidth
-			continue
-		}
-
-		remaining := maxWidth - used - prefixWidth
-		if remaining <= 0 {
-			break
-		}
-		if needDivider {
-			parts = append(parts, footerHintDividerStyle.Render(dividerPlain))
-			used += dividerWidth
-		}
-
-		keyWidth := runewidth.StringWidth(key)
-		if keyWidth >= remaining {
-			parts = append(parts, footerHintKeyStyle.Render(compact(key, remaining)))
-			break
-		}
-		if label == "" {
-			parts = append(parts, footerHintKeyStyle.Render(key))
-			break
-		}
-		labelSpace := remaining - keyWidth - 1
-		if labelSpace <= 0 {
-			parts = append(parts, footerHintKeyStyle.Render(key))
-			break
-		}
-		parts = append(parts, footerHintKeyStyle.Render(key)+" "+footerHintLabelStyle.Render(compact(label, labelSpace)))
-		break
-	}
-	return strings.Join(parts, "")
-}
-
 func (m model) renderSessionsModal() string {
 	lines := []string{modalTitleStyle.Render("Recent Sessions"), mutedStyle.Render("Up/Down to select, Enter to resume, Esc to close"), ""}
 	if len(m.sessions) == 0 {
@@ -2557,9 +2337,44 @@ func (m model) renderSessionsModal() string {
 	return modalBoxStyle.Width(min(96, max(56, m.width-12))).Render(strings.Join(lines, "\n"))
 }
 
+func (m model) renderSkillsModal() string {
+	lines := []string{modalTitleStyle.Render("Loaded Skills"), mutedStyle.Render("Up/Down to select, Enter to activate, Esc to close"), ""}
+	items := m.skillPickerItems()
+	if len(items) == 0 {
+		lines = append(lines, "No loaded skills available.")
+	} else {
+		activeName := ""
+		if m.sess != nil && m.sess.ActiveSkill != nil {
+			activeName = strings.TrimSpace(m.sess.ActiveSkill.Name)
+		}
+		for i, item := range items {
+			prefix := "  "
+			style := lipgloss.NewStyle()
+			if i == clamp(m.commandCursor, 0, len(items)-1) {
+				prefix = "> "
+				style = style.Foreground(colorAccent).Bold(true)
+			}
+			label := fmt.Sprintf("%s%s", prefix, item.Name)
+			if strings.EqualFold(activeName, item.Name) {
+				label += "  (active)"
+			}
+			lines = append(lines, style.Render(label))
+			if strings.TrimSpace(item.Description) != "" {
+				lines = append(lines, mutedStyle.Render("   "+item.Description))
+			}
+			lines = append(lines, "")
+		}
+	}
+	return modalBoxStyle.Width(min(96, max(56, m.width-12))).Render(strings.Join(lines, "\n"))
+}
+
 func (m model) renderHelpModal() string {
-	return modalBoxStyle.Width(min(88, max(54, m.width-16))).Render(
-		lipgloss.JoinVertical(lipgloss.Left, modalTitleStyle.Render("Help"), m.helpText()),
+
+	modalWidth := min(88, max(54, m.width-16))
+	innerWidth := max(20, modalWidth-modalBoxStyle.GetHorizontalFrameSize())
+	body := renderHelpMarkdown(m.helpText(), innerWidth)
+	return modalBoxStyle.Width(modalWidth).Render(
+		lipgloss.JoinVertical(lipgloss.Left, modalTitleStyle.Render("Help"), body),
 	)
 }
 
@@ -2642,71 +2457,6 @@ func (m model) renderTopInfoLine(left, right string, width int) string {
 	}
 	gap := width - leftW - rightW
 	return left + strings.Repeat(" ", max(2, gap)) + right
-}
-
-func (m model) renderPromptSearchPalette() string {
-	width := m.commandPaletteWidth()
-	items := m.promptSearchMatches
-	modeLabel := "search"
-	if m.promptSearchMode == promptSearchModePanel {
-		modeLabel = "panel"
-	}
-	if len(items) == 0 {
-		query := strings.TrimSpace(m.promptSearchQuery)
-		if query == "" {
-			query = "(all)"
-		}
-		content := []string{
-			commandPaletteMetaStyle.Render("Prompt history " + modeLabel),
-			commandPaletteMetaStyle.Render("query: "+query+"  (filters: ") + renderInlineShortcutHints(promptSearchFilterHints) + commandPaletteMetaStyle.Render(")"),
-			commandPaletteMetaStyle.Render("No matching prompts."),
-			commandPaletteMetaStyle.Render("Type to filter  ") +
-				renderInlineShortcutHints([]footerShortcutHint{
-					{Key: "PgUp/PgDn", Label: "page"},
-					{Key: "Enter", Label: "apply"},
-					{Key: "Esc", Label: "close"},
-				}),
-		}
-		return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, content...))
-	}
-
-	selected, _ := m.selectedPromptSearchEntry()
-	rowWidth := max(1, width-commandPaletteStyle.GetHorizontalFrameSize())
-	rows := make([]string, 0, promptSearchPageSize+3)
-	for _, item := range m.visiblePromptSearchEntriesPage() {
-		rowStyle := commandPaletteRowStyle
-		textStyle := commandPaletteDescStyle
-		if item.Timestamp.Equal(selected.Timestamp) && item.SessionID == selected.SessionID && item.Prompt == selected.Prompt {
-			rowStyle = commandPaletteSelectedRowStyle
-			textStyle = commandPaletteSelectedDescStyle
-		}
-		workspaceName := filepath.Base(strings.TrimSpace(item.Workspace))
-		if workspaceName == "" || workspaceName == "." {
-			workspaceName = strings.TrimSpace(item.Workspace)
-		}
-		if workspaceName == "" {
-			workspaceName = "-"
-		}
-		meta := fmt.Sprintf("%s  ws:%s  sid:%s", item.Timestamp.Local().Format("01-02 15:04"), compact(workspaceName, 16), compact(item.SessionID, 12))
-		rowText := compact(strings.TrimSpace(item.Prompt), max(12, rowWidth-2))
-		rows = append(rows, rowStyle.Width(rowWidth).Render(textStyle.Render(rowText)))
-		rows = append(rows, rowStyle.Width(rowWidth).Render(commandPaletteMetaStyle.Render(compact(meta, max(12, rowWidth-2)))))
-	}
-	for len(rows) < promptSearchPageSize*2 {
-		rows = append(rows, commandPaletteRowStyle.Width(rowWidth).Render(""))
-	}
-
-	query := strings.TrimSpace(m.promptSearchQuery)
-	if query == "" {
-		query = "(all)"
-	}
-	meta := commandPaletteMetaStyle.Render(fmt.Sprintf("%s  query:%s", modeLabel, compact(query, 24))) +
-		footerHintDividerStyle.Render("  |  ") +
-		renderInlineShortcutHints(promptSearchFilterHints) +
-		footerHintDividerStyle.Render("  |  ") +
-		renderInlineShortcutHints(promptSearchActionHints)
-	rows = append(rows, meta)
-	return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
 }
 
 func (m model) renderStartupGuidePanel() string {
@@ -3108,95 +2858,6 @@ func startupGuideIssueHint(check provider.Availability) string {
 	}
 }
 
-func (m model) renderCommandPalette() string {
-	width := m.commandPaletteWidth()
-	items := m.filteredCommands()
-	if len(items) == 0 {
-		return commandPaletteStyle.Width(width).Render(
-			commandPaletteMetaStyle.Width(max(1, width-commandPaletteStyle.GetHorizontalFrameSize())).Render("No matching commands."),
-		)
-	}
-
-	selected, _ := m.selectedCommandItem()
-	nameWidth := min(26, max(14, width/4))
-	descWidth := max(12, width-commandPaletteStyle.GetHorizontalFrameSize()-nameWidth-4)
-	rows := make([]string, 0, commandPageSize+1)
-	for _, item := range m.visibleCommandItemsPage() {
-		rowStyle := commandPaletteRowStyle
-		nameStyle := commandPaletteNameStyle
-		descStyle := commandPaletteDescStyle
-		if item.Name == selected.Name {
-			rowStyle = commandPaletteSelectedRowStyle
-			nameStyle = commandPaletteSelectedNameStyle
-			descStyle = commandPaletteSelectedDescStyle
-		}
-
-		name := nameStyle.Width(nameWidth).Render(item.Usage)
-		desc := descStyle.Width(descWidth).Render(compact(item.Description, max(12, descWidth)))
-		rows = append(rows, rowStyle.Width(max(1, width-commandPaletteStyle.GetHorizontalFrameSize())).Render(
-			lipgloss.JoinHorizontal(lipgloss.Top, name, "  ", desc),
-		))
-	}
-	for len(rows) < commandPageSize {
-		rows = append(rows, commandPaletteRowStyle.Width(max(1, width-commandPaletteStyle.GetHorizontalFrameSize())).Render(""))
-	}
-	rows = append(rows, commandPaletteMetaStyle.Render("Up/Down move  PgUp/PgDn page  Enter run  Esc close"))
-	return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
-}
-
-func (m model) renderMentionPalette() string {
-	width := m.commandPaletteWidth()
-	items := m.mentionResults
-	if len(items) == 0 {
-		return commandPaletteStyle.Width(width).Render(
-			commandPaletteMetaStyle.Width(max(1, width-commandPaletteStyle.GetHorizontalFrameSize())).Render("No matching files in workspace."),
-		)
-	}
-
-	selected, _ := m.selectedMentionCandidate()
-	nameWidth := min(26, max(12, width/4))
-	descWidth := max(12, width-commandPaletteStyle.GetHorizontalFrameSize()-nameWidth-4)
-	rows := make([]string, 0, mentionPageSize+1)
-	for _, item := range m.visibleMentionItemsPage() {
-		rowStyle := commandPaletteRowStyle
-		nameStyle := commandPaletteNameStyle
-		descStyle := commandPaletteDescStyle
-		if item.Path == selected.Path {
-			rowStyle = commandPaletteSelectedRowStyle
-			nameStyle = commandPaletteSelectedNameStyle
-			descStyle = commandPaletteSelectedDescStyle
-		}
-
-		nameText := item.BaseName
-		if tag := strings.TrimSpace(item.TypeTag); tag != "" {
-			nameText = "[" + tag + "] " + nameText
-		}
-		if m.hasRecentMention(item.Path) {
-			nameText = "* " + nameText
-		} else {
-			nameText = "  " + nameText
-		}
-
-		name := nameStyle.Width(nameWidth).Render(compact(nameText, max(12, nameWidth)))
-		desc := descStyle.Width(descWidth).Render(compact(item.Path, max(12, descWidth)))
-		rows = append(rows, rowStyle.Width(max(1, width-commandPaletteStyle.GetHorizontalFrameSize())).Render(
-			lipgloss.JoinHorizontal(lipgloss.Top, name, "  ", desc),
-		))
-	}
-	for len(rows) < mentionPageSize {
-		rows = append(rows, commandPaletteRowStyle.Width(max(1, width-commandPaletteStyle.GetHorizontalFrameSize())).Render(""))
-	}
-	metaText := "* recent  Type @query to search  Up/Down move  Enter/Tab insert  Esc close"
-	if m.mentionIndex != nil {
-		stats := m.mentionIndex.Stats()
-		if stats.Truncated && stats.MaxFiles > 0 {
-			metaText = fmt.Sprintf("* recent  indexed first %d files  Enter/Tab insert  Esc close", stats.MaxFiles)
-		}
-	}
-	rows = append(rows, commandPaletteMetaStyle.Render(metaText))
-	return commandPaletteStyle.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
-}
-
 func (m *model) handleSlashCommand(input string) error {
 	fields := strings.Fields(input)
 	if len(fields) == 0 {
@@ -3220,6 +2881,8 @@ func (m *model) handleSlashCommand(input string) error {
 		m.sessionsOpen = true
 		m.statusNote = "Opened recent sessions."
 		return nil
+	case "/skills-select":
+		return m.openSkillsPicker()
 	case "/skills":
 		return m.runSkillsListCommand(input)
 	case "/skill":
@@ -3229,7 +2892,7 @@ func (m *model) handleSlashCommand(input string) error {
 	case "/compact":
 		return m.runCompactCommand(input)
 	default:
-		return m.runDirectSkillCommand(input, fields)
+		return fmt.Errorf("unknown command: %s", fields[0])
 	}
 }
 
@@ -3272,6 +2935,23 @@ func (m *model) runSkillsListCommand(input string) error {
 
 	m.appendCommandExchange(input, strings.Join(lines, "\n"))
 	m.statusNote = fmt.Sprintf("Discovered %d skill(s).", len(skillsList))
+	return nil
+}
+
+func (m *model) openSkillsPicker() error {
+	if m.runner == nil {
+		return fmt.Errorf("runner is unavailable")
+	}
+	skillsList, _ := m.runner.ListSkills()
+	if len(skillsList) == 0 {
+		m.statusNote = "No loaded skills available."
+		return nil
+	}
+	m.skillsOpen = true
+	m.commandOpen = false
+	m.sessionsOpen = false
+	m.commandCursor = 0
+	m.statusNote = "Opened loaded skills picker."
 	return nil
 }
 
@@ -3416,6 +3096,19 @@ func (m *model) activateSkillCommand(input, name string, args map[string]string)
 	m.appendCommandExchange(input, response)
 	m.statusNote = "Skill activated."
 	return nil
+}
+
+func (m *model) activateSelectedSkill() error {
+	if m.runner == nil {
+		return fmt.Errorf("runner is unavailable")
+	}
+	items := m.skillPickerItems()
+	if len(items) == 0 {
+		return nil
+	}
+	index := clamp(m.commandCursor, 0, len(items)-1)
+	selected := items[index]
+	return m.activateSkillCommand(selected.Usage, selected.Usage, nil)
 }
 
 func parseSkillArgs(parts []string) (map[string]string, error) {
@@ -3676,550 +3369,6 @@ func rebuildSessionTimeline(sess *session.Session) ([]chatEntry, []toolRun) {
 		}
 	}
 	return items, runs
-}
-
-func renderChatCard(item chatEntry, width int) string {
-	border := chatAssistantStyle
-	switch item.Kind {
-	case "user":
-		border = chatUserStyle
-	case "tool":
-		border = chatAssistantStyle
-	case "system":
-		border = chatSystemStyle
-	default:
-		if item.Status == "thinking" {
-			border = chatThinkingStyle
-		}
-	}
-	contentWidth := max(8, width-border.GetHorizontalFrameSize())
-	rendered := border.Width(contentWidth).Render(renderChatSection(item, contentWidth))
-	if item.Kind != "tool" {
-		return rendered
-	}
-
-	sep := lipgloss.NewStyle().Foreground(colorTool).Render("|")
-	lines := strings.Split(rendered, "\n")
-	for i := range lines {
-		if strings.TrimSpace(lines[i]) == "" {
-			lines[i] = "  " + lines[i]
-			continue
-		}
-		lines[i] = sep + " " + lines[i]
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderChatSection(item chatEntry, width int) string {
-	title := cardTitleStyle.Foreground(colorAccent)
-	bodyStyle := chatBodyStyle
-	toolCallTitle := cardTitleStyle.Foreground(lipgloss.Color("#E5B567")).Bold(true)
-	toolResultTitle := cardTitleStyle.Foreground(lipgloss.Color("#7AC7FF")).Bold(true)
-	status := item.Status
-	displayTitle := item.Title
-	if status == "final" {
-		status = ""
-	}
-	switch item.Kind {
-	case "user":
-		title = cardTitleStyle.Foreground(colorUser)
-	case "tool":
-		if strings.HasPrefix(displayTitle, "Tool Result | ") {
-			title = toolResultTitle
-		} else {
-			title = toolCallTitle
-		}
-		bodyStyle = toolBodyStyle
-		status = ""
-	case "system":
-		title = cardTitleStyle.Foreground(colorMuted)
-	default:
-		if item.Status == "thinking" {
-			title = cardTitleStyle.Foreground(colorMuted).Faint(true)
-			bodyStyle = thinkingBodyStyle
-			displayTitle = "thinking"
-			status = ""
-		}
-	}
-	headContent := title.Render(displayTitle)
-	if item.Kind == "user" && strings.TrimSpace(item.Meta) != "" {
-		headContent = mutedStyle.Copy().Faint(true).Render(item.Meta)
-	}
-	if status != "" {
-		headContent = lipgloss.JoinHorizontal(lipgloss.Left, headContent, mutedStyle.Render("  "+status))
-	}
-	head := lipgloss.NewStyle().
-		Width(width).
-		Render(headContent)
-	if item.Kind == "tool" && strings.TrimSpace(item.Body) == "" {
-		return head
-	}
-	body := bodyStyle.Width(width).Render(formatChatBody(item, width))
-	return lipgloss.JoinVertical(lipgloss.Left, head, body)
-}
-
-func renderChatRow(item chatEntry, width int) string {
-	bubbleWidth := chatBubbleWidth(item, width)
-	card := renderChatCard(item, bubbleWidth)
-	return lipgloss.NewStyle().
-		MarginBottom(1).
-		Render(lipgloss.PlaceHorizontal(width, lipgloss.Left, card))
-}
-
-func renderBytemindRunRow(items []chatEntry, width int) string {
-	if len(items) == 0 {
-		return ""
-	}
-	card := renderBytemindRunCard(items, width)
-	return lipgloss.NewStyle().
-		MarginBottom(1).
-		Render(lipgloss.PlaceHorizontal(width, lipgloss.Left, card))
-}
-
-func renderBytemindRunCard(items []chatEntry, width int) string {
-	outer := chatAssistantStyle
-	contentWidth := max(8, width-outer.GetHorizontalFrameSize())
-	sections := make([]string, 0, len(items))
-	for _, item := range items {
-		sections = append(sections, renderChatSection(item, contentWidth))
-	}
-	return outer.Width(contentWidth).Render(strings.Join(sections, "\n"))
-}
-
-func renderModal(width, height int, modal string) string {
-	if width == 0 || height == 0 {
-		return modal
-	}
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
-}
-
-func formatChatBody(item chatEntry, width int) string {
-	text := strings.ReplaceAll(item.Body, "\r\n", "\n")
-	if item.Kind != "assistant" {
-		return strings.TrimRight(wrapPlainText(text, width), "\n")
-	}
-	return strings.TrimRight(renderAssistantBody(text, width), "\n")
-}
-
-func wrapPlainText(text string, width int) string {
-	if width <= 0 {
-		return text
-	}
-
-	lines := strings.Split(text, "\n")
-	wrapped := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if line == "" {
-			wrapped = append(wrapped, "")
-			continue
-		}
-		for _, part := range wrapLineSmart(line, width) {
-			wrapped = append(wrapped, strings.TrimRight(part, " "))
-		}
-	}
-	return strings.Join(wrapped, "\n")
-}
-
-func wrapLineSmart(line string, width int) []string {
-	if width <= 0 {
-		return []string{line}
-	}
-	runes := []rune(line)
-	if len(runes) == 0 {
-		return []string{""}
-	}
-
-	out := make([]string, 0, 4)
-	start := 0
-	for start < len(runes) {
-		curWidth := 0
-		end := start
-		lastSpaceEnd := -1
-
-		for i := start; i < len(runes); i++ {
-			rw := runewidth.RuneWidth(runes[i])
-			if rw < 0 {
-				rw = 0
-			}
-			if curWidth+rw > width {
-				break
-			}
-			curWidth += rw
-			end = i + 1
-			if unicode.IsSpace(runes[i]) {
-				lastSpaceEnd = i + 1
-			}
-		}
-
-		if end == start {
-			// Fallback for extra-wide single rune.
-			end = start + 1
-		} else if lastSpaceEnd > start && end < len(runes) {
-			end = lastSpaceEnd
-		}
-
-		segment := strings.TrimRightFunc(string(runes[start:end]), unicode.IsSpace)
-		if segment == "" {
-			segment = string(runes[start:end])
-		}
-		out = append(out, segment)
-		start = end
-		for start < len(runes) && unicode.IsSpace(runes[start]) {
-			start++
-		}
-	}
-
-	if len(out) == 0 {
-		return []string{""}
-	}
-	return out
-}
-
-func tidyAssistantSpacing(text string) string {
-	lines := strings.Split(text, "\n")
-	out := make([]string, 0, len(lines)+4)
-	inCodeBlock := false
-	prevBlank := true
-
-	for _, raw := range lines {
-		line := strings.TrimRight(raw, " \t")
-		trimmed := strings.TrimSpace(line)
-
-		if strings.HasPrefix(trimmed, "```") {
-			if !prevBlank && len(out) > 0 {
-				out = append(out, "")
-			}
-			out = append(out, line)
-			inCodeBlock = !inCodeBlock
-			prevBlank = false
-			continue
-		}
-
-		if inCodeBlock {
-			out = append(out, line)
-			prevBlank = trimmed == ""
-			continue
-		}
-
-		if trimmed == "" {
-			if !prevBlank && len(out) > 0 {
-				out = append(out, "")
-			}
-			prevBlank = true
-			continue
-		}
-
-		if needsLeadingBlankLine(trimmed) && !prevBlank && len(out) > 0 {
-			out = append(out, "")
-		}
-
-		out = append(out, line)
-		prevBlank = false
-	}
-
-	return strings.Join(out, "\n")
-}
-
-func needsLeadingBlankLine(line string) bool {
-	if strings.HasPrefix(line, "#") {
-		return true
-	}
-	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") || strings.HasPrefix(line, "> ") {
-		return true
-	}
-	if len(line) >= 3 && line[1] == '.' && line[2] == ' ' && line[0] >= '0' && line[0] <= '9' {
-		return true
-	}
-	return false
-}
-
-func renderAssistantBody(text string, width int) string {
-	lines := strings.Split(text, "\n")
-	out := make([]string, 0, len(lines))
-	inCodeBlock := false
-	prevBlank := true
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") {
-			inCodeBlock = !inCodeBlock
-			continue
-		}
-
-		plainLine := line
-		if !inCodeBlock {
-			plainLine = normalizeAssistantMarkdownLine(line)
-		}
-		if strings.TrimSpace(plainLine) == "" {
-			if !prevBlank {
-				out = append(out, "")
-			}
-			prevBlank = true
-			continue
-		}
-		out = append(out, wrapPlainText(plainLine, width))
-		prevBlank = false
-	}
-
-	return strings.Join(out, "\n")
-}
-
-var assistantInlineTokenReplacer = strings.NewReplacer(
-	"**", "",
-	"__", "",
-	"~~", "",
-	"`", "",
-)
-
-func normalizeAssistantMarkdownLine(line string) string {
-	indentWidth := len(line) - len(strings.TrimLeft(line, " \t"))
-	indent := line[:indentWidth]
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return ""
-	}
-
-	for strings.HasPrefix(trimmed, ">") {
-		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
-	}
-	if trimmed == "" {
-		return ""
-	}
-
-	if strings.HasPrefix(trimmed, "#") {
-		level := 0
-		for level < len(trimmed) && trimmed[level] == '#' {
-			level++
-		}
-		if level > 0 && (level == len(trimmed) || trimmed[level] == ' ') {
-			trimmed = strings.TrimSpace(trimmed[level:])
-		}
-	}
-
-	if isMarkdownTableDivider(trimmed) {
-		return ""
-	}
-
-	prefix := ""
-	switch {
-	case strings.HasPrefix(trimmed, "- [ ] "):
-		prefix = "- [ ] "
-		trimmed = strings.TrimSpace(trimmed[len("- [ ] "):])
-	case strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
-		prefix = "- [x] "
-		trimmed = strings.TrimSpace(trimmed[len("- [x] "):])
-	case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "), strings.HasPrefix(trimmed, "+ "):
-		prefix = "- "
-		trimmed = strings.TrimSpace(trimmed[2:])
-	default:
-		if marker, rest, ok := splitOrderedListItem(trimmed); ok {
-			prefix = marker + " "
-			trimmed = rest
-		}
-	}
-
-	if looksLikeMarkdownTable(trimmed) {
-		parts := make([]string, 0, 8)
-		for _, cell := range strings.Split(trimmed, "|") {
-			cell = strings.TrimSpace(cell)
-			if cell == "" {
-				continue
-			}
-			parts = append(parts, cell)
-		}
-		trimmed = strings.Join(parts, " | ")
-	}
-
-	trimmed = stripMarkdownLinks(trimmed)
-	trimmed = assistantInlineTokenReplacer.Replace(trimmed)
-	trimmed = strings.TrimSpace(trimmed)
-	if trimmed == "" {
-		return ""
-	}
-	return indent + prefix + trimmed
-}
-
-func splitOrderedListItem(line string) (marker string, rest string, ok bool) {
-	if len(line) < 3 {
-		return "", "", false
-	}
-	index := 0
-	for index < len(line) && line[index] >= '0' && line[index] <= '9' {
-		index++
-	}
-	if index == 0 || len(line) <= index+1 || line[index] != '.' || line[index+1] != ' ' {
-		return "", "", false
-	}
-	return line[:index+1], strings.TrimSpace(line[index+2:]), true
-}
-
-func isMarkdownTableDivider(line string) bool {
-	compact := strings.ReplaceAll(strings.TrimSpace(line), " ", "")
-	if compact == "" || strings.Count(compact, "|") < 1 {
-		return false
-	}
-	for _, ch := range compact {
-		switch ch {
-		case '|', '-', ':':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func stripMarkdownLinks(line string) string {
-	if line == "" {
-		return line
-	}
-
-	var b strings.Builder
-	b.Grow(len(line))
-	for i := 0; i < len(line); {
-		start := -1
-		isImage := false
-		switch {
-		case i+1 < len(line) && line[i] == '!' && line[i+1] == '[':
-			start = i + 2
-			isImage = true
-		case line[i] == '[':
-			start = i + 1
-		}
-
-		if start < 0 {
-			b.WriteByte(line[i])
-			i++
-			continue
-		}
-
-		mid := strings.Index(line[start:], "](")
-		if mid < 0 {
-			b.WriteByte(line[i])
-			i++
-			continue
-		}
-		textEnd := start + mid
-		urlStart := textEnd + 2
-		urlEndRel := strings.IndexByte(line[urlStart:], ')')
-		if urlEndRel < 0 {
-			b.WriteByte(line[i])
-			i++
-			continue
-		}
-		urlEnd := urlStart + urlEndRel
-		label := strings.TrimSpace(line[start:textEnd])
-		url := strings.TrimSpace(line[urlStart:urlEnd])
-		if label != "" {
-			b.WriteString(label)
-		}
-		if url != "" {
-			if !isImage {
-				b.WriteString(" (")
-				b.WriteString(url)
-				b.WriteString(")")
-			}
-		}
-		i = urlEnd + 1
-	}
-	return b.String()
-}
-
-func isMarkdownHeading(line string) bool {
-	return strings.HasPrefix(line, "# ") ||
-		strings.HasPrefix(line, "## ") ||
-		strings.HasPrefix(line, "### ")
-}
-
-func renderMarkdownHeading(line string, width int) string {
-	level := 0
-	for level < len(line) && line[level] == '#' {
-		level++
-	}
-	text := strings.TrimSpace(line[level:])
-	style := assistantHeading3Style
-	switch level {
-	case 1:
-		style = assistantHeading1Style
-	case 2:
-		style = assistantHeading2Style
-	}
-	wrapped := strings.Split(wrapPlainText(text, width), "\n")
-	rendered := make([]string, 0, len(wrapped))
-	for _, part := range wrapped {
-		rendered = append(rendered, style.Render(part))
-	}
-	return strings.Join(rendered, "\n")
-}
-
-func isMarkdownListItem(line string) bool {
-	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
-		return true
-	}
-	return isOrderedListItem(line)
-}
-
-func isOrderedListItem(line string) bool {
-	if len(line) < 3 {
-		return false
-	}
-	index := 0
-	for index < len(line) && line[index] >= '0' && line[index] <= '9' {
-		index++
-	}
-	return index > 0 && len(line) > index+1 && line[index] == '.' && line[index+1] == ' '
-}
-
-func renderMarkdownListItem(line string, width int) string {
-	indentWidth := len(line) - len(strings.TrimLeft(line, " "))
-	indent := strings.Repeat(" ", indentWidth)
-	trimmed := strings.TrimSpace(line)
-	marker := ""
-	content := ""
-
-	switch {
-	case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "):
-		marker = trimmed[:1]
-		content = strings.TrimSpace(trimmed[2:])
-	default:
-		for i := 0; i < len(trimmed); i++ {
-			if trimmed[i] == '.' && i+1 < len(trimmed) && trimmed[i+1] == ' ' {
-				marker = trimmed[:i+1]
-				content = strings.TrimSpace(trimmed[i+2:])
-				break
-			}
-		}
-	}
-
-	if content == "" {
-		content = trimmed
-	}
-
-	prefix := indent + marker + " "
-	contentWidth := max(8, width-runewidth.StringWidth(prefix))
-	wrapped := strings.Split(wrapPlainText(content, contentWidth), "\n")
-	lines := make([]string, 0, len(wrapped))
-	for i, part := range wrapped {
-		if i == 0 {
-			lines = append(lines, indent+listMarkerStyle.Render(marker)+" "+part)
-			continue
-		}
-		lines = append(lines, indent+strings.Repeat(" ", runewidth.StringWidth(marker))+" "+part)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderMarkdownQuote(line string, width int) string {
-	content := strings.TrimSpace(strings.TrimPrefix(line, ">"))
-	wrapped := strings.Split(wrapPlainText(content, max(8, width-2)), "\n")
-	rendered := make([]string, 0, len(wrapped))
-	for _, part := range wrapped {
-		rendered = append(rendered, quoteLineStyle.Render(part))
-	}
-	return strings.Join(rendered, "\n")
-}
-
-func looksLikeMarkdownTable(line string) bool {
-	return strings.Count(line, "|") >= 2
 }
 
 func chatBubbleWidth(item chatEntry, width int) int {
@@ -4699,30 +3848,18 @@ func (m model) filteredCommands() []commandItem {
 }
 
 func (m model) commandPaletteItems() []commandItem {
-	base := visibleCommandItems("")
-	skillItems := m.skillCommandItems()
-	if len(skillItems) == 0 {
-		return base
+	items := visibleCommandItems("")
+	skills := m.skillPickerItems()
+	if len(skills) == 0 {
+		return items
 	}
-
-	items := make([]commandItem, 0, len(base)+len(skillItems))
-	seen := make(map[string]struct{}, len(base)+len(skillItems))
-	items = append(items, base...)
-	for _, item := range base {
-		seen[strings.ToLower(strings.TrimSpace(item.Usage))] = struct{}{}
-	}
-	for _, item := range skillItems {
-		key := strings.ToLower(strings.TrimSpace(item.Usage))
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		items = append(items, item)
-	}
-	return items
+	merged := make([]commandItem, 0, len(items)+len(skills))
+	merged = append(merged, items...)
+	merged = append(merged, skills...)
+	return merged
 }
 
-func (m model) skillCommandItems() []commandItem {
+func (m model) skillPickerItems() []commandItem {
 	if m.runner == nil {
 		return nil
 	}
@@ -4734,17 +3871,10 @@ func (m model) skillCommandItems() []commandItem {
 	items := make([]commandItem, 0, len(skillsList))
 	seen := make(map[string]struct{}, len(skillsList))
 	for _, skill := range skillsList {
-		name := strings.TrimSpace(skill.Entry.Slash)
-		if name == "" {
-			name = "/" + strings.TrimSpace(skill.Name)
-		}
+		name := strings.TrimSpace(skill.Name)
 		if name == "" {
 			continue
 		}
-		if !strings.HasPrefix(name, "/") {
-			name = "/" + name
-		}
-		name = "/" + strings.TrimLeft(strings.TrimSpace(name), "/")
 		key := strings.ToLower(name)
 		if _, exists := seen[key]; exists {
 			continue
@@ -4757,7 +3887,7 @@ func (m model) skillCommandItems() []commandItem {
 		}
 		items = append(items, commandItem{
 			Name:        name,
-			Usage:       name,
+			Usage:       "/" + name,
 			Description: description,
 			Kind:        "skill",
 		})
@@ -4841,151 +3971,6 @@ func shouldExecuteFromPalette(item commandItem) bool {
 	}
 }
 
-func (m model) helpText() string {
-	return strings.Join([]string{
-		"Entry points",
-		"Run `go run ./cmd/bytemind chat` from the repository root to open the TUI.",
-		"The chat command opens the landing screen first, then enters the conversation view after you submit a prompt.",
-		"Run `go run ./cmd/bytemind run -prompt \"...\"` for one-shot execution.",
-		"",
-		"Slash commands",
-		"/help: show this help inside the conversation.",
-		"/session: open recent sessions.",
-		"/skills: list discovered skills and diagnostics.",
-		"/<skill-name> [k=v...]: activate a skill for this session.",
-		"/skill clear: clear the active skill in this session.",
-		"/skill delete <name>: delete the specified project skill.",
-		"/new: start a fresh session.",
-		"/compact: summarize long history into a compact continuation context.",
-		"/btw <message>: interject while a run is in progress.",
-		"/quit: exit the TUI.",
-		"",
-		"UI notes",
-		"Tab toggles between Build and Plan modes.",
-		"Plan mode keeps the plan panel visible and focused on structured steps.",
-		"Use Ctrl+G to open or close the help panel.",
-		"Use Ctrl+F to search prompt history and restore previous input.",
-		"Drag across the conversation with the left mouse button to select text, then press Ctrl+C to copy it.",
-		"If provider setup is required, paste an API key in the input and press Enter.",
-		"Long pasted code/text is compressed to [Paste #N ~X lines].",
-		"Use [Paste], [Paste #N], [Paste line3], or [Paste #N line3~line7] to expand references.",
-		"After restoring a session with a saved plan, type 'continue execution' to resume it.",
-		"Approval requests appear above the input area when a shell command needs confirmation.",
-		"The footer keeps only the essential shortcuts: tab agents, / commands, drag select, Ctrl+C copy/quit, Ctrl+F history, Ctrl+L sessions.",
-	}, "\n")
-}
-func visibleCommandItems(group string) []commandItem {
-	items := make([]commandItem, 0, len(commandItems))
-	for _, item := range commandItems {
-		if group == "" {
-			if item.Kind == "group" || item.Group == "" {
-				items = append(items, item)
-			}
-			continue
-		}
-		if item.Kind == "command" && item.Group == group {
-			items = append(items, item)
-		}
-	}
-	return items
-}
-
-func (m model) isKnownSkillCommand(command string) bool {
-	if m.runner == nil {
-		return false
-	}
-	normalized := normalizeSkillCommand(command)
-	if normalized == "" {
-		return false
-	}
-	skillsList, _ := m.runner.ListSkills()
-	for _, skill := range skillsList {
-		if normalizeSkillCommand(skill.Name) == normalized {
-			return true
-		}
-		if normalizeSkillCommand(skill.Entry.Slash) == normalized {
-			return true
-		}
-		for _, alias := range skill.Aliases {
-			if normalizeSkillCommand(alias) == normalized {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func normalizeSkillCommand(name string) string {
-	name = strings.ToLower(strings.TrimSpace(name))
-	name = strings.TrimLeft(name, "/")
-	return strings.TrimSpace(name)
-}
-
-func commandFilterQuery(value, group string) string {
-	value = strings.TrimSpace(value)
-	if value == "" || value == "/" {
-		return ""
-	}
-	value = strings.TrimPrefix(value, "/")
-	if group != "" {
-		if strings.HasPrefix(value, group) {
-			value = strings.TrimSpace(strings.TrimPrefix(value, group))
-		}
-	}
-	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(value, "/")))
-}
-
-func matchesCommandItem(item commandItem, query string) bool {
-	if query == "" {
-		return true
-	}
-	query = strings.ToLower(query)
-	name := strings.ToLower(strings.TrimPrefix(item.Name, "/"))
-	usage := strings.ToLower(strings.TrimPrefix(item.Usage, "/"))
-	return strings.HasPrefix(name, query) ||
-		strings.HasPrefix(usage, query)
-}
-
-func matchAllTokens(text string, tokens []string) bool {
-	if len(tokens) == 0 {
-		return true
-	}
-	for _, token := range tokens {
-		token = strings.TrimSpace(token)
-		if token == "" {
-			continue
-		}
-		if !strings.Contains(text, token) {
-			return false
-		}
-	}
-	return true
-}
-
-func parsePromptSearchQuery(raw string) (tokens []string, workspaceFilter, sessionFilter string) {
-	fields := strings.Fields(strings.ToLower(strings.TrimSpace(raw)))
-	tokens = make([]string, 0, len(fields))
-	for _, field := range fields {
-		field = strings.TrimSpace(field)
-		if field == "" {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(field, "ws:"):
-			workspaceFilter = strings.TrimSpace(strings.TrimPrefix(field, "ws:"))
-		case strings.HasPrefix(field, "workspace:"):
-			workspaceFilter = strings.TrimSpace(strings.TrimPrefix(field, "workspace:"))
-		case strings.HasPrefix(field, "sid:"):
-			sessionFilter = strings.TrimSpace(strings.TrimPrefix(field, "sid:"))
-		case strings.HasPrefix(field, "session:"):
-			sessionFilter = strings.TrimSpace(strings.TrimPrefix(field, "session:"))
-		default:
-			tokens = append(tokens, field)
-		}
-	}
-	return tokens, workspaceFilter, sessionFilter
-}
-
 func (m model) chatPanelWidth() int {
 	return max(20, m.width)
 }
@@ -4993,81 +3978,6 @@ func (m model) chatPanelWidth() int {
 func (m model) chatPanelInnerWidth() int {
 	width := m.chatPanelWidth() - panelStyle.GetHorizontalFrameSize()
 	return max(12, width)
-}
-
-func (m model) chatInputContentWidth() int {
-	width := m.chatPanelInnerWidth() - m.inputBorderStyle().GetHorizontalFrameSize()
-	return max(18, width)
-}
-
-func (m model) landingInputShellWidth() int {
-	return min(72, max(36, m.width/2))
-}
-
-func (m model) landingInputContentWidth() int {
-	width := m.landingInputShellWidth() - landingInputStyle.GetHorizontalFrameSize()
-	return max(24, width)
-}
-
-func (m model) inputBorderStyle() lipgloss.Style {
-	return inputStyle.BorderForeground(m.modeAccentColor())
-}
-
-func (m model) modeAccentColor() lipgloss.Color {
-	if m.mode == modePlan {
-		return colorThinking
-	}
-	return colorAccent
-}
-
-func (m *model) syncInputStyle() {
-	if m.startupGuide.Active {
-		m.input.Placeholder = startupGuideInputPlaceholder(m.startupGuide.CurrentField)
-	} else {
-		m.input.Placeholder = "Ask Bytemind to inspect, change, or verify this workspace..."
-	}
-	m.input.Prompt = ""
-	setInputHeightSafe(&m.input, 2)
-}
-
-func setInputHeightSafe(input *textarea.Model, height int) {
-	if input == nil {
-		return
-	}
-	defer func() {
-		_ = recover()
-	}()
-	input.SetHeight(height)
-}
-
-func startupGuideInputHint(field string) string {
-	switch strings.TrimSpace(field) {
-	case startupFieldType:
-		return "Enter provider and press Enter."
-	case startupFieldBaseURL:
-		return "Enter base_url and press Enter."
-	case startupFieldModel:
-		return "Enter model and press Enter."
-	case startupFieldAPIKey:
-		return "Paste API key and press Enter to verify."
-	default:
-		return "Input value then press Enter."
-	}
-}
-
-func startupGuideInputPlaceholder(field string) string {
-	switch strings.TrimSpace(field) {
-	case startupFieldType:
-		return "Step 1/4: provider (openai-compatible or anthropic)"
-	case startupFieldBaseURL:
-		return "Step 2/4: base_url (example: https://api.deepseek.com)"
-	case startupFieldModel:
-		return "Step 3/4: model (example: deepseek-chat)"
-	case startupFieldAPIKey:
-		return "Step 4/4: paste API key and press Enter..."
-	default:
-		return "Complete setup and press Enter..."
-	}
 }
 
 func resolveSessionID(summaries []session.Summary, prefix string) (string, error) {
@@ -5345,89 +4255,6 @@ func (m model) conversationPanelWidth() int {
 	return max(24, width)
 }
 
-func (m model) planModeLabel() string {
-	if m.mode == modePlan {
-		return "PLAN"
-	}
-	return "BUILD"
-}
-
-func (m model) planPhaseLabel() string {
-	phase := planpkg.NormalizePhase(string(m.plan.Phase))
-	if phase == planpkg.PhaseNone && m.mode == modePlan {
-		phase = planpkg.PhaseDrafting
-	}
-	if phase == planpkg.PhaseNone {
-		return "none"
-	}
-	return string(phase)
-}
-
-func (m model) renderPlanPanel(width int) string {
-	width = max(24, width)
-	return modalBoxStyle.Width(width).Render(m.planView.View())
-}
-
-func (m model) planPanelContent(width int) string {
-	width = max(16, width)
-	lines := []string{
-		accentStyle.Render(m.planModeLabel()),
-		mutedStyle.Render("Phase: " + m.planPhaseLabel()),
-	}
-
-	if goal := strings.TrimSpace(m.plan.Goal); goal != "" {
-		lines = append(lines, "", cardTitleStyle.Render("Goal"), wrapPlainText(goal, width))
-	}
-	if summary := strings.TrimSpace(m.plan.Summary); summary != "" {
-		lines = append(lines, "", cardTitleStyle.Render("Summary"), wrapPlainText(summary, width))
-	}
-
-	lines = append(lines, "", cardTitleStyle.Render("Steps"))
-	if len(m.plan.Steps) == 0 {
-		lines = append(lines, mutedStyle.Render("No structured plan yet. Use update_plan to create one."))
-	} else {
-		for _, step := range m.plan.Steps {
-			lines = append(lines, m.renderPlanStep(step, width), "")
-		}
-		if len(lines) > 0 && lines[len(lines)-1] == "" {
-			lines = lines[:len(lines)-1]
-		}
-	}
-
-	if nextAction := strings.TrimSpace(m.plan.NextAction); nextAction != "" {
-		lines = append(lines, "", cardTitleStyle.Render("Next Action"), wrapPlainText(nextAction, width))
-	}
-	if reason := strings.TrimSpace(m.plan.BlockReason); reason != "" {
-		lines = append(lines, "", cardTitleStyle.Render("Blocked Reason"), errorStyle.Render(wrapPlainText(reason, width)))
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func (m model) planPanelRenderHeight() int {
-	if !m.hasPlanPanel() {
-		return 0
-	}
-	return m.planView.Height + modalBoxStyle.GetVerticalFrameSize()
-}
-
-func (m model) renderPlanStep(step planpkg.Step, width int) string {
-	header := fmt.Sprintf("%s %s", statusGlyph(string(step.Status)), step.Title)
-	parts := []string{wrapPlainText(header, width)}
-	if desc := strings.TrimSpace(step.Description); desc != "" {
-		parts = append(parts, mutedStyle.Render(wrapPlainText(desc, width)))
-	}
-	if len(step.Files) > 0 {
-		parts = append(parts, mutedStyle.Render("Files: "+compact(strings.Join(step.Files, ", "), width)))
-	}
-	if len(step.Verify) > 0 {
-		parts = append(parts, mutedStyle.Render("Verify: "+compact(strings.Join(step.Verify, " | "), width)))
-	}
-	if risk := strings.TrimSpace(string(step.Risk)); risk != "" {
-		parts = append(parts, mutedStyle.Render("Risk: "+risk))
-	}
-	return strings.Join(parts, "\n")
-}
 func (m model) sessionText() string {
 	if m.sess == nil {
 		return "No active session."

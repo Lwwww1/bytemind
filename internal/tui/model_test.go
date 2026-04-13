@@ -2114,7 +2114,7 @@ func TestFilteredCommandsShowsRootSelectorGroups(t *testing.T) {
 		usages = append(usages, item.Usage)
 	}
 
-	for _, want := range []string{"/help", "/session", "/new", "/compact", "/quit"} {
+	for _, want := range []string{"/help", "/session", "/skills-select", "/new", "/compact", "/quit"} {
 		if !containsString(usages, want) {
 			t.Fatalf("expected root selector to contain %q, got %v", want, usages)
 		}
@@ -2288,14 +2288,14 @@ func TestHandleSlashSkillActivateAndClear(t *testing.T) {
 		workspace: workspace,
 		screen:    screenChat,
 	}
-	if err := m.handleSlashCommand("/bug-investigation"); err != nil {
-		t.Fatalf("expected /bug-investigation to succeed, got %v", err)
+	if _, err := runner.ActivateSkill(sess, "/bug-investigation", nil); err != nil {
+		t.Fatalf("expected /bug-investigation activation to succeed, got %v", err)
 	}
 	if m.sess.ActiveSkill == nil || m.sess.ActiveSkill.Name != "bug-investigation" {
 		t.Fatalf("expected bug-investigation active before switch, got %#v", m.sess.ActiveSkill)
 	}
-	if err := m.handleSlashCommand("/review severity=high"); err != nil {
-		t.Fatalf("expected /review to succeed, got %v", err)
+	if _, err := runner.ActivateSkill(sess, "/review", map[string]string{"severity": "high"}); err != nil {
+		t.Fatalf("expected /review activation to succeed, got %v", err)
 	}
 	if m.sess.ActiveSkill == nil || m.sess.ActiveSkill.Name != "review" {
 		t.Fatalf("expected active skill to be set, got %#v", m.sess.ActiveSkill)
@@ -2504,13 +2504,67 @@ func TestFilteredCommandsIncludeSkillSlashCommands(t *testing.T) {
 	items := m.filteredCommands()
 	found := false
 	for _, item := range items {
-		if item.Name == "/review" && item.Kind == "skill" {
+		if item.Name == "review" && item.Usage == "/review" && item.Kind == "skill" {
 			found = true
 			break
 		}
 	}
 	if !found {
 		t.Fatalf("expected /review skill command in filtered commands, got %+v", items)
+	}
+}
+
+func TestFilteredCommandsIncludeProjectSkillSlashCommands(t *testing.T) {
+	workspace := t.TempDir()
+	skillDir := filepath.Join(workspace, ".bytemind", "skills", "review-plus")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "skill.json"), []byte(`{
+  "name":"review-plus",
+  "description":"review project changes",
+  "entry":{"slash":"/review-plus"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# review-plus"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	runner := agent.NewRunner(agent.Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider: config.ProviderConfig{Model: "test-model"},
+		},
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+	})
+
+	input := textarea.New()
+	input.SetValue("/review")
+	m := model{
+		runner:    runner,
+		store:     store,
+		sess:      sess,
+		workspace: workspace,
+		input:     input,
+	}
+
+	items := m.filteredCommands()
+	found := false
+	for _, item := range items {
+		if item.Name == "review-plus" && item.Usage == "/review-plus" && item.Kind == "skill" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected /review-plus project skill command in filtered commands, got %+v", items)
 	}
 }
 
@@ -2986,7 +3040,7 @@ func TestRenderCommandPaletteDoesNotCorruptChineseDescriptions(t *testing.T) {
 	if strings.Contains(got, string('\uFFFD')) {
 		t.Fatalf("expected command palette not to contain replacement glyphs, got %q", got)
 	}
-	for _, want := range []string{"/help", "/session", "/new"} {
+	for _, want := range []string{"/help", "/session", "/skills-select"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected command palette to contain %q, got %q", want, got)
 		}
@@ -4261,6 +4315,54 @@ func TestFormatChatBodyRendersMarkdownHeadingWithoutHashes(t *testing.T) {
 	}
 	if !strings.Contains(got, "Heading") {
 		t.Fatalf("expected heading text to remain, got %q", got)
+	}
+}
+
+func TestFormatChatBodyHelpMarkdownAppliesVisualStyles(t *testing.T) {
+	item := chatEntry{
+		Kind: "assistant",
+		Body: "# Bytemind Help\n## Entry Points\n- `/help`: show help",
+	}
+
+	got := formatChatBody(item, 80)
+	if !strings.Contains(got, "Bytemind Help") {
+		t.Fatalf("expected help title text to remain, got %q", got)
+	}
+	if !strings.Contains(got, "`/help`") {
+		t.Fatalf("expected help markdown list to keep inline command formatting, got %q", got)
+	}
+}
+
+func TestFormatChatBodyHighlightsSemanticChineseLines(t *testing.T) {
+	item := chatEntry{
+		Kind: "assistant",
+		Body: "\u7b2c\u4e00\u9636\u6bb5\uff1a\u57fa\u7840\u51c6\u5907\uff081-2\u4e2a\u6708\uff09\n\u5b66\u4e60\u5185\u5bb9\uff1a\n\\u76ee\\u6807\\uff1a \\u5efa\\u7acb\\u57fa\\u7840\\u80fd\\u529b",
+	}
+	got := formatChatBody(item, 80)
+	for _, want := range []string{
+		"\u7b2c\u4e00\u9636\u6bb5\uff1a\u57fa\u7840\u51c6\u5907\uff081-2\u4e2a\u6708\uff09",
+		"\u5b66\u4e60\u5185\u5bb9\uff1a",
+		"\\u76ee\\u6807\\uff1a \\u5efa\\u7acb\\u57fa\\u7840\\u80fd\\u529b",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected semantic lines to remain (%q), got %q", want, got)
+		}
+	}
+}
+
+func TestFormatChatBodyNonAssistantUsesSemanticHighlightPipeline(t *testing.T) {
+	item := chatEntry{
+		Kind: "system",
+		Body: "\\u6ce8\\u610f\\uff1a \\u8be5\\u64cd\\u4f5c\\u4e0d\\u53ef\\u64a4\\u9500\n\\u76ee\\u6807\\uff1a \\u5148\\u5907\\u4efd\\u6570\\u636e",
+	}
+	got := formatChatBody(item, 80)
+	for _, want := range []string{
+		"\\u6ce8\\u610f\\uff1a \\u8be5\\u64cd\\u4f5c\\u4e0d\\u53ef\\u64a4\\u9500",
+		"\\u76ee\\u6807\\uff1a \\u5148\\u5907\\u4efd\\u6570\\u636e",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected semantic plain body rendering (%q), got %q", want, got)
+		}
 	}
 }
 

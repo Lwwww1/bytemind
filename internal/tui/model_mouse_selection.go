@@ -619,25 +619,52 @@ func normalizeSelectionForRowLimit(start, end viewportSelectionPoint, maxRow int
 // When clampToBounds is true, out-of-bound points are clamped to the nearest edge.
 // Zone lookup auto-probes up to +/-4 rows to recover from terminal row drift.
 func (m model) inputPointFromMouse(x, y int, clampToBounds bool) (viewportSelectionPoint, bool) {
+	layoutPoint, layoutOK := m.inputPointFromLayoutBounds(x, y, clampToBounds)
+	zonePoint, zoneOK := m.inputPointFromZoneWithAutoProbe(x, y, clampToBounds)
+
+	switch {
+	case zoneOK && layoutOK:
+		// Trust zone mapping only when it stays close to current layout mapping.
+		// This keeps precise cursor placement while filtering stale global zone data.
+		if selectionPointsNearby(zonePoint, layoutPoint, 1, 1) {
+			return zonePoint, true
+		}
+		return layoutPoint, true
+	case zoneOK:
+		return zonePoint, true
+	case layoutOK:
+		return layoutPoint, true
+	default:
+		return viewportSelectionPoint{}, false
+	}
+}
+
+func (m model) inputPointFromZoneWithAutoProbe(x, y int, clampToBounds bool) (viewportSelectionPoint, bool) {
 	ensureZoneManager()
-	if z := zone.Get(inputEditorZoneID); z != nil {
-		if point, ok := m.inputPointFromZone(z, x, y, clampToBounds); ok {
+	z := zone.Get(inputEditorZoneID)
+	if z == nil {
+		return viewportSelectionPoint{}, false
+	}
+	if point, ok := m.inputPointFromZone(z, x, y, clampToBounds); ok {
+		return point, true
+	}
+	// Keep input selection robust for terminals that occasionally
+	// report mouse rows with small absolute drift.
+	if x < z.StartX-1 || x > z.EndX+1 {
+		return viewportSelectionPoint{}, false
+	}
+	for delta := 1; delta <= mouseZoneAutoProbeMaxDelta; delta++ {
+		if point, ok := m.inputPointFromZone(z, x, y-delta, clampToBounds); ok {
 			return point, true
 		}
-		// Keep input selection robust for terminals that occasionally
-		// report mouse rows with small absolute drift.
-		if x >= z.StartX-1 && x <= z.EndX+1 {
-			for delta := 1; delta <= mouseZoneAutoProbeMaxDelta; delta++ {
-				if point, ok := m.inputPointFromZone(z, x, y-delta, clampToBounds); ok {
-					return point, true
-				}
-				if point, ok := m.inputPointFromZone(z, x, y+delta, clampToBounds); ok {
-					return point, true
-				}
-			}
+		if point, ok := m.inputPointFromZone(z, x, y+delta, clampToBounds); ok {
+			return point, true
 		}
 	}
+	return viewportSelectionPoint{}, false
+}
 
+func (m model) inputPointFromLayoutBounds(x, y int, clampToBounds bool) (viewportSelectionPoint, bool) {
 	left, right, top, bottom, innerLeft, innerTop, ok := m.inputInnerBounds()
 	if !ok {
 		return viewportSelectionPoint{}, false
@@ -813,4 +840,15 @@ func highlightVisibleLineByCells(line string, startCol, endCol int) string {
 
 func selectionHasRange(start, end viewportSelectionPoint) bool {
 	return start.Row != end.Row || start.Col != end.Col
+}
+
+func selectionPointsNearby(a, b viewportSelectionPoint, maxRowDelta, maxColDelta int) bool {
+	return absInt(a.Row-b.Row) <= maxRowDelta && absInt(a.Col-b.Col) <= maxColDelta
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

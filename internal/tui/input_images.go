@@ -17,6 +17,7 @@ import (
 
 	"bytemind/internal/agent"
 	"bytemind/internal/assets"
+	corepkg "bytemind/internal/core"
 	"bytemind/internal/llm"
 	"bytemind/internal/session"
 )
@@ -498,7 +499,7 @@ func (m *model) ingestImageBinary(mediaType, fileName string, data []byte) (stri
 	}
 	imageID := m.nextImageID
 	meta, err := m.imageStore.PutImage(context.Background(), assets.PutImageInput{
-		SessionID: m.sess.ID,
+		SessionID: corepkg.SessionID(m.sess.ID),
 		ImageID:   imageID,
 		MediaType: mediaType,
 		FileName:  fileName,
@@ -510,7 +511,7 @@ func (m *model) ingestImageBinary(mediaType, fileName string, data []byte) (stri
 
 	assetID := meta.AssetID
 	if strings.TrimSpace(string(assetID)) == "" {
-		assetID = assets.AssetID(m.sess.ID, meta.ImageID)
+		assetID = assets.AssetID(corepkg.SessionID(m.sess.ID), meta.ImageID)
 	}
 	m.sess.Conversation.Assets.Images[assetID] = session.ImageAssetMeta{
 		ImageID:   meta.ImageID,
@@ -687,7 +688,7 @@ func (m *model) buildPromptInput(raw string) (agent.RunPromptInput, string, erro
 			last = span.End
 			continue
 		}
-		blob, err := m.imageStore.GetImageByAssetID(context.Background(), m.sess.ID, span.AssetID)
+		blob, err := m.imageStore.GetImageByAssetID(context.Background(), corepkg.SessionID(m.sess.ID), span.AssetID)
 		if err != nil {
 			appendTextPart(span.Fallback)
 			last = span.End
@@ -735,7 +736,7 @@ func (m *model) hydrateHistoricalRequestAssets(current map[llm.AssetID]llm.Image
 		if _, ok := current[assetID]; ok {
 			continue
 		}
-		blob, err := m.imageStore.GetImageByAssetID(context.Background(), m.sess.ID, assetID)
+		blob, err := m.imageStore.GetImageByAssetID(context.Background(), corepkg.SessionID(m.sess.ID), assetID)
 		if err != nil || len(blob.Data) == 0 {
 			continue
 		}

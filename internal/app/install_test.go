@@ -1,6 +1,7 @@
-package main
+package app
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,18 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRunInstallRejectsPositionalArgs(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := RunInstall([]string{"extra-arg"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected install positional-arg validation error")
+	}
+	if !strings.Contains(err.Error(), "does not accept positional args") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
 func TestDefaultBinaryName(t *testing.T) {
 	if got := defaultBinaryName("windows"); got != "bytemind.exe" {
@@ -27,7 +40,7 @@ func TestResolveInstallTargetUsesBytemindHomeByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := filepath.Join(home, "bin", "custom-bin")
-	if !samePath(target, want) {
+	if !sameInstallPath(target, want) {
 		t.Fatalf("expected target %q, got %q", want, target)
 	}
 }
@@ -175,7 +188,7 @@ func TestResolveWindowsPowerShellExecutableFallbacksToPowerShellLiteral(t *testi
 	}
 }
 
-func samePath(a, b string) bool {
+func sameInstallPath(a, b string) bool {
 	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 

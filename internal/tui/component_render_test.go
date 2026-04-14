@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"bytemind/internal/history"
 	"bytemind/internal/mention"
 	planpkg "bytemind/internal/plan"
+	"bytemind/internal/storage"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -25,7 +25,7 @@ func TestComponentPromptSearchPaletteRendersEmptyAndResultStates(t *testing.T) {
 	withResult := model{width: 100}
 	withResult.promptSearchMode = promptSearchModePanel
 	withResult.promptSearchQuery = "bug"
-	withResult.promptSearchMatches = []history.PromptEntry{{
+	withResult.promptSearchMatches = []storage.PromptEntry{{
 		Timestamp: time.Now(),
 		Workspace: "E:/bytemind",
 		SessionID: "session-123",

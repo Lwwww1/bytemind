@@ -51,7 +51,7 @@ func (m model) renderPromptSearchPalette() string {
 		if workspaceName == "" {
 			workspaceName = "-"
 		}
-		meta := fmt.Sprintf("%s  ws:%s  sid:%s", item.Timestamp.Local().Format("01-02 15:04"), compact(workspaceName, 16), compact(item.SessionID, 12))
+		meta := fmt.Sprintf("%s  ws:%s  sid:%s", item.Timestamp.Local().Format("01-02 15:04"), compact(workspaceName, 16), compact(string(item.SessionID), 12))
 		rowText := compact(strings.TrimSpace(item.Prompt), max(12, rowWidth-2))
 		rows = append(rows, rowStyle.Width(rowWidth).Render(textStyle.Render(rowText)))
 		rows = append(rows, rowStyle.Width(rowWidth).Render(commandPaletteMetaStyle.Render(compact(meta, max(12, rowWidth-2)))))

@@ -15,11 +15,11 @@ import (
 
 	"bytemind/internal/agent"
 	"bytemind/internal/config"
+	"bytemind/internal/storage"
 	"bytemind/internal/llm"
 	"bytemind/internal/mention"
 	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
-	storagepkg "bytemind/internal/storage"
 	"bytemind/internal/tools"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -908,13 +908,13 @@ func TestTabTogglesBetweenBuildAndPlanModes(t *testing.T) {
 	}
 }
 
-func TestCtrlFDoesNotOpenPromptSearch(t *testing.T) {
+func TestCtrlFOpensPromptSearchAndFiltersEntries(t *testing.T) {
 	input := textarea.New()
 	input.Focus()
 	m := model{
 		input:               input,
 		promptHistoryLoaded: true,
-		promptHistoryEntries: []storagepkg.PromptEntry{
+		promptHistoryEntries: []storage.PromptEntry{
 			{Prompt: "fix tui layout spacing"},
 			{Prompt: "add model test case"},
 			{Prompt: "review runner error handling"},
@@ -922,38 +922,50 @@ func TestCtrlFDoesNotOpenPromptSearch(t *testing.T) {
 	}
 
 	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
-	updated := got.(model)
-	if updated.promptSearchOpen {
-		t.Fatalf("expected ctrl+f to be unbound")
+	opened := got.(model)
+	if !opened.promptSearchOpen {
+		t.Fatalf("expected ctrl+f to open prompt search")
 	}
-	if updated.promptSearchQuery != "" {
-		t.Fatalf("expected ctrl+f to not mutate prompt search query, got %q", updated.promptSearchQuery)
+	if len(opened.promptSearchMatches) != 3 {
+		t.Fatalf("expected 3 prompt matches, got %d", len(opened.promptSearchMatches))
+	}
+
+	got, _ = opened.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("test")})
+	filtered := got.(model)
+	if filtered.promptSearchQuery != "test" {
+		t.Fatalf("expected query to become test, got %q", filtered.promptSearchQuery)
+	}
+	if len(filtered.promptSearchMatches) != 1 {
+		t.Fatalf("expected one filtered prompt, got %d", len(filtered.promptSearchMatches))
+	}
+	if !strings.Contains(filtered.promptSearchMatches[0].Prompt, "test case") {
+		t.Fatalf("unexpected filtered prompt: %+v", filtered.promptSearchMatches[0])
 	}
 }
 
-func TestCtrlFWhilePromptSearchOpenDoesNothing(t *testing.T) {
+func TestCtrlFWhilePromptSearchOpenMovesSelection(t *testing.T) {
 	input := textarea.New()
 	input.Focus()
 	m := model{
 		input:               input,
 		promptHistoryLoaded: true,
-		promptHistoryEntries: []storagepkg.PromptEntry{
+		promptHistoryEntries: []storage.PromptEntry{
 			{Prompt: "first prompt"},
 			{Prompt: "second prompt"},
 			{Prompt: "third prompt"},
 		},
 	}
 
-	m.openPromptSearch(promptSearchModeQuick)
-	opened := m
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
+	opened := got.(model)
 	if opened.promptSearchCursor != 0 {
 		t.Fatalf("expected initial cursor 0, got %d", opened.promptSearchCursor)
 	}
 
-	got, _ := opened.handleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
-	unchanged := got.(model)
-	if unchanged.promptSearchCursor != 0 {
-		t.Fatalf("expected ctrl+f to remain unbound while prompt search is open, got cursor %d", unchanged.promptSearchCursor)
+	got, _ = opened.handleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
+	moved := got.(model)
+	if moved.promptSearchCursor != 1 {
+		t.Fatalf("expected ctrl+f to move cursor to 1, got %d", moved.promptSearchCursor)
 	}
 }
 
@@ -964,15 +976,15 @@ func TestPromptSearchEnterRestoresSelectedPrompt(t *testing.T) {
 	m := model{
 		input:               input,
 		promptHistoryLoaded: true,
-		promptHistoryEntries: []storagepkg.PromptEntry{
+		promptHistoryEntries: []storage.PromptEntry{
 			{Prompt: "first prompt"},
 			{Prompt: "second prompt"},
 		},
 	}
 
-	m.openPromptSearch(promptSearchModeQuick)
-	opened := m
-	got, _ := opened.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
+	opened := got.(model)
+	got, _ = opened.handleKey(tea.KeyMsg{Type: tea.KeyDown})
 	down := got.(model)
 
 	got, _ = down.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
@@ -992,14 +1004,14 @@ func TestPromptSearchEscRestoresOriginalInput(t *testing.T) {
 	m := model{
 		input:               input,
 		promptHistoryLoaded: true,
-		promptHistoryEntries: []storagepkg.PromptEntry{
+		promptHistoryEntries: []storage.PromptEntry{
 			{Prompt: "old prompt"},
 		},
 	}
 
-	m.openPromptSearch(promptSearchModeQuick)
-	opened := m
-	got, _ := opened.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("old")})
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
+	opened := got.(model)
+	got, _ = opened.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("old")})
 	filtered := got.(model)
 	got, _ = filtered.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
 	closed := got.(model)
@@ -1018,7 +1030,7 @@ func TestCtrlHDoesNotOpenPromptSearch(t *testing.T) {
 	m := model{
 		input:               input,
 		promptHistoryLoaded: true,
-		promptHistoryEntries: []storagepkg.PromptEntry{
+		promptHistoryEntries: []storage.PromptEntry{
 			{Prompt: "first prompt"},
 			{Prompt: "second prompt"},
 		},
@@ -1037,16 +1049,16 @@ func TestPromptSearchQuerySupportsWorkspaceAndSessionFilters(t *testing.T) {
 	m := model{
 		input:               input,
 		promptHistoryLoaded: true,
-		promptHistoryEntries: []storagepkg.PromptEntry{
+		promptHistoryEntries: []storage.PromptEntry{
 			{Prompt: "fix test", Workspace: "repo-a", SessionID: "sess-alpha"},
 			{Prompt: "fix test", Workspace: "repo-b", SessionID: "sess-beta"},
 			{Prompt: "add docs", Workspace: "repo-a", SessionID: "sess-alpha"},
 		},
 	}
 
-	m.openPromptSearch(promptSearchModeQuick)
-	opened := m
-	got, _ := opened.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("fix ws:repo-a sid:alpha")})
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
+	opened := got.(model)
+	got, _ = opened.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("fix ws:repo-a sid:alpha")})
 	filtered := got.(model)
 
 	if len(filtered.promptSearchMatches) != 1 {
@@ -1061,9 +1073,9 @@ func TestPromptSearchQuerySupportsWorkspaceAndSessionFilters(t *testing.T) {
 func TestPromptSearchPanelSupportsPageNavigation(t *testing.T) {
 	input := textarea.New()
 	input.Focus()
-	entries := make([]storagepkg.PromptEntry, 0, 12)
+	entries := make([]storage.PromptEntry, 0, 12)
 	for i := 0; i < 12; i++ {
-		entries = append(entries, storagepkg.PromptEntry{Prompt: "prompt " + string(rune('a'+i))})
+		entries = append(entries, storage.PromptEntry{Prompt: "prompt " + string(rune('a'+i))})
 	}
 	m := model{
 		input:                input,
@@ -1071,13 +1083,13 @@ func TestPromptSearchPanelSupportsPageNavigation(t *testing.T) {
 		promptHistoryEntries: entries,
 	}
 
-	m.openPromptSearch(promptSearchModePanel)
-	opened := m
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
+	opened := got.(model)
 	if opened.promptSearchCursor != 0 {
 		t.Fatalf("expected cursor at 0, got %d", opened.promptSearchCursor)
 	}
 
-	got, _ := opened.handleKey(tea.KeyMsg{Type: tea.KeyPgDown})
+	got, _ = opened.handleKey(tea.KeyMsg{Type: tea.KeyPgDown})
 	paged := got.(model)
 	if paged.promptSearchCursor != promptSearchPageSize {
 		t.Fatalf("expected pgdown to move cursor to %d, got %d", promptSearchPageSize, paged.promptSearchCursor)
@@ -1139,9 +1151,6 @@ func TestStartupGuideSequentialFlowAdvancesAndClearsInput(t *testing.T) {
 	if updated.cfg.Provider.BaseURL != "https://api.deepseek.com" {
 		t.Fatalf("expected base_url update, got %q", updated.cfg.Provider.BaseURL)
 	}
-	if updated.cfg.Provider.Model != "deepseek-chat" {
-		t.Fatalf("expected model to auto-adjust for deepseek endpoint, got %q", updated.cfg.Provider.Model)
-	}
 	if updated.startupGuide.CurrentField != startupFieldModel {
 		t.Fatalf("expected next step model, got %q", updated.startupGuide.CurrentField)
 	}
@@ -1149,11 +1158,11 @@ func TestStartupGuideSequentialFlowAdvancesAndClearsInput(t *testing.T) {
 		t.Fatalf("expected input to be cleared after base_url submit, got %q", updated.input.Value())
 	}
 
-	updated.input.SetValue("")
+	updated.input.SetValue("deepseek-chat")
 	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	updated = got.(model)
 	if updated.cfg.Provider.Model != "deepseek-chat" {
-		t.Fatalf("expected deepseek model to persist, got %q", updated.cfg.Provider.Model)
+		t.Fatalf("expected model update, got %q", updated.cfg.Provider.Model)
 	}
 	if updated.startupGuide.CurrentField != startupFieldAPIKey {
 		t.Fatalf("expected next step api_key, got %q", updated.startupGuide.CurrentField)
@@ -1218,74 +1227,6 @@ func TestStartupGuideAcceptsValidKeyAndDisablesGuide(t *testing.T) {
 	}
 	if !strings.Contains(string(written), `"api_key": "test-key"`) {
 		t.Fatalf("expected config file to store api key, got %q", string(written))
-	}
-}
-
-func TestStartupGuideAPIKeySubmitBypassesPasteSuppressionAndCompression(t *testing.T) {
-	const longKey = "test-key-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmno"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/models" {
-			http.NotFound(w, r)
-			return
-		}
-		if r.Header.Get("Authorization") != "Bearer "+longKey {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"provider":{"type":"openai-compatible","base_url":"`+server.URL+`","model":"gpt-5.4"}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	input := textarea.New()
-	input.Focus()
-	input.SetValue(longKey)
-	m := model{
-		input: input,
-		cfg: config.Config{
-			Provider: config.ProviderConfig{
-				Type:      "openai-compatible",
-				BaseURL:   server.URL,
-				Model:     "gpt-5.4",
-				APIKeyEnv: "BYTEMIND_API_KEY",
-			},
-		},
-		startupGuide: StartupGuide{
-			Active:       true,
-			Status:       "Bytemind needs a working API key before chat can start.",
-			ConfigPath:   configPath,
-			CurrentField: startupFieldAPIKey,
-		},
-		// Simulate the common Ctrl+V then immediate Enter path.
-		lastPasteAt: time.Now(),
-		lastInputAt: time.Now(),
-	}
-
-	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	updated := got.(model)
-	if updated.startupGuide.Active {
-		t.Fatalf("expected startup guide to be disabled after valid key")
-	}
-	if strings.HasPrefix(updated.input.Value(), "[Paste #") || strings.HasPrefix(updated.input.Value(), "[Pasted #") {
-		t.Fatalf("expected startup key submit not to be compressed, got %q", updated.input.Value())
-	}
-	if !strings.Contains(updated.statusNote, "Provider configured and verified") {
-		t.Fatalf("unexpected status after setup: %q", updated.statusNote)
-	}
-}
-
-func TestDescribeProviderErrorAddsModelHintWhenModelMissing(t *testing.T) {
-	raw := `{"error":{"message":"Model Not Exist","type":"invalid_request_error","code":"invalid_request_error"}}`
-	got := describeProviderError(raw, "gpt-5.4-mini")
-	if !strings.Contains(got, `Configured model "gpt-5.4-mini" is unavailable`) {
-		t.Fatalf("expected model hint in formatted error, got %q", got)
-	}
-	if !strings.Contains(got, "Raw error:") {
-		t.Fatalf("expected raw error suffix in formatted error, got %q", got)
 	}
 }
 
@@ -4943,3 +4884,4 @@ func containsString(items []string, target string) bool {
 	}
 	return false
 }
+

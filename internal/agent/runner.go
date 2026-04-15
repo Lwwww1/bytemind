@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"bytemind/internal/config"
@@ -41,6 +42,7 @@ type Options struct {
 	Store        SessionStore
 	Registry     ToolRegistry
 	Executor     ToolExecutor
+	Engine       Engine
 	TaskManager  runtimepkg.TaskManager
 	Extensions   extensionspkg.Manager
 	SkillManager *skills.Manager
@@ -66,6 +68,7 @@ type Runner struct {
 	store        SessionStore
 	registry     ToolRegistry
 	executor     ToolExecutor
+	engine       Engine
 	taskManager  runtimepkg.TaskManager
 	extensions   extensionspkg.Manager
 	skillManager *skills.Manager
@@ -109,7 +112,7 @@ func NewRunner(opts Options) *Runner {
 	if extensions == nil {
 		extensions = extensionspkg.NopManager{}
 	}
-	return &Runner{
+	runner := &Runner{
 		workspace:    opts.Workspace,
 		config:       opts.Config,
 		client:       opts.Client,
@@ -127,6 +130,14 @@ func NewRunner(opts Options) *Runner {
 		stdin:        opts.Stdin,
 		stdout:       opts.Stdout,
 	}
+
+	engine := opts.Engine
+	if engine == nil {
+		engine = NewDefaultEngine(runner)
+	}
+	runner.engine = engine
+
+	return runner
 }
 
 func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput, mode string, out io.Writer) (string, error) {
@@ -137,9 +148,30 @@ func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput
 }
 
 func (r *Runner) RunPromptWithInput(ctx context.Context, sess *session.Session, input RunPromptInput, mode string, out io.Writer) (string, error) {
-	setup, err := r.prepareRunPrompt(sess, input, mode)
+	if r.engine == nil {
+		return "", fmt.Errorf("agent engine is unavailable")
+	}
+
+	events, err := r.engine.HandleTurn(ctx, TurnRequest{
+		Session: sess,
+		Input:   input,
+		Mode:    mode,
+		Out:     out,
+	})
 	if err != nil {
 		return "", err
 	}
-	return r.runPromptTurns(ctx, sess, setup, out)
+
+	for event := range events {
+		switch event.Type {
+		case TurnEventCompleted:
+			return event.Answer, nil
+		case TurnEventFailed:
+			if event.Error != nil {
+				return "", event.Error
+			}
+			return "", fmt.Errorf("agent turn failed")
+		}
+	}
+	return "", fmt.Errorf("engine ended without terminal event")
 }

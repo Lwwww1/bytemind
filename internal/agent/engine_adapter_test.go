@@ -1,0 +1,93 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"io"
+	"testing"
+
+	"bytemind/internal/session"
+)
+
+type stubEngine struct {
+	requests []TurnRequest
+	events   []TurnEvent
+	err      error
+}
+
+func (s *stubEngine) HandleTurn(_ context.Context, req TurnRequest) (<-chan TurnEvent, error) {
+	s.requests = append(s.requests, req)
+	if s.err != nil {
+		return nil, s.err
+	}
+	ch := make(chan TurnEvent, len(s.events))
+	for _, event := range s.events {
+		ch <- event
+	}
+	close(ch)
+	return ch, nil
+}
+
+func TestRunPromptWithInputDelegatesToEngine(t *testing.T) {
+	workspace := t.TempDir()
+	engine := &stubEngine{
+		events: []TurnEvent{
+			{Type: TurnEventStarted},
+			{Type: TurnEventCompleted, Answer: "delegated answer"},
+		},
+	}
+
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Engine:    engine,
+		Stdin:     nil,
+		Stdout:    io.Discard,
+	})
+
+	sess := session.New(workspace)
+	answer, err := runner.RunPromptWithInput(context.Background(), sess, RunPromptInput{
+		DisplayText: "hello",
+	}, "build", io.Discard)
+	if err != nil {
+		t.Fatalf("RunPromptWithInput failed: %v", err)
+	}
+	if answer != "delegated answer" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+	if len(engine.requests) != 1 {
+		t.Fatalf("expected one engine request, got %d", len(engine.requests))
+	}
+	if engine.requests[0].Session != sess {
+		t.Fatal("expected runner to pass session through to engine")
+	}
+	if engine.requests[0].Mode != "build" {
+		t.Fatalf("expected mode to be forwarded, got %q", engine.requests[0].Mode)
+	}
+	if engine.requests[0].Input.DisplayText != "hello" {
+		t.Fatalf("expected input to be forwarded, got %q", engine.requests[0].Input.DisplayText)
+	}
+}
+
+func TestRunPromptWithInputPropagatesEngineFailureEvent(t *testing.T) {
+	workspace := t.TempDir()
+	engine := &stubEngine{
+		events: []TurnEvent{
+			{Type: TurnEventStarted},
+			{Type: TurnEventFailed, Error: errors.New("turn failed")},
+		},
+	}
+
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Engine:    engine,
+		Stdout:    io.Discard,
+	})
+
+	sess := session.New(workspace)
+	_, err := runner.RunPromptWithInput(context.Background(), sess, RunPromptInput{
+		DisplayText: "hello",
+	}, "build", io.Discard)
+	if err == nil || err.Error() != "turn failed" {
+		t.Fatalf("expected propagated engine failure, got %v", err)
+	}
+}

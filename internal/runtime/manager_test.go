@@ -439,3 +439,66 @@ func TestInMemoryTaskManagerRetrySchedulesNewAttempt(t *testing.T) {
 		t.Fatalf("expected output %q, got %q", "recovered", string(second.Output))
 	}
 }
+
+func TestInMemoryTaskManagerSubmitDetachesCallerContext(t *testing.T) {
+	mgr := NewInMemoryTaskManager(WithTaskExecutor(func(ctx context.Context, _ Task) ([]byte, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(30 * time.Millisecond):
+			return []byte("done"), nil
+		}
+	}))
+
+	submitCtx, cancel := context.WithCancel(context.Background())
+	id, err := mgr.Submit(submitCtx, TaskSpec{Name: "detached"})
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+	cancel()
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	result, err := mgr.Wait(waitCtx, id)
+	if err != nil {
+		t.Fatalf("Wait failed: %v", err)
+	}
+	if result.Status != corepkg.TaskCompleted {
+		t.Fatalf("expected completed status, got %s", result.Status)
+	}
+	if result.ErrorCode != "" {
+		t.Fatalf("expected empty error code, got %q", result.ErrorCode)
+	}
+}
+
+func TestInMemoryTaskManagerSubmitSnapshotsMutableTaskSpec(t *testing.T) {
+	mgr := NewInMemoryTaskManager()
+	spec := TaskSpec{
+		Name:     "snapshot",
+		Input:    []byte("immutable"),
+		Metadata: map[string]string{"owner": "runtime"},
+	}
+
+	id, err := mgr.Submit(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+
+	spec.Input[0] = 'X'
+	spec.Metadata["owner"] = "mutated"
+	spec.Metadata["extra"] = "value"
+
+	task, err := mgr.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if string(task.Spec.Input) != "immutable" {
+		t.Fatalf("expected task input snapshot %q, got %q", "immutable", string(task.Spec.Input))
+	}
+	if got := task.Spec.Metadata["owner"]; got != "runtime" {
+		t.Fatalf("expected metadata owner %q, got %q", "runtime", got)
+	}
+	if _, ok := task.Spec.Metadata["extra"]; ok {
+		t.Fatal("expected metadata not to include caller-side mutations")
+	}
+}

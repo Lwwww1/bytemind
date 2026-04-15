@@ -142,7 +142,7 @@ func (m *InMemoryTaskManager) Submit(ctx context.Context, spec TaskSpec) (corepk
 	now := time.Now().UTC()
 	task := Task{
 		ID:        id,
-		Spec:      spec,
+		Spec:      cloneTaskSpec(spec),
 		Status:    corepkg.TaskPending,
 		Attempt:   0,
 		CreatedAt: now,
@@ -151,7 +151,7 @@ func (m *InMemoryTaskManager) Submit(ctx context.Context, spec TaskSpec) (corepk
 	m.tasks[id] = task
 	m.mu.Unlock()
 
-	m.enqueueTask(ctx, id)
+	m.enqueueTask(detachContext(ctx), id)
 
 	return id, nil
 }
@@ -270,7 +270,7 @@ func (m *InMemoryTaskManager) Retry(ctx context.Context, id corepkg.TaskID) (cor
 	m.tasks[id] = task
 	m.mu.Unlock()
 
-	m.enqueueTask(ctx, id)
+	m.enqueueTask(detachContext(ctx), id)
 
 	return id, nil
 }
@@ -465,4 +465,24 @@ func taskToResult(task Task) TaskResult {
 		ErrorCode:  task.ErrorCode,
 		FinishedAt: finishedAt,
 	}
+}
+
+func cloneTaskSpec(spec TaskSpec) TaskSpec {
+	cloned := spec
+	if len(spec.Input) > 0 {
+		cloned.Input = append([]byte(nil), spec.Input...)
+	}
+	if len(spec.Metadata) > 0 {
+		cloned.Metadata = make(map[string]string, len(spec.Metadata))
+		for k, v := range spec.Metadata {
+			cloned.Metadata[k] = v
+		}
+	}
+	return cloned
+}
+
+func detachContext(ctx context.Context) context.Context {
+	// Keep execution lifecycle independent from request-scoped cancellation.
+	// Task timeout and explicit Cancel(...) remain the runtime controls.
+	return context.Background()
 }

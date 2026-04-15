@@ -1,10 +1,12 @@
 package tools
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -81,22 +83,18 @@ func (e *Executor) ExecuteRequest(ctx context.Context, req ExecuteRequest) (Exec
 	if err != nil {
 		return ExecuteResult{}, err
 	}
-	if req.Context != nil {
-		req.Context.Mode = planpkg.NormalizeMode(string(req.Mode))
+	execCtx := req.Context
+	if execCtx == nil {
+		execCtx = &ExecutionContext{}
 	}
+	execCtx.Mode = planpkg.NormalizeMode(string(req.Mode))
 
 	raw, err := e.argumentDecoder.Decode(req.RawArgs, resolved)
 	if err != nil {
 		return ExecuteResult{}, err
 	}
-	if err := e.permissionEngine.Check(ctx, resolved, req.Context); err != nil {
+	if err := e.permissionEngine.Check(ctx, resolved, execCtx); err != nil {
 		return ExecuteResult{}, err
-	}
-
-	execCtx := req.Context
-	if execCtx == nil {
-		execCtx = &ExecutionContext{}
-		execCtx.Mode = planpkg.NormalizeMode(string(req.Mode))
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, executionTimeout(raw, resolved.Spec))
@@ -132,6 +130,11 @@ func (defaultPermissionEngine) Check(_ context.Context, resolved ResolvedTool, e
 		}
 		return NewToolExecError(ToolErrorPermissionDenied, fmt.Sprintf("tool %q is unavailable by active skill policy: %s", resolved.Definition.Function.Name, reason), false, nil)
 	}
+	if resolved.Spec.Destructive {
+		if err := requireDestructiveApproval(resolved.Definition.Function.Name, execCtx); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -157,14 +160,11 @@ func (strictJSONArgumentDecoder) Decode(rawArgs string, resolved ResolvedTool) (
 		return nil, NewToolExecError(ToolErrorInvalidArgs, "tool arguments must be a JSON object", false, nil)
 	}
 
-	if !schemaRejectsUnknownFields(resolved.Definition.Function.Parameters) {
+	if schemaAllowsUnknownFields(resolved.Definition.Function.Parameters) {
 		return json.RawMessage(rawArgs), nil
 	}
 
 	allowedFields := schemaPropertyNames(resolved.Definition.Function.Parameters)
-	if len(allowedFields) == 0 {
-		return json.RawMessage(rawArgs), nil
-	}
 	for key := range objectPayload {
 		if _, ok := allowedFields[key]; ok {
 			continue
@@ -241,13 +241,70 @@ func schemaPropertyNames(parameters map[string]any) map[string]struct{} {
 	return names
 }
 
-func schemaRejectsUnknownFields(parameters map[string]any) bool {
+func schemaAllowsUnknownFields(parameters map[string]any) bool {
 	value, ok := parameters["additionalProperties"]
 	if !ok {
 		return false
 	}
-	allowed, ok := value.(bool)
-	return ok && !allowed
+	switch allowed := value.(type) {
+	case bool:
+		return allowed
+	case map[string]any:
+		return true
+	default:
+		return false
+	}
+}
+
+func requireDestructiveApproval(toolName string, execCtx *ExecutionContext) error {
+	if execCtx == nil {
+		return nil
+	}
+	switch strings.TrimSpace(execCtx.ApprovalPolicy) {
+	case "never":
+		return nil
+	case "always", "on-request", "":
+		return promptDestructiveApproval(toolName, execCtx)
+	default:
+		return promptDestructiveApproval(toolName, execCtx)
+	}
+}
+
+func promptDestructiveApproval(toolName string, execCtx *ExecutionContext) error {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		toolName = "unknown_tool"
+	}
+	reason := fmt.Sprintf("destructive tool may modify workspace files: %s", toolName)
+	if execCtx.Approval != nil {
+		approved, err := execCtx.Approval(ApprovalRequest{
+			Command: toolName,
+			Reason:  reason,
+		})
+		if err != nil {
+			return NewToolExecError(ToolErrorPermissionDenied, err.Error(), false, err)
+		}
+		if !approved {
+			return NewToolExecError(ToolErrorPermissionDenied, fmt.Sprintf("tool %q was not run because approval was denied", toolName), false, nil)
+		}
+		return nil
+	}
+	if execCtx.Stdin == nil {
+		return NewToolExecError(ToolErrorPermissionDenied, fmt.Sprintf("tool %q requires approval but no stdin is available", toolName), false, nil)
+	}
+	if execCtx.Stdout != nil {
+		fmt.Fprintf(execCtx.Stdout, "Approve destructive tool (%s) %q? [y/N]: ", reason, toolName)
+	}
+	reader := bufio.NewReader(execCtx.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return NewToolExecError(ToolErrorPermissionDenied, err.Error(), false, err)
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	if answer != "y" && answer != "yes" {
+		return NewToolExecError(ToolErrorPermissionDenied, fmt.Sprintf("tool %q was not run because approval was denied", toolName), false, nil)
+	}
+	return nil
 }
 
 func executionTimeout(raw json.RawMessage, spec ToolSpec) time.Duration {

@@ -21,6 +21,8 @@ type PairAwareCompactionConfig struct {
 	SummaryBuilder  func(history []llm.Message) (llm.Message, error)
 }
 
+const maxPairAwareFallbackAttempts = 3
+
 func BuildPairAwareCompactedMessages(cfg PairAwareCompactionConfig) ([]llm.Message, bool, error) {
 	if cfg.SummaryBuilder == nil {
 		return nil, false, fmt.Errorf("summary builder is required")
@@ -32,9 +34,16 @@ func BuildPairAwareCompactedMessages(cfg PairAwareCompactionConfig) ([]llm.Messa
 	}
 
 	fallbackUsed := false
-	keepCounts := []int{keepPairCount}
-	if keepPairCount > 0 {
-		keepCounts = append(keepCounts, keepPairCount-1)
+	keepCounts := make([]int, 0, maxPairAwareFallbackAttempts)
+	for i := 0; i < maxPairAwareFallbackAttempts; i++ {
+		pairCount := keepPairCount - i
+		if pairCount < 0 {
+			pairCount = 0
+		}
+		keepCounts = append(keepCounts, pairCount)
+		if pairCount == 0 {
+			break
+		}
 	}
 
 	for attempt, pairCount := range keepCounts {

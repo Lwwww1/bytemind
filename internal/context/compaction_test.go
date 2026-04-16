@@ -127,6 +127,77 @@ func TestBuildPairAwareCompactedMessagesDropsIncompleteToolTailOnFallback(t *tes
 	}
 }
 
+func TestBuildPairAwareCompactedMessagesUsesThirdAttemptWhenNeeded(t *testing.T) {
+	messages := []llm.Message{
+		llm.NewUserTextMessage("start"),
+		{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-1",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name:      "list_files",
+					Arguments: `{}`,
+				},
+			}},
+		},
+		llm.NewToolResultMessage("call-1", `{"ok":true}`),
+		{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-2",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name:      "read_file",
+					Arguments: `{"path":"a.txt"}`,
+				},
+			}},
+		},
+		llm.NewToolResultMessage("call-2", `{"ok":true}`),
+		{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-open",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name:      "read_file",
+					Arguments: `{"path":"missing.txt"}`,
+				},
+			}},
+		},
+		llm.NewUserTextMessage("latest ask"),
+	}
+
+	summaryCalls := 0
+	updated, fallbackUsed, err := BuildPairAwareCompactedMessages(PairAwareCompactionConfig{
+		Messages:        messages,
+		LatestUserIndex: 6,
+		KeepPairCount:   2,
+		SummaryBuilder: func(history []llm.Message) (llm.Message, error) {
+			summaryCalls++
+			if len(history) == 0 {
+				t.Fatal("expected non-empty history for summary")
+			}
+			return llm.NewAssistantTextMessage("Context summary:\nsummary"), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fallbackUsed {
+		t.Fatal("expected fallback when first two attempts keep orphan tool_use")
+	}
+	if summaryCalls != 3 {
+		t.Fatalf("expected three attempts (2 -> 1 -> 0), got %d", summaryCalls)
+	}
+	if containsToolUseID(updated, "call-open") {
+		t.Fatalf("expected orphan tool_use to be removed after third attempt, got %#v", updated)
+	}
+	if err := ValidateToolPairInvariant(updated); err != nil {
+		t.Fatalf("expected pair invariant to hold, got %v", err)
+	}
+}
+
 func containsToolUseID(messages []llm.Message, toolUseID string) bool {
 	for i := range messages {
 		message := messages[i]

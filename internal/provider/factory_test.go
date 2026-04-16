@@ -91,6 +91,22 @@ func TestNewDomainClientWrapsBaseClient(t *testing.T) {
 	}
 }
 
+func TestNewDomainClientPreservesAnthropicProviderID(t *testing.T) {
+	client, err := NewDomainClient(config.ProviderConfig{
+		Type:             "anthropic",
+		BaseURL:          "https://api.anthropic.com",
+		APIKey:           "test-key",
+		Model:            "claude-sonnet",
+		AnthropicVersion: "2023-06-01",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if client.ProviderID() != ProviderAnthropic {
+		t.Fatalf("expected provider id %q, got %q", ProviderAnthropic, client.ProviderID())
+	}
+}
+
 func TestNewDomainClientRejectsEmptyType(t *testing.T) {
 	client, err := NewDomainClient(config.ProviderConfig{
 		Type:    "",

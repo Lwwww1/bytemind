@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 type ProviderRuntimeConfig struct {
 	DefaultProvider string                    `json:"default_provider"`
 	DefaultModel    string                    `json:"default_model"`
@@ -7,11 +9,11 @@ type ProviderRuntimeConfig struct {
 }
 
 func LegacyProviderRuntimeConfig(cfg ProviderConfig) ProviderRuntimeConfig {
-	providerID := cfg.Type
-	if providerID == "openai-compatible" || providerID == "openai" || providerID == "" {
+	providerID := strings.TrimSpace(cfg.Type)
+	switch providerID {
+	case "", "openai", "openai-compatible":
 		providerID = "openai"
-	}
-	if providerID == "anthropic" {
+	case "anthropic":
 		providerID = "anthropic"
 	}
 	return ProviderRuntimeConfig{

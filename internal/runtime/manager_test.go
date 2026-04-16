@@ -433,52 +433,6 @@ func TestInMemoryTaskManagerBridgesEventAndLogToStore(t *testing.T) {
 	}
 }
 
-type captureTaskEventStore struct {
-	mu     sync.Mutex
-	events []TaskEvent
-	logs   []TaskLogEntry
-}
-
-func (s *captureTaskEventStore) AppendTaskEvent(_ context.Context, event TaskEvent) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.events = append(s.events, cloneTaskEvent(event))
-	return nil
-}
-
-func (s *captureTaskEventStore) AppendTaskLog(_ context.Context, _ corepkg.TaskID, entry TaskLogEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.logs = append(s.logs, cloneTaskLogEntry(entry))
-	return nil
-}
-
-func mustReceiveEvent(t *testing.T, stream <-chan TaskEvent) TaskEvent {
-	t.Helper()
-	select {
-	case event, ok := <-stream:
-		if !ok {
-			t.Fatal("expected event, stream is closed")
-		}
-		return event
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for stream event")
-		return TaskEvent{}
-	}
-}
-
-func mustCloseStream(t *testing.T, stream <-chan TaskEvent) {
-	t.Helper()
-	select {
-	case _, ok := <-stream:
-		if ok {
-			t.Fatal("expected stream to be closed")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for stream close")
-	}
-}
-
 func TestInMemoryTaskManagerSubmitRunsExecutorAndCompletes(t *testing.T) {
 	mgr := NewInMemoryTaskManager(WithTaskExecutor(func(_ context.Context, task Task) ([]byte, error) {
 		if task.Status != corepkg.TaskRunning {
@@ -681,5 +635,51 @@ func TestInMemoryTaskManagerSubmitSnapshotsMutableTaskSpec(t *testing.T) {
 	}
 	if _, ok := task.Spec.Metadata["extra"]; ok {
 		t.Fatal("expected metadata not to include caller-side mutations")
+	}
+}
+
+type captureTaskEventStore struct {
+	mu     sync.Mutex
+	events []TaskEvent
+	logs   []TaskLogEntry
+}
+
+func (s *captureTaskEventStore) AppendTaskEvent(_ context.Context, event TaskEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, cloneTaskEvent(event))
+	return nil
+}
+
+func (s *captureTaskEventStore) AppendTaskLog(_ context.Context, _ corepkg.TaskID, entry TaskLogEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logs = append(s.logs, cloneTaskLogEntry(entry))
+	return nil
+}
+
+func mustReceiveEvent(t *testing.T, stream <-chan TaskEvent) TaskEvent {
+	t.Helper()
+	select {
+	case event, ok := <-stream:
+		if !ok {
+			t.Fatal("expected event, stream is closed")
+		}
+		return event
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stream event")
+		return TaskEvent{}
+	}
+}
+
+func mustCloseStream(t *testing.T, stream <-chan TaskEvent) {
+	t.Helper()
+	select {
+	case _, ok := <-stream:
+		if ok {
+			t.Fatal("expected stream to be closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stream close")
 	}
 }

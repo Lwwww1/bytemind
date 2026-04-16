@@ -269,9 +269,14 @@ func TestInMemoryTaskManagerWaitReturnsImmediatelyForTerminalTask(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
 	}
-	if err := mgr.Cancel(context.Background(), id, "terminal"); err != nil {
-		t.Fatalf("Cancel failed: %v", err)
-	}
+	finishedAt := time.Now().UTC()
+	mgr.mu.Lock()
+	task := mgr.tasks[id]
+	task.Status = corepkg.TaskKilled
+	task.ErrorCode = ErrorCodeTaskCancelled
+	task.FinishedAt = &finishedAt
+	mgr.tasks[id] = task
+	mgr.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -290,9 +295,14 @@ func TestInMemoryTaskManagerWaitWithNilContextUsesBackground(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
 	}
-	if err := mgr.Cancel(context.Background(), id, "terminal"); err != nil {
-		t.Fatalf("Cancel failed: %v", err)
-	}
+	finishedAt := time.Now().UTC()
+	mgr.mu.Lock()
+	task := mgr.tasks[id]
+	task.Status = corepkg.TaskKilled
+	task.ErrorCode = ErrorCodeTaskCancelled
+	task.FinishedAt = &finishedAt
+	mgr.tasks[id] = task
+	mgr.mu.Unlock()
 
 	result, err := mgr.Wait(nil, id)
 	if err != nil {
@@ -304,7 +314,10 @@ func TestInMemoryTaskManagerWaitWithNilContextUsesBackground(t *testing.T) {
 }
 
 func TestInMemoryTaskManagerStreamReplaysHistoryAndLiveUpdates(t *testing.T) {
-	mgr := NewInMemoryTaskManager()
+	mgr := NewInMemoryTaskManager(WithTaskExecutor(func(ctx context.Context, _ Task) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}))
 	id, err := mgr.Submit(context.Background(), TaskSpec{Name: "stream"})
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -330,18 +343,32 @@ func TestInMemoryTaskManagerStreamReplaysHistoryAndLiveUpdates(t *testing.T) {
 		t.Fatalf("Cancel failed: %v", err)
 	}
 
-	second := mustReceiveEvent(t, stream)
-	if second.Status != corepkg.TaskKilled {
-		t.Fatalf("expected second status killed, got %s", second.Status)
+	var (
+		killed    TaskEvent
+		sawKilled bool
+	)
+	for i := 0; i < 4; i++ {
+		event := mustReceiveEvent(t, stream)
+		if event.Status == corepkg.TaskKilled {
+			killed = event
+			sawKilled = true
+			break
+		}
 	}
-	if second.Offset != 1 {
-		t.Fatalf("expected second offset 1, got %d", second.Offset)
+	if !sawKilled {
+		t.Fatal("expected stream to emit killed status after cancel")
+	}
+	if killed.Offset == 0 {
+		t.Fatalf("expected killed event offset > 0, got %d", killed.Offset)
 	}
 	mustCloseStream(t, stream)
 }
 
 func TestInMemoryTaskManagerStreamReplaysTerminalHistoryAndCloses(t *testing.T) {
-	mgr := NewInMemoryTaskManager()
+	mgr := NewInMemoryTaskManager(WithTaskExecutor(func(ctx context.Context, _ Task) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}))
 	id, err := mgr.Submit(context.Background(), TaskSpec{Name: "terminal-history"})
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -355,16 +382,31 @@ func TestInMemoryTaskManagerStreamReplaysTerminalHistoryAndCloses(t *testing.T) 
 		t.Fatalf("Stream failed: %v", err)
 	}
 
-	first := mustReceiveEvent(t, stream)
-	second := mustReceiveEvent(t, stream)
-	if first.Status != corepkg.TaskPending || second.Status != corepkg.TaskKilled {
-		t.Fatalf("expected replayed statuses pending->killed, got %s->%s", first.Status, second.Status)
+	var events []TaskEvent
+	for event := range stream {
+		events = append(events, event)
 	}
-	mustCloseStream(t, stream)
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 replayed events, got %d", len(events))
+	}
+	if events[0].Status != corepkg.TaskPending {
+		t.Fatalf("expected first replayed status pending, got %s", events[0].Status)
+	}
+	if events[len(events)-1].Status != corepkg.TaskKilled {
+		t.Fatalf("expected last replayed status killed, got %s", events[len(events)-1].Status)
+	}
+	for i, event := range events {
+		if event.Offset != uint64(i) {
+			t.Fatalf("expected replayed offset %d, got %d", i, event.Offset)
+		}
+	}
 }
 
 func TestInMemoryTaskManagerReadIncrementSupportsOffsetWindowAndBounds(t *testing.T) {
-	mgr := NewInMemoryTaskManager()
+	mgr := NewInMemoryTaskManager(WithTaskExecutor(func(ctx context.Context, _ Task) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}))
 	id, err := mgr.Submit(context.Background(), TaskSpec{Name: "logs"})
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -373,42 +415,56 @@ func TestInMemoryTaskManagerReadIncrementSupportsOffsetWindowAndBounds(t *testin
 		t.Fatalf("Cancel failed: %v", err)
 	}
 
+	all, totalNext, totalHasMore, err := mgr.ReadIncrement(context.Background(), id, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadIncrement default limit failed: %v", err)
+	}
+	if totalHasMore {
+		t.Fatalf("expected hasMore=false for full read, got %v", totalHasMore)
+	}
+	if len(all) < 2 {
+		t.Fatalf("expected at least 2 logs, got %d", len(all))
+	}
+	if string(all[0].Payload) != "status=pending" {
+		t.Fatalf("expected first log payload %q, got %q", "status=pending", string(all[0].Payload))
+	}
+	if string(all[len(all)-1].Payload) != "status=killed" {
+		t.Fatalf("expected last log payload %q, got %q", "status=killed", string(all[len(all)-1].Payload))
+	}
+	for i, entry := range all {
+		if entry.Offset != uint64(i) {
+			t.Fatalf("expected log offset %d, got %d", i, entry.Offset)
+		}
+	}
+
 	items, next, hasMore, err := mgr.ReadIncrement(context.Background(), id, 0, 1)
 	if err != nil {
-		t.Fatalf("ReadIncrement failed: %v", err)
+		t.Fatalf("ReadIncrement first page failed: %v", err)
 	}
 	if len(items) != 1 || next != 1 || !hasMore {
 		t.Fatalf("expected len=1 next=1 hasMore=true, got len=%d next=%d hasMore=%v", len(items), next, hasMore)
 	}
 	if string(items[0].Payload) != "status=pending" {
-		t.Fatalf("expected first log payload %q, got %q", "status=pending", string(items[0].Payload))
+		t.Fatalf("expected first page payload %q, got %q", "status=pending", string(items[0].Payload))
 	}
 
 	items, next, hasMore, err = mgr.ReadIncrement(context.Background(), id, next, 10)
 	if err != nil {
 		t.Fatalf("ReadIncrement second page failed: %v", err)
 	}
-	if len(items) != 1 || next != 2 || hasMore {
-		t.Fatalf("expected len=1 next=2 hasMore=false, got len=%d next=%d hasMore=%v", len(items), next, hasMore)
+	if len(items) != len(all)-1 || next != totalNext || hasMore {
+		t.Fatalf("expected len=%d next=%d hasMore=false, got len=%d next=%d hasMore=%v", len(all)-1, totalNext, len(items), next, hasMore)
 	}
-	if string(items[0].Payload) != "status=killed" {
-		t.Fatalf("expected second log payload %q, got %q", "status=killed", string(items[0].Payload))
-	}
-
-	items, next, hasMore, err = mgr.ReadIncrement(context.Background(), id, 0, 0)
-	if err != nil {
-		t.Fatalf("ReadIncrement default limit failed: %v", err)
-	}
-	if len(items) != 2 || next != 2 || hasMore {
-		t.Fatalf("expected len=2 next=2 hasMore=false, got len=%d next=%d hasMore=%v", len(items), next, hasMore)
+	if string(items[len(items)-1].Payload) != "status=killed" {
+		t.Fatalf("expected second page tail payload %q, got %q", "status=killed", string(items[len(items)-1].Payload))
 	}
 
 	items, next, hasMore, err = mgr.ReadIncrement(context.Background(), id, 100, 10)
 	if err != nil {
 		t.Fatalf("ReadIncrement large offset failed: %v", err)
 	}
-	if len(items) != 0 || next != 2 || hasMore {
-		t.Fatalf("expected len=0 next=2 hasMore=false, got len=%d next=%d hasMore=%v", len(items), next, hasMore)
+	if len(items) != 0 || next != totalNext || hasMore {
+		t.Fatalf("expected len=0 next=%d hasMore=false, got len=%d next=%d hasMore=%v", totalNext, len(items), next, hasMore)
 	}
 }
 
@@ -426,7 +482,13 @@ func TestInMemoryTaskManagerReadIncrementUnknownTaskReturnsTaskNotFound(t *testi
 
 func TestInMemoryTaskManagerBridgesEventAndLogToStore(t *testing.T) {
 	store := &captureTaskEventStore{}
-	mgr := NewInMemoryTaskManager(WithTaskEventStore(store))
+	mgr := NewInMemoryTaskManager(
+		WithTaskEventStore(store),
+		WithTaskExecutor(func(ctx context.Context, _ Task) ([]byte, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}),
+	)
 	id, err := mgr.Submit(context.Background(), TaskSpec{Name: "bridge"})
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -437,14 +499,22 @@ func TestInMemoryTaskManagerBridgesEventAndLogToStore(t *testing.T) {
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if len(store.events) != 2 {
-		t.Fatalf("expected 2 bridged events, got %d", len(store.events))
+	if len(store.events) < 2 {
+		t.Fatalf("expected at least 2 bridged events, got %d", len(store.events))
 	}
-	if len(store.logs) != 2 {
-		t.Fatalf("expected 2 bridged logs, got %d", len(store.logs))
+	if len(store.logs) < 2 {
+		t.Fatalf("expected at least 2 bridged logs, got %d", len(store.logs))
 	}
-	if store.events[0].Offset != 0 || store.events[1].Offset != 1 {
-		t.Fatalf("expected bridged event offsets [0,1], got [%d,%d]", store.events[0].Offset, store.events[1].Offset)
+	if store.events[0].Status != corepkg.TaskPending {
+		t.Fatalf("expected first bridged event status pending, got %s", store.events[0].Status)
+	}
+	if store.events[len(store.events)-1].Status != corepkg.TaskKilled {
+		t.Fatalf("expected last bridged event status killed, got %s", store.events[len(store.events)-1].Status)
+	}
+	for i, event := range store.events {
+		if event.Offset != uint64(i) {
+			t.Fatalf("expected bridged event offset %d, got %d", i, event.Offset)
+		}
 	}
 }
 

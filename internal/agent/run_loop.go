@@ -56,7 +56,7 @@ func (r *Runner) processTurnWithReactiveCompaction(ctx context.Context, setup ru
 		return answer, finished, err
 	}
 
-	_, compacted, compactErr := r.compactSession(ctx, params.Session, true, "reactive_prompt_too_long")
+	_, compacted, compactErr := r.compactSession(ctx, params.Session, true, true, "reactive_prompt_too_long")
 	if compactErr != nil {
 		return "", false, compactErr
 	}

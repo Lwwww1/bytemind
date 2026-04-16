@@ -20,6 +20,12 @@ func NewRegistry(cfg config.ProviderRuntimeConfig) (Registry, error) {
 	ids := make([]string, 0, len(cfg.Providers))
 	for id, providerCfg := range cfg.Providers {
 		normalizedID := ProviderID(strings.ToLower(strings.TrimSpace(id)))
+		if normalizedID == "" {
+			return nil, &Error{Code: ErrCodeProviderNotFound, Provider: normalizedID, Message: string(ErrCodeProviderNotFound), Retryable: false, Err: ErrProviderNotFound}
+		}
+		if _, exists := normalizedProviders[normalizedID]; exists {
+			return nil, &Error{Code: ErrCodeDuplicateProvider, Provider: normalizedID, Message: string(ErrCodeDuplicateProvider), Retryable: false, Err: ErrDuplicateProvider}
+		}
 		normalizedProviders[normalizedID] = providerCfg
 		ids = append(ids, string(normalizedID))
 	}
@@ -80,16 +86,4 @@ func (r *providerRegistry) List(_ context.Context) ([]ProviderID, error) {
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return ids, nil
-}
-
-func normalizeProviderID(id ProviderID) ProviderID {
-	value := strings.ToLower(strings.TrimSpace(string(id)))
-	switch value {
-	case "openai-compatible", "openai":
-		return ProviderOpenAI
-	case "anthropic":
-		return ProviderAnthropic
-	default:
-		return ProviderID(value)
-	}
 }

@@ -121,6 +121,29 @@ func TestListModelsAggregatesWarningsAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestListModelsKeepsInstanceIDsDistinctEvenWhenAliasesOverlap(t *testing.T) {
+	reg, err := NewRegistry(config.ProviderRuntimeConfig{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if err := reg.Register(context.Background(), stubRegistryClient{providerID: "openai", models: []ModelInfo{{ProviderID: "openai-compatible", ModelID: "gpt-5.4"}}}); err != nil {
+		t.Fatalf("unexpected register error %v", err)
+	}
+	if err := reg.Register(context.Background(), stubRegistryClient{providerID: "openai-compatible", models: []ModelInfo{{ProviderID: "openai", ModelID: "gpt-5.4"}}}); err != nil {
+		t.Fatalf("unexpected register error %v", err)
+	}
+	models, warnings, err := ListModels(context.Background(), reg)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings %#v", warnings)
+	}
+	if len(models) != 2 || models[0].ProviderID != "openai" || models[1].ProviderID != "openai-compatible" {
+		t.Fatalf("unexpected models %#v", models)
+	}
+}
+
 func TestListModelsReturnsRegistryError(t *testing.T) {
 	reg := stubListRegistry{listErr: errors.New("boom")}
 	if _, _, err := ListModels(context.Background(), reg); err == nil {
@@ -179,6 +202,12 @@ func TestRegistryHandlesProviderNotFoundAndConfigErrors(t *testing.T) {
 	}
 	if _, err := NewRegistry(config.ProviderRuntimeConfig{DefaultProvider: "missing", Providers: map[string]config.ProviderConfig{"openai-primary": {Type: "openai-compatible", BaseURL: "https://example.com", APIKey: "key", Model: "m"}}}); err == nil {
 		t.Fatal("expected missing default provider error")
+	}
+	if _, err := NewRegistry(config.ProviderRuntimeConfig{Providers: map[string]config.ProviderConfig{" OpenAI-Primary ": {Type: "openai-compatible", BaseURL: "https://example.com", APIKey: "key", Model: "m"}, "openai-primary": {Type: "openai-compatible", BaseURL: "https://example2.com", APIKey: "key", Model: "m"}}}); err == nil {
+		t.Fatal("expected duplicate normalized provider error")
+	}
+	if _, err := NewRegistry(config.ProviderRuntimeConfig{Providers: map[string]config.ProviderConfig{"   ": {Type: "openai-compatible", BaseURL: "https://example.com", APIKey: "key", Model: "m"}}}); err == nil {
+		t.Fatal("expected blank provider id error")
 	}
 	if _, err := NewRegistry(config.ProviderRuntimeConfig{Providers: map[string]config.ProviderConfig{"broken": {BaseURL: "https://example.com", APIKey: "key", Model: "m"}}}); err == nil {
 		t.Fatal("expected invalid provider type error")

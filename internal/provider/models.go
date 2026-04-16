@@ -54,10 +54,7 @@ func ListModels(ctx context.Context, reg Registry) ([]ModelInfo, []Warning, erro
 			mu.Lock()
 			defer mu.Unlock()
 			for _, model := range providerModels {
-				providerID := normalizeProviderID(model.ProviderID)
-				if providerID == "" {
-					providerID = id
-				}
+				providerID := id
 				key := string(providerID) + "\x00" + string(model.ModelID)
 				if _, exists := seen[key]; exists {
 					continue

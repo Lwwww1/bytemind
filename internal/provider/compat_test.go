@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"bytemind/internal/llm"
 )
@@ -94,5 +95,97 @@ func TestWrapClientStreamEmitsErrorEvent(t *testing.T) {
 	}
 	if events[3].Error.Code != ErrCodeUnavailable {
 		t.Fatalf("unexpected error code %#v", events[3].Error)
+	}
+}
+
+func TestWrapClientStreamMapsProviderErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		code      ErrorCode
+		retryable bool
+		message   string
+	}{
+		{
+			name: "rate limited",
+			err:  &llm.ProviderError{Code: llm.ErrorCodeRateLimited, Provider: "openai", Status: 429, Retryable: true, Message: "429: raw upstream body"},
+			code: ErrCodeRateLimited, retryable: true, message: "provider rate limited",
+		},
+		{
+			name: "context too long",
+			err:  &llm.ProviderError{Code: llm.ErrorCodeContextTooLong, Provider: "anthropic", Status: 413, Retryable: false, Message: "prompt is too long with raw details"},
+			code: ErrCodeBadRequest, retryable: false, message: "request exceeds provider context limit",
+		},
+		{
+			name: "fallback unavailable",
+			err:  errors.New("sensitive raw body"),
+			code: ErrCodeUnavailable, retryable: false, message: "provider request failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := WrapClient(ProviderOpenAI, ModelID("gpt-5.4"), stubCompatClient{err: tt.err})
+			stream, err := adapter.Stream(context.Background(), Request{ChatRequest: llm.ChatRequest{}, TraceID: "trace-map"})
+			if err != nil {
+				t.Fatalf("expected no setup error, got %v", err)
+			}
+			var got *Error
+			for event := range stream {
+				if event.Type == EventError {
+					got = event.Error
+				}
+			}
+			if got == nil {
+				t.Fatal("expected error event")
+			}
+			if got.Code != tt.code || got.Retryable != tt.retryable || got.Provider != ProviderOpenAI || got.Message != tt.message {
+				t.Fatalf("unexpected mapped error %#v", got)
+			}
+		})
+	}
+}
+
+func TestWrapClientStreamStopsWhenContextCancelled(t *testing.T) {
+	adapter := WrapClient(ProviderOpenAI, ModelID("gpt-5.4"), stubCompatClient{message: llm.Message{Role: llm.RoleAssistant, Content: "hello world"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := adapter.Stream(ctx, Request{ChatRequest: llm.ChatRequest{Model: "gpt-5.4"}, TraceID: "trace-cancel"})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	<-stream
+	cancel()
+	select {
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected stream to stop after cancellation")
+	case _, ok := <-stream:
+		if ok {
+			for range stream {
+			}
+		}
+	}
+}
+
+func TestWrapClientCoversNilClientAndEmptyModel(t *testing.T) {
+	if WrapClient(ProviderOpenAI, ModelID("gpt-5.4"), nil) != nil {
+		t.Fatal("expected nil client to return nil adapter")
+	}
+	adapter := WrapClient("", ModelID(""), stubCompatClient{})
+	if adapter.ProviderID() != ProviderID("unknown") {
+		t.Fatalf("unexpected provider id %q", adapter.ProviderID())
+	}
+	models, err := adapter.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if models != nil {
+		t.Fatalf("expected nil models, got %#v", models)
+	}
+}
+
+func TestMapCompatErrorDefaultProviderErrorBranch(t *testing.T) {
+	mapped := mapCompatError(ProviderAnthropic, &llm.ProviderError{Code: llm.ErrorCodeUnknown, Retryable: true, Message: "hidden upstream body"})
+	if mapped.Code != ErrCodeUnavailable || !mapped.Retryable || mapped.Message != "provider unavailable" || mapped.Provider != ProviderAnthropic {
+		t.Fatalf("unexpected mapped error %#v", mapped)
 	}
 }

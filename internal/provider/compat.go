@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"bytemind/internal/llm"
@@ -50,42 +51,38 @@ func (a *clientAdapter) Stream(ctx context.Context, req Request) (<-chan Event, 
 		if modelID == "" {
 			modelID = a.defaultModel
 		}
-		stream <- Event{
+		if !emit(ctx, stream, Event{
 			Type:       EventStart,
 			TraceID:    req.TraceID,
 			ProviderID: a.providerID,
 			ModelID:    modelID,
+		}) {
+			return
 		}
 		message, err := a.client.StreamMessage(ctx, req.ChatRequest, func(delta string) {
 			if strings.TrimSpace(delta) == "" {
 				return
 			}
-			stream <- Event{
+			_ = emit(ctx, stream, Event{
 				Type:       EventDelta,
 				TraceID:    req.TraceID,
 				ProviderID: a.providerID,
 				ModelID:    modelID,
 				Delta:      delta,
-			}
+			})
 		})
 		if err != nil {
-			stream <- Event{
+			_ = emit(ctx, stream, Event{
 				Type:       EventError,
 				TraceID:    req.TraceID,
 				ProviderID: a.providerID,
 				ModelID:    modelID,
-				Error: &Error{
-					Code:      ErrCodeUnavailable,
-					Provider:  a.providerID,
-					Message:   err.Error(),
-					Retryable: false,
-					Err:       err,
-				},
-			}
+				Error:      mapCompatError(a.providerID, err),
+			})
 			return
 		}
 		if message.Usage != nil {
-			stream <- Event{
+			if !emit(ctx, stream, Event{
 				Type:       EventUsage,
 				TraceID:    req.TraceID,
 				ProviderID: a.providerID,
@@ -95,26 +92,65 @@ func (a *clientAdapter) Stream(ctx context.Context, req Request) (<-chan Event, 
 					OutputTokens: int64(message.Usage.OutputTokens),
 					TotalTokens:  int64(message.Usage.TotalTokens),
 				},
+			}) {
+				return
 			}
 		}
 		message.Normalize()
 		for _, toolCall := range message.ToolCalls {
 			call := toolCall
-			stream <- Event{
+			if !emit(ctx, stream, Event{
 				Type:       EventToolCall,
 				TraceID:    req.TraceID,
 				ProviderID: a.providerID,
 				ModelID:    modelID,
 				ToolCall:   &call,
+			}) {
+				return
 			}
 		}
-		stream <- Event{
+		_ = emit(ctx, stream, Event{
 			Type:       EventResult,
 			TraceID:    req.TraceID,
 			ProviderID: a.providerID,
 			ModelID:    modelID,
 			Result:     &message,
-		}
+		})
 	}()
 	return stream, nil
+}
+
+func emit(ctx context.Context, ch chan<- Event, evt Event) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case ch <- evt:
+		return true
+	}
+}
+
+func mapCompatError(providerID ProviderID, err error) *Error {
+	mapped := &Error{
+		Code:      ErrCodeUnavailable,
+		Provider:  providerID,
+		Message:   "provider request failed",
+		Retryable: false,
+		Err:       err,
+	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr == nil {
+		return mapped
+	}
+	mapped.Retryable = providerErr.Retryable
+	switch providerErr.Code {
+	case llm.ErrorCodeRateLimited:
+		mapped.Code = ErrCodeRateLimited
+		mapped.Message = "provider rate limited"
+	case llm.ErrorCodeContextTooLong:
+		mapped.Code = ErrCodeBadRequest
+		mapped.Message = "request exceeds provider context limit"
+	default:
+		mapped.Message = "provider unavailable"
+	}
+	return mapped
 }

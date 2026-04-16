@@ -90,3 +90,18 @@ func TestNewDomainClientWrapsBaseClient(t *testing.T) {
 		t.Fatalf("unexpected models: %#v", models)
 	}
 }
+
+func TestNewDomainClientRejectsEmptyType(t *testing.T) {
+	client, err := NewDomainClient(config.ProviderConfig{
+		Type:    "",
+		BaseURL: "https://example.com",
+		APIKey:  "test-key",
+		Model:   "test-model",
+	})
+	if err == nil {
+		t.Fatal("expected unsupported provider type error")
+	}
+	if client != nil {
+		t.Fatalf("expected nil client, got %v", client)
+	}
+}

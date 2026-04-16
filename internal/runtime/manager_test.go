@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -287,14 +288,148 @@ func TestInMemoryTaskManagerWaitWithNilContextUsesBackground(t *testing.T) {
 	}
 }
 
-func TestInMemoryTaskManagerStreamReturnsNotImplemented(t *testing.T) {
+func TestInMemoryTaskManagerStreamReplaysHistoryAndLiveUpdates(t *testing.T) {
 	mgr := NewInMemoryTaskManager()
-	_, err := mgr.Stream(context.Background(), "task-id")
-	if err == nil {
-		t.Fatal("expected stream to return not implemented")
+	id, err := mgr.Submit(context.Background(), TaskSpec{Name: "stream"})
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
 	}
-	if !hasErrorCode(err, ErrorCodeNotImplemented) {
-		t.Fatalf("expected error code %q, got %q", ErrorCodeNotImplemented, errorCode(err))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	stream, err := mgr.Stream(ctx, id)
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	first := mustReceiveEvent(t, stream)
+	if first.Status != corepkg.TaskPending {
+		t.Fatalf("expected first status pending, got %s", first.Status)
+	}
+	if first.Offset != 0 {
+		t.Fatalf("expected first offset 0, got %d", first.Offset)
+	}
+
+	if err := mgr.Cancel(context.Background(), id, "cancel"); err != nil {
+		t.Fatalf("Cancel failed: %v", err)
+	}
+
+	second := mustReceiveEvent(t, stream)
+	if second.Status != corepkg.TaskKilled {
+		t.Fatalf("expected second status killed, got %s", second.Status)
+	}
+	if second.Offset != 1 {
+		t.Fatalf("expected second offset 1, got %d", second.Offset)
+	}
+	mustCloseStream(t, stream)
+}
+
+func TestInMemoryTaskManagerStreamReplaysTerminalHistoryAndCloses(t *testing.T) {
+	mgr := NewInMemoryTaskManager()
+	id, err := mgr.Submit(context.Background(), TaskSpec{Name: "terminal-history"})
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+	if err := mgr.Cancel(context.Background(), id, "cancel"); err != nil {
+		t.Fatalf("Cancel failed: %v", err)
+	}
+
+	stream, err := mgr.Stream(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+
+	first := mustReceiveEvent(t, stream)
+	second := mustReceiveEvent(t, stream)
+	if first.Status != corepkg.TaskPending || second.Status != corepkg.TaskKilled {
+		t.Fatalf("expected replayed statuses pending->killed, got %s->%s", first.Status, second.Status)
+	}
+	mustCloseStream(t, stream)
+}
+
+func TestInMemoryTaskManagerReadIncrementSupportsOffsetWindowAndBounds(t *testing.T) {
+	mgr := NewInMemoryTaskManager()
+	id, err := mgr.Submit(context.Background(), TaskSpec{Name: "logs"})
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+	if err := mgr.Cancel(context.Background(), id, "cancel"); err != nil {
+		t.Fatalf("Cancel failed: %v", err)
+	}
+
+	items, next, hasMore, err := mgr.ReadIncrement(context.Background(), id, 0, 1)
+	if err != nil {
+		t.Fatalf("ReadIncrement failed: %v", err)
+	}
+	if len(items) != 1 || next != 1 || !hasMore {
+		t.Fatalf("expected len=1 next=1 hasMore=true, got len=%d next=%d hasMore=%v", len(items), next, hasMore)
+	}
+	if string(items[0].Payload) != "status=pending" {
+		t.Fatalf("expected first log payload %q, got %q", "status=pending", string(items[0].Payload))
+	}
+
+	items, next, hasMore, err = mgr.ReadIncrement(context.Background(), id, next, 10)
+	if err != nil {
+		t.Fatalf("ReadIncrement second page failed: %v", err)
+	}
+	if len(items) != 1 || next != 2 || hasMore {
+		t.Fatalf("expected len=1 next=2 hasMore=false, got len=%d next=%d hasMore=%v", len(items), next, hasMore)
+	}
+	if string(items[0].Payload) != "status=killed" {
+		t.Fatalf("expected second log payload %q, got %q", "status=killed", string(items[0].Payload))
+	}
+
+	items, next, hasMore, err = mgr.ReadIncrement(context.Background(), id, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadIncrement default limit failed: %v", err)
+	}
+	if len(items) != 2 || next != 2 || hasMore {
+		t.Fatalf("expected len=2 next=2 hasMore=false, got len=%d next=%d hasMore=%v", len(items), next, hasMore)
+	}
+
+	items, next, hasMore, err = mgr.ReadIncrement(context.Background(), id, 100, 10)
+	if err != nil {
+		t.Fatalf("ReadIncrement large offset failed: %v", err)
+	}
+	if len(items) != 0 || next != 2 || hasMore {
+		t.Fatalf("expected len=0 next=2 hasMore=false, got len=%d next=%d hasMore=%v", len(items), next, hasMore)
+	}
+}
+
+func TestInMemoryTaskManagerReadIncrementUnknownTaskReturnsTaskNotFound(t *testing.T) {
+	mgr := NewInMemoryTaskManager()
+
+	_, _, _, err := mgr.ReadIncrement(context.Background(), "missing-task", 0, 10)
+	if err == nil {
+		t.Fatal("expected task not found error")
+	}
+	if !hasErrorCode(err, ErrorCodeTaskNotFound) {
+		t.Fatalf("expected error code %q, got %q", ErrorCodeTaskNotFound, errorCode(err))
+	}
+}
+
+func TestInMemoryTaskManagerBridgesEventAndLogToStore(t *testing.T) {
+	store := &captureTaskEventStore{}
+	mgr := NewInMemoryTaskManager(WithTaskEventStore(store))
+	id, err := mgr.Submit(context.Background(), TaskSpec{Name: "bridge"})
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+	if err := mgr.Cancel(context.Background(), id, "cancel"); err != nil {
+		t.Fatalf("Cancel failed: %v", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.events) != 2 {
+		t.Fatalf("expected 2 bridged events, got %d", len(store.events))
+	}
+	if len(store.logs) != 2 {
+		t.Fatalf("expected 2 bridged logs, got %d", len(store.logs))
+	}
+	if store.events[0].Offset != 0 || store.events[1].Offset != 1 {
+		t.Fatalf("expected bridged event offsets [0,1], got [%d,%d]", store.events[0].Offset, store.events[1].Offset)
 	}
 }
 
@@ -500,5 +635,51 @@ func TestInMemoryTaskManagerSubmitSnapshotsMutableTaskSpec(t *testing.T) {
 	}
 	if _, ok := task.Spec.Metadata["extra"]; ok {
 		t.Fatal("expected metadata not to include caller-side mutations")
+	}
+}
+
+type captureTaskEventStore struct {
+	mu     sync.Mutex
+	events []TaskEvent
+	logs   []TaskLogEntry
+}
+
+func (s *captureTaskEventStore) AppendTaskEvent(_ context.Context, event TaskEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, cloneTaskEvent(event))
+	return nil
+}
+
+func (s *captureTaskEventStore) AppendTaskLog(_ context.Context, _ corepkg.TaskID, entry TaskLogEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logs = append(s.logs, cloneTaskLogEntry(entry))
+	return nil
+}
+
+func mustReceiveEvent(t *testing.T, stream <-chan TaskEvent) TaskEvent {
+	t.Helper()
+	select {
+	case event, ok := <-stream:
+		if !ok {
+			t.Fatal("expected event, stream is closed")
+		}
+		return event
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stream event")
+		return TaskEvent{}
+	}
+}
+
+func mustCloseStream(t *testing.T, stream <-chan TaskEvent) {
+	t.Helper()
+	select {
+	case _, ok := <-stream:
+		if ok {
+			t.Fatal("expected stream to be closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stream close")
 	}
 }

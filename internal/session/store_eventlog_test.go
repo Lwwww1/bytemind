@@ -572,3 +572,290 @@ func TestStoreReadEventsAndSnapshotOnLegacySource(t *testing.T) {
 		t.Fatalf("expected Snapshot on legacy source to return os.ErrNotExist, got %v", err)
 	}
 }
+
+func TestReplaySkipsDuplicateEventIDAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	storeA, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	paths, err := storeA.pathForWorkspaceSession(workspace, "dedupe-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := New(workspace)
+	base.ID = "dedupe-restart"
+	base.Messages = nil
+	base.Conversation.Timeline = nil
+	basePayload, _ := json.Marshal(fullSessionPayload{Session: *base})
+	appendPayload, _ := json.Marshal(turnAppendedPayload{
+		Messages: []llm.Message{llm.NewUserTextMessage("once")},
+	})
+
+	events := []SessionEvent{
+		{
+			EventID:       "re-1",
+			SessionID:     "dedupe-restart",
+			Seq:           1,
+			Type:          eventTypeSessionCreated,
+			TS:            time.Now().UTC(),
+			SchemaVersion: eventSchemaVersion,
+			Payload:       basePayload,
+		},
+		{
+			EventID:       "re-2",
+			SessionID:     "dedupe-restart",
+			Seq:           2,
+			Type:          eventTypeTurnAppended,
+			TS:            time.Now().UTC(),
+			SchemaVersion: eventSchemaVersion,
+			Payload:       appendPayload,
+		},
+		{
+			EventID:       "re-2",
+			SessionID:     "dedupe-restart",
+			Seq:           3,
+			Type:          eventTypeTurnAppended,
+			TS:            time.Now().UTC(),
+			SchemaVersion: eventSchemaVersion,
+			Payload:       appendPayload,
+		},
+	}
+	for _, event := range events {
+		if err := appendEventLine(storeA.files, paths.Events, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	replayedA, err := storeA.Replay("dedupe-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayedA.Messages) != 1 {
+		t.Fatalf("expected duplicate event_id to be ignored before restart, got %#v", replayedA.Messages)
+	}
+
+	storeB, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayedB, err := storeB.Replay("dedupe-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayedB.Messages) != 1 || replayedB.Messages[0].Content != "once" {
+		t.Fatalf("expected duplicate event_id to stay deduped after restart, got %#v", replayedB.Messages)
+	}
+}
+
+func TestStoreReadFromOffsetRemainsMonotonicAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	storeA, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sess := New(t.TempDir())
+	sess.ID = "offset-restart-monotonic"
+	if err := storeA.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+	sess.Messages = append(sess.Messages, llm.NewUserTextMessage("first"))
+	if err := storeA.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+	sess.Messages = append(sess.Messages, llm.NewAssistantTextMessage("second"))
+	if err := storeA.Save(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	first, next1, err := storeA.ReadFrom(sess.ID, 0, 1)
+	if err != nil {
+		t.Fatalf("ReadFrom first page failed: %v", err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("expected first page size 1, got %d", len(first))
+	}
+
+	storeB, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, next2, err := storeB.ReadFrom(sess.ID, next1, 2)
+	if err != nil {
+		t.Fatalf("ReadFrom second page after restart failed: %v", err)
+	}
+	if len(second) == 0 {
+		t.Fatal("expected more events after restart")
+	}
+	if next2 < next1 {
+		t.Fatalf("expected next offset monotonic across restart, first=%d second=%d", next1, next2)
+	}
+
+	tail, next3, err := storeB.ReadFrom(sess.ID, next2, 1024)
+	if err != nil {
+		t.Fatalf("ReadFrom tail after restart failed: %v", err)
+	}
+	if next3 < next2 {
+		t.Fatalf("expected tail next offset monotonic across restart, second=%d tail=%d", next2, next3)
+	}
+
+	empty, next4, err := storeB.ReadFrom(sess.ID, next3, 1024)
+	if err != nil {
+		t.Fatalf("ReadFrom final tail after restart failed: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected final tail to be empty, got %d events", len(empty))
+	}
+	if next4 != next3 {
+		t.Fatalf("expected stable final tail next offset %d, got %d", next3, next4)
+	}
+	if len(tail) == 0 && next3 == next2 {
+		t.Fatal("expected progress while consuming tail events after restart")
+	}
+}
+
+func TestStoreReadFromCorruptedAndPartialLineAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	storeA, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	paths, err := storeA.pathForWorkspaceSession(workspace, "offset-restart-corrupted-partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := New(workspace)
+	base.ID = "offset-restart-corrupted-partial"
+	basePayload, _ := json.Marshal(fullSessionPayload{Session: *base})
+	appendPayload, _ := json.Marshal(turnAppendedPayload{
+		Messages: []llm.Message{llm.NewUserTextMessage("ok")},
+	})
+	events := []SessionEvent{
+		{
+			EventID:       "rs-1",
+			SessionID:     "offset-restart-corrupted-partial",
+			Seq:           1,
+			Type:          eventTypeSessionCreated,
+			TS:            time.Now().UTC(),
+			SchemaVersion: eventSchemaVersion,
+			Payload:       basePayload,
+		},
+		{
+			EventID:       "rs-2",
+			SessionID:     "offset-restart-corrupted-partial",
+			Seq:           2,
+			Type:          eventTypeTurnAppended,
+			TS:            time.Now().UTC(),
+			SchemaVersion: eventSchemaVersion,
+			Payload:       appendPayload,
+		},
+	}
+	if err := appendEventLine(storeA.files, paths.Events, events[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeA.files.AppendLine(paths.Events, []byte(`{bad-json`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendEventLine(storeA.files, paths.Events, events[1]); err != nil {
+		t.Fatal(err)
+	}
+
+	partialEvent := SessionEvent{
+		EventID:       "rs-partial",
+		SessionID:     "offset-restart-corrupted-partial",
+		Seq:           3,
+		Type:          eventTypeTurnAppended,
+		TS:            time.Now().UTC(),
+		SchemaVersion: eventSchemaVersion,
+		Payload:       appendPayload,
+	}
+	encoded, err := json.Marshal(partialEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := len(encoded) / 2
+	if cut <= 0 || cut >= len(encoded) {
+		t.Fatalf("unexpected cut index %d for payload size %d", cut, len(encoded))
+	}
+
+	infoBeforePartial, err := os.Stat(paths.Events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialStart := infoBeforePartial.Size()
+	file, err := os.OpenFile(paths.Events, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(encoded[:cut]); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	readA, nextA, err := storeA.ReadFrom("offset-restart-corrupted-partial", 0, 10)
+	if err != nil {
+		t.Fatalf("ReadFrom before restart failed: %v", err)
+	}
+	if len(readA) != 2 {
+		t.Fatalf("expected two valid events before partial tail, got %d", len(readA))
+	}
+	if readA[0].EventID != "rs-1" || readA[1].EventID != "rs-2" {
+		t.Fatalf("unexpected events before restart: %#v", readA)
+	}
+	if nextA != partialStart {
+		t.Fatalf("expected next offset pinned at partial start %d, got %d", partialStart, nextA)
+	}
+
+	storeB, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readB, nextB, err := storeB.ReadFrom("offset-restart-corrupted-partial", nextA, 10)
+	if err != nil {
+		t.Fatalf("ReadFrom at pinned offset after restart failed: %v", err)
+	}
+	if len(readB) != 0 {
+		t.Fatalf("expected no events at partial tail after restart, got %d", len(readB))
+	}
+	if nextB != nextA {
+		t.Fatalf("expected next offset to stay pinned after restart at %d, got %d", nextA, nextB)
+	}
+
+	file, err = os.OpenFile(paths.Events, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(append(encoded[cut:], '\n')); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, nextC, err := storeB.ReadFrom("offset-restart-corrupted-partial", nextA, 10)
+	if err != nil {
+		t.Fatalf("ReadFrom resumed tail failed: %v", err)
+	}
+	if len(resumed) != 1 {
+		t.Fatalf("expected one resumed event, got %d", len(resumed))
+	}
+	if resumed[0].EventID != "rs-partial" {
+		t.Fatalf("expected resumed event id %q, got %q", "rs-partial", resumed[0].EventID)
+	}
+	infoAfterResume, err := os.Stat(paths.Events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextC != infoAfterResume.Size() {
+		t.Fatalf("expected next offset %d after resume, got %d", infoAfterResume.Size(), nextC)
+	}
+}

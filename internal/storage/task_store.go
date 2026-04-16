@@ -267,6 +267,47 @@ func (s *FileTaskStore) ReadLogFrom(ctx context.Context, taskID corepkg.TaskID, 
 	return records, next, nil
 }
 
+// ReplayTaskLog replays a task log by paginating from offset 0, de-duplicating
+// by event_id and keeping records in offset order.
+func ReplayTaskLog(ctx context.Context, store TaskStore, taskID corepkg.TaskID, pageSize int) ([]TaskLogRecord, error) {
+	if store == nil {
+		return nil, errors.New("task store is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if pageSize <= 0 {
+		pageSize = defaultTaskReadLimit
+	}
+
+	seen := make(map[string]struct{}, pageSize)
+	replayed := make([]TaskLogRecord, 0, pageSize)
+	offset := int64(0)
+
+	for {
+		batch, next, err := store.ReadLogFrom(ctx, taskID, offset, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range batch {
+			eventID := strings.TrimSpace(record.EventID)
+			if eventID != "" {
+				if _, duplicated := seen[eventID]; duplicated {
+					continue
+				}
+				seen[eventID] = struct{}{}
+			}
+			replayed = append(replayed, record)
+		}
+		if next <= offset {
+			break
+		}
+		offset = next
+	}
+
+	return replayed, nil
+}
+
 func (s *FileTaskStore) taskLogPath(taskID string) string {
 	return filepath.Join(s.root, taskID+taskLogFileExt)
 }

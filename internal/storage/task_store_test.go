@@ -364,3 +364,244 @@ func TestFileTaskStoreAppendLogRejectsInvalidTaskID(t *testing.T) {
 		t.Fatalf("expected validation error, got %v", err)
 	}
 }
+
+func TestFileTaskStoreReadLogFromContinuesAcrossRestart(t *testing.T) {
+	root := t.TempDir()
+	storeA, err := NewFileTaskStore(root, NewInMemoryLocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := corepkg.TaskID("task-restart-offset")
+	for _, id := range []string{"evt-r1", "evt-r2", "evt-r3"} {
+		_, err := storeA.AppendLog(context.Background(), taskID, TaskLogRecord{
+			Type:    "status",
+			EventID: id,
+			Payload: []byte(`{"step":"ok"}`),
+		})
+		if err != nil {
+			t.Fatalf("AppendLog(%s) failed: %v", id, err)
+		}
+	}
+
+	firstPage, next1, err := storeA.ReadLogFrom(context.Background(), taskID, 0, 1)
+	if err != nil {
+		t.Fatalf("ReadLogFrom first page failed: %v", err)
+	}
+	if len(firstPage) != 1 || firstPage[0].EventID != "evt-r1" {
+		t.Fatalf("unexpected first page: %#v", firstPage)
+	}
+
+	storeB, err := NewFileTaskStore(root, NewInMemoryLocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPage, next2, err := storeB.ReadLogFrom(context.Background(), taskID, next1, 10)
+	if err != nil {
+		t.Fatalf("ReadLogFrom after restart failed: %v", err)
+	}
+	if len(secondPage) != 2 {
+		t.Fatalf("expected two remaining records, got %d", len(secondPage))
+	}
+	if secondPage[0].EventID != "evt-r2" || secondPage[1].EventID != "evt-r3" {
+		t.Fatalf("unexpected second page sequence: %#v", secondPage)
+	}
+	if next2 <= next1 {
+		t.Fatalf("expected next offset to advance across restart, first=%d second=%d", next1, next2)
+	}
+
+	empty, next3, err := storeB.ReadLogFrom(context.Background(), taskID, next2, 10)
+	if err != nil {
+		t.Fatalf("ReadLogFrom tail after restart failed: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected no tail records, got %d", len(empty))
+	}
+	if next3 != next2 {
+		t.Fatalf("expected stable tail next offset %d, got %d", next2, next3)
+	}
+}
+
+func TestReplayTaskLogDeduplicatesByEventIDAcrossPagesAndRestart(t *testing.T) {
+	root := t.TempDir()
+	storeA, err := NewFileTaskStore(root, NewInMemoryLocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := corepkg.TaskID("task-replay-dedupe")
+
+	records := []TaskLogRecord{
+		{Type: "status", EventID: "evt-1", Payload: []byte(`{"step":1}`)},
+		{Type: "status", EventID: "evt-2", Payload: []byte(`{"step":2}`)},
+		{Type: "result", EventID: "evt-2", Payload: []byte(`{"step":2,"dup":true}`)},
+		{Type: "result", EventID: "evt-3", Payload: []byte(`{"step":3}`)},
+	}
+	for i := range records {
+		if _, err := storeA.AppendLog(context.Background(), taskID, records[i]); err != nil {
+			t.Fatalf("AppendLog #%d failed: %v", i, err)
+		}
+	}
+
+	replayA, err := ReplayTaskLog(context.Background(), storeA, taskID, 2)
+	if err != nil {
+		t.Fatalf("ReplayTaskLog first store failed: %v", err)
+	}
+	if len(replayA) != 3 {
+		t.Fatalf("expected 3 deduplicated records, got %d", len(replayA))
+	}
+	if replayA[0].EventID != "evt-1" || replayA[1].EventID != "evt-2" || replayA[2].EventID != "evt-3" {
+		t.Fatalf("unexpected replay event order: %#v", replayA)
+	}
+	if replayA[0].Offset >= replayA[1].Offset || replayA[1].Offset >= replayA[2].Offset {
+		t.Fatalf("expected replay offsets to be strictly increasing, got [%d,%d,%d]", replayA[0].Offset, replayA[1].Offset, replayA[2].Offset)
+	}
+
+	storeB, err := NewFileTaskStore(root, NewInMemoryLocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayB, err := ReplayTaskLog(context.Background(), storeB, taskID, 2)
+	if err != nil {
+		t.Fatalf("ReplayTaskLog after restart failed: %v", err)
+	}
+	if len(replayB) != len(replayA) {
+		t.Fatalf("expected restart replay size %d, got %d", len(replayA), len(replayB))
+	}
+	for i := range replayA {
+		if replayB[i].EventID != replayA[i].EventID {
+			t.Fatalf("event id mismatch at %d: %q != %q", i, replayB[i].EventID, replayA[i].EventID)
+		}
+		if replayB[i].Offset != replayA[i].Offset {
+			t.Fatalf("offset mismatch at %d: %d != %d", i, replayB[i].Offset, replayA[i].Offset)
+		}
+	}
+}
+
+func TestFileTaskStoreReadLogFromCorruptedAndPartialLineAcrossRestart(t *testing.T) {
+	root := t.TempDir()
+	storeA, err := NewFileTaskStore(root, NewInMemoryLocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := corepkg.TaskID("task-restart-corrupted-partial")
+
+	if _, err := storeA.AppendLog(context.Background(), taskID, TaskLogRecord{
+		Type:    "status",
+		EventID: "evt-ok-1",
+		Payload: []byte(`{"phase":"start"}`),
+	}); err != nil {
+		t.Fatalf("AppendLog first event failed: %v", err)
+	}
+
+	path := storeA.taskLogPath("task-restart-corrupted-partial")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("{bad-json\n")); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := storeA.AppendLog(context.Background(), taskID, TaskLogRecord{
+		Type:    "status",
+		EventID: "evt-ok-2",
+		Payload: []byte(`{"phase":"done"}`),
+	}); err != nil {
+		t.Fatalf("AppendLog second event failed: %v", err)
+	}
+
+	infoBeforePartial, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialStart := infoBeforePartial.Size()
+	partialEnvelope := taskLogEnvelope{
+		Version:   taskLogSchemaVersion,
+		Timestamp: time.Now().UTC(),
+		EventID:   "evt-partial",
+		Type:      "status",
+		Payload:   json.RawMessage(`{"phase":"tail"}`),
+	}
+	encoded, err := json.Marshal(partialEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := len(encoded) / 2
+	if cut <= 0 || cut >= len(encoded) {
+		t.Fatalf("unexpected cut index %d for payload size %d", cut, len(encoded))
+	}
+
+	file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(encoded[:cut]); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recordsA, nextA, err := storeA.ReadLogFrom(context.Background(), taskID, 0, 10)
+	if err != nil {
+		t.Fatalf("ReadLogFrom before restart failed: %v", err)
+	}
+	if len(recordsA) != 2 {
+		t.Fatalf("expected two valid records before partial tail, got %d", len(recordsA))
+	}
+	if recordsA[0].EventID != "evt-ok-1" || recordsA[1].EventID != "evt-ok-2" {
+		t.Fatalf("unexpected records before restart: %#v", recordsA)
+	}
+	if nextA != partialStart {
+		t.Fatalf("expected next offset pinned at partial start %d, got %d", partialStart, nextA)
+	}
+
+	storeB, err := NewFileTaskStore(root, NewInMemoryLocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordsB, nextB, err := storeB.ReadLogFrom(context.Background(), taskID, nextA, 10)
+	if err != nil {
+		t.Fatalf("ReadLogFrom at pinned offset after restart failed: %v", err)
+	}
+	if len(recordsB) != 0 {
+		t.Fatalf("expected no records at partial tail after restart, got %d", len(recordsB))
+	}
+	if nextB != nextA {
+		t.Fatalf("expected next offset to stay pinned after restart at %d, got %d", nextA, nextB)
+	}
+
+	file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(append(encoded[cut:], '\n')); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, nextC, err := storeB.ReadLogFrom(context.Background(), taskID, nextA, 10)
+	if err != nil {
+		t.Fatalf("ReadLogFrom resumed tail failed: %v", err)
+	}
+	if len(resumed) != 1 {
+		t.Fatalf("expected one resumed record after completing partial line, got %d", len(resumed))
+	}
+	if resumed[0].EventID != "evt-partial" {
+		t.Fatalf("expected resumed event id %q, got %q", "evt-partial", resumed[0].EventID)
+	}
+	infoAfterResume, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextC != infoAfterResume.Size() {
+		t.Fatalf("expected next offset %d after resume, got %d", infoAfterResume.Size(), nextC)
+	}
+}

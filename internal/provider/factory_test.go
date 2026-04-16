@@ -23,6 +23,29 @@ func TestNewClientReturnsOpenAICompatible(t *testing.T) {
 	}
 }
 
+func TestNewClientPropagatesOpenAICompatibleGatewayConfig(t *testing.T) {
+	client, err := NewClient(config.ProviderConfig{
+		Type:         "openai-compatible",
+		BaseURL:      "https://api.openai.com/v1",
+		APIPath:      "/gateway/chat",
+		APIKey:       "test-key",
+		AuthHeader:   "X-API-Key",
+		AuthScheme:   "Token",
+		ExtraHeaders: map[string]string{"X-Gateway": "enabled"},
+		Model:        "gpt-5.4",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	openaiClient, ok := client.(*OpenAICompatible)
+	if !ok {
+		t.Fatalf("expected *OpenAICompatible, got %T", client)
+	}
+	if openaiClient.apiPath != "/gateway/chat" || openaiClient.authHeader != "X-API-Key" || openaiClient.authScheme != "Token" || openaiClient.extraHeaders["X-Gateway"] != "enabled" {
+		t.Fatalf("unexpected openai gateway config %#v", openaiClient)
+	}
+}
+
 func TestNewClientReturnsOpenAICompatibleForOpenAIAlias(t *testing.T) {
 	client, err := NewClient(config.ProviderConfig{
 		Type:    "openai",

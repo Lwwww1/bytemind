@@ -12,6 +12,49 @@ import (
 	"bytemind/internal/llm"
 )
 
+func TestOpenAICompatibleCreateMessageUsesCustomGatewayConfig(t *testing.T) {
+	var path string
+	var authHeader string
+	var extraHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		authHeader = r.Header.Get("X-API-Key")
+		extraHeader = r.Header.Get("X-Gateway")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "done",
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewOpenAICompatible(Config{
+		BaseURL:      server.URL,
+		APIPath:      "/v42/chat",
+		APIKey:       "test-key",
+		AuthHeader:   "X-API-Key",
+		AuthScheme:   "",
+		ExtraHeaders: map[string]string{"X-Gateway": "enabled"},
+		Model:        "fallback-model",
+	})
+
+	if _, err := client.CreateMessage(context.Background(), llm.ChatRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if path != "/v42/chat" {
+		t.Fatalf("unexpected path %q", path)
+	}
+	if authHeader != "test-key" {
+		t.Fatalf("unexpected auth header %q", authHeader)
+	}
+	if extraHeader != "enabled" {
+		t.Fatalf("unexpected extra header %q", extraHeader)
+	}
+}
+
 func TestOpenAICompatibleCreateMessageReturnsFirstChoice(t *testing.T) {
 	var authHeader string
 	var requestBody map[string]any
@@ -351,14 +394,13 @@ func TestOpenAIMessagesMapsThinkingAndToolResultParts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 {
-		t.Fatalf("expected assistant and tool_result messages, got %#v", messages)
+	if len(messages) != 3 {
+		t.Fatalf("expected assistant, tool_result, and normalized user message, got %#v", messages)
 	}
 
 	assistant := messages[0]
-	content, _ := assistant["content"].([]map[string]any)
-	if len(content) != 1 || content[0]["text"] != "reasoning" {
-		t.Fatalf("expected thinking mapped as text content, got %#v", assistant)
+	if assistant["content"] != "reasoning" {
+		t.Fatalf("expected thinking mapped as string content, got %#v", assistant)
 	}
 	toolCalls, _ := assistant["tool_calls"].([]map[string]any)
 	if len(toolCalls) != 1 || toolCalls[0]["id"] != "call-1" {
@@ -385,13 +427,8 @@ func TestOpenAIMessagesDegradesMissingImageAsset(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("expected a single converted message, got %#v", messages)
 	}
-	content, _ := messages[0]["content"].([]map[string]any)
-	if len(content) != 1 || content[0]["type"] != "text" {
-		t.Fatalf("expected missing image to degrade to text block, got %#v", messages[0])
-	}
-	text, _ := content[0]["text"].(string)
-	if !strings.Contains(text, "unavailable asset asset-1") {
-		t.Fatalf("expected fallback text to include asset id, got %#v", content[0]["text"])
+	if messages[0]["content"] != "unavailable asset asset-1" {
+		t.Fatalf("expected missing image to degrade to string fallback, got %#v", messages[0])
 	}
 }
 

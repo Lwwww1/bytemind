@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,9 +11,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
+	corepkg "bytemind/internal/core"
 	"bytemind/internal/llm"
 	planpkg "bytemind/internal/plan"
 )
@@ -141,9 +142,13 @@ func (s *Store) Snapshot(sessionID string) error {
 	if sessionID == "" {
 		return errors.New("session id is required")
 	}
-	lock := s.sessionLock(sessionID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, err := s.lockSession(sessionID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = unlock()
+	}()
 
 	source, err := s.findSessionSource(sessionID)
 	if err != nil {
@@ -182,9 +187,13 @@ func (s *Store) save(session *Session) error {
 	if err != nil {
 		return err
 	}
-	lock := s.sessionLock(paths.SessionID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, err := s.lockSession(paths.SessionID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = unlock()
+	}()
 
 	window, err := s.eventWindow(paths.SessionID, paths.Events)
 	if err != nil {
@@ -604,15 +613,22 @@ func readSnapshotFile(path string) (*sessionSnapshot, error) {
 	return &snap, nil
 }
 
-func (s *Store) sessionLock(sessionID string) *sync.Mutex {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	lock := s.sessionLocks[sessionID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		s.sessionLocks[sessionID] = lock
+func (s *Store) lockSession(sessionID string) (func() error, error) {
+	if s == nil {
+		return nil, errors.New("session store is nil")
 	}
-	return lock
+	if s.locker == nil {
+		return nil, errors.New("session locker is not configured")
+	}
+
+	ctx := context.Background()
+	cancel := func() {}
+	if s.lockTimeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, s.lockTimeout)
+	}
+	defer cancel()
+
+	return s.locker.LockSession(ctx, corepkg.SessionID(sessionID))
 }
 
 func (s *Store) eventWindow(sessionID, eventsPath string) (*eventIDWindow, error) {

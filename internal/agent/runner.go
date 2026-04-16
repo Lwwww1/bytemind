@@ -165,22 +165,59 @@ func (r *Runner) RunPromptWithInput(ctx context.Context, sess *session.Session, 
 		return "", fmt.Errorf("engine returned nil event stream")
 	}
 
+	handleEvent := func(event TurnEvent) (string, error, bool) {
+		switch event.Type {
+		case TurnEventCompleted:
+			return event.Answer, nil, true
+		case TurnEventFailed:
+			if event.Error != nil {
+				return "", event.Error, true
+			}
+			return "", fmt.Errorf("agent turn failed"), true
+		default:
+			return "", nil, false
+		}
+	}
+
 	for {
+		// Prefer already-ready engine events (especially terminal ones) over cancellation.
 		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
 		case event, ok := <-events:
 			if !ok {
 				return "", fmt.Errorf("engine ended without terminal event")
 			}
-			switch event.Type {
-			case TurnEventCompleted:
-				return event.Answer, nil
-			case TurnEventFailed:
-				if event.Error != nil {
-					return "", event.Error
+			answer, eventErr, done := handleEvent(event)
+			if done {
+				return answer, eventErr
+			}
+			continue
+		default:
+		}
+
+		select {
+		case event, ok := <-events:
+			if !ok {
+				return "", fmt.Errorf("engine ended without terminal event")
+			}
+			answer, eventErr, done := handleEvent(event)
+			if done {
+				return answer, eventErr
+			}
+		case <-ctx.Done():
+			// If cancellation races with terminal events, prefer already-ready terminal events.
+			for {
+				select {
+				case event, ok := <-events:
+					if !ok {
+						return "", ctx.Err()
+					}
+					answer, eventErr, done := handleEvent(event)
+					if done {
+						return answer, eventErr
+					}
+				default:
+					return "", ctx.Err()
 				}
-				return "", fmt.Errorf("agent turn failed")
 			}
 		}
 	}

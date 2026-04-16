@@ -146,7 +146,7 @@ func TestInMemoryTaskManagerParentCancelPropagatesToChild(t *testing.T) {
 	}
 }
 
-func TestInMemorySubAgentCoordinatorWaitContextCancelDoesNotReleaseQuotaBeforeTerminal(t *testing.T) {
+func TestInMemorySubAgentCoordinatorWaitContextTimeoutDoesNotReleaseQuotaBeforeTerminal(t *testing.T) {
 	blocker := make(chan struct{})
 	manager := NewInMemoryTaskManager(
 		WithTaskExecutor(func(ctx context.Context, _ Task) ([]byte, error) {

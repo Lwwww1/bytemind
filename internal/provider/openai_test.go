@@ -12,6 +12,49 @@ import (
 	"bytemind/internal/llm"
 )
 
+func TestOpenAICompatibleCreateMessageUsesCustomGatewayConfig(t *testing.T) {
+	var path string
+	var authHeader string
+	var extraHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		authHeader = r.Header.Get("X-API-Key")
+		extraHeader = r.Header.Get("X-Gateway")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "done",
+				},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewOpenAICompatible(Config{
+		BaseURL:      server.URL,
+		APIPath:      "/v42/chat",
+		APIKey:       "test-key",
+		AuthHeader:   "X-API-Key",
+		AuthScheme:   "",
+		ExtraHeaders: map[string]string{"X-Gateway": "enabled"},
+		Model:        "fallback-model",
+	})
+
+	if _, err := client.CreateMessage(context.Background(), llm.ChatRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if path != "/v42/chat" {
+		t.Fatalf("unexpected path %q", path)
+	}
+	if authHeader != "test-key" {
+		t.Fatalf("unexpected auth header %q", authHeader)
+	}
+	if extraHeader != "enabled" {
+		t.Fatalf("unexpected extra header %q", extraHeader)
+	}
+}
+
 func TestOpenAICompatibleCreateMessageReturnsFirstChoice(t *testing.T) {
 	var authHeader string
 	var requestBody map[string]any
@@ -318,7 +361,7 @@ func TestOpenAICompatibleChatPayloadUsesFallbackModelAndTools(t *testing.T) {
 				Name: "list_files",
 			},
 		}},
-		Temperature: 0.4,
+		Temperature: 0,
 	}, true)
 	if err != nil {
 		t.Fatalf("chat payload: %v", err)
@@ -332,6 +375,9 @@ func TestOpenAICompatibleChatPayloadUsesFallbackModelAndTools(t *testing.T) {
 	}
 	if got := payload["tool_choice"]; got != "auto" {
 		t.Fatalf("expected tool_choice auto, got %#v", got)
+	}
+	if got := payload["temperature"]; got != float64(0) {
+		t.Fatalf("expected temperature zero to be preserved, got %#v", got)
 	}
 }
 
@@ -356,9 +402,8 @@ func TestOpenAIMessagesMapsThinkingAndToolResultParts(t *testing.T) {
 	}
 
 	assistant := messages[0]
-	content, _ := assistant["content"].([]map[string]any)
-	if len(content) != 1 || content[0]["text"] != "reasoning" {
-		t.Fatalf("expected thinking mapped as text content, got %#v", assistant)
+	if assistant["content"] != "reasoning" {
+		t.Fatalf("expected thinking mapped as string content, got %#v", assistant)
 	}
 	toolCalls, _ := assistant["tool_calls"].([]map[string]any)
 	if len(toolCalls) != 1 || toolCalls[0]["id"] != "call-1" {
@@ -385,13 +430,44 @@ func TestOpenAIMessagesDegradesMissingImageAsset(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("expected a single converted message, got %#v", messages)
 	}
-	content, _ := messages[0]["content"].([]map[string]any)
-	if len(content) != 1 || content[0]["type"] != "text" {
-		t.Fatalf("expected missing image to degrade to text block, got %#v", messages[0])
+	if messages[0]["content"] != "unavailable asset asset-1" {
+		t.Fatalf("expected missing image to degrade to string fallback, got %#v", messages[0])
 	}
-	text, _ := content[0]["text"].(string)
-	if !strings.Contains(text, "unavailable asset asset-1") {
-		t.Fatalf("expected fallback text to include asset id, got %#v", content[0]["text"])
+}
+
+func TestParseOpenAIMessageHandlesStructuredContentAndOutputText(t *testing.T) {
+	msg := parseOpenAIMessage([]byte(`{"role":"assistant","content":[{"type":"text","text":"hello "},{"type":"text","text":"world"}]}`))
+	if msg.Content != "hello world" {
+		t.Fatalf("expected structured content extraction, got %#v", msg)
+	}
+	msg = parseOpenAIMessage([]byte(`{"role":"assistant","output_text":[{"type":"text","text":"fallback text"}]}`))
+	if msg.Content != "fallback text" {
+		t.Fatalf("expected output_text fallback, got %#v", msg)
+	}
+}
+
+func TestParseOpenAIDeltaParsesStructuredContentAndReasoning(t *testing.T) {
+	delta, err := parseOpenAIDelta([]byte(`{
+  "role":"assistant",
+  "content":[{"type":"text","text":"hello "},{"type":"text","text":"world"}],
+  "reasoning_content":"thinking",
+  "tool_calls":[{"index":1,"id":"call-1","type":"function","function":{"name":"list_","arguments":"{\"path\":\"src\"}"}}]
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta.Role != llm.RoleAssistant || delta.Reasoning != "thinking" || delta.Content != "hello world" {
+		t.Fatalf("unexpected parsed delta: %#v", delta)
+	}
+	if len(delta.ToolCalls) != 1 || delta.ToolCalls[0].FunctionName != "list_" {
+		t.Fatalf("unexpected tool call delta parse: %#v", delta.ToolCalls)
+	}
+}
+
+func TestParseOpenAIUsageRestoresDetailedTokenAccounting(t *testing.T) {
+	usage := parseOpenAIUsage([]byte(`{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3,"audio_tokens":2},"completion_tokens_details":{"audio_tokens":1}}`))
+	if usage == nil || usage.InputTokens != 12 || usage.OutputTokens != 6 || usage.ContextTokens != 3 || usage.TotalTokens != 21 {
+		t.Fatalf("unexpected usage %#v", usage)
 	}
 }
 
@@ -399,8 +475,9 @@ func TestParseOpenAIDeltaParsesToolCallsAndReasoning(t *testing.T) {
 	delta, err := parseOpenAIDelta([]byte(`{
   "role":"assistant",
   "reasoning_content":"thinking",
-  "tool_calls":[{"index":1,"id":"call-1","type":"function","function":{"name":"list_","arguments":"{\"path\":\"src"}}]
+  "tool_calls":[{"index":1,"id":"call-1","type":"function","function":{"name":"list_","arguments":"{\"path\":\"src\"}"}}]
 }`))
+
 	if err != nil {
 		t.Fatal(err)
 	}

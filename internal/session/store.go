@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -55,14 +56,15 @@ type ImageAssetMeta struct {
 }
 
 type Store struct {
-	files *storagepkg.SessionFileStore
+	files  *storagepkg.SessionFileStore
+	locker storagepkg.Locker
 
 	mu             sync.Mutex
-	sessionLocks   map[string]*sync.Mutex
 	recentEventIDs map[string]*eventIDWindow
 
 	now            func() time.Time
 	newEventID     func() string
+	lockTimeout    time.Duration
 	snapshotEveryN int64
 	snapshotEveryT time.Duration
 }
@@ -107,9 +109,13 @@ func NewStore(dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	locker, err := storagepkg.NewDefaultLocker(filepath.Join(dir, ".locks"))
+	if err != nil {
+		return nil, err
+	}
 	return &Store{
 		files:          files,
-		sessionLocks:   make(map[string]*sync.Mutex),
+		locker:         locker,
 		recentEventIDs: make(map[string]*eventIDWindow),
 		now: func() time.Time {
 			return time.Now().UTC()
@@ -121,6 +127,7 @@ func NewStore(dir string) (*Store, error) {
 			}
 			return "evt-" + hex.EncodeToString(entropy[:])
 		},
+		lockTimeout:    5 * time.Second,
 		snapshotEveryN: defaultSnapshotEveryN,
 		snapshotEveryT: defaultSnapshotEveryT,
 	}, nil

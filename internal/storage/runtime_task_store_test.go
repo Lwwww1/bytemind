@@ -3,12 +3,21 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	corepkg "bytemind/internal/core"
 	runtimepkg "bytemind/internal/runtime"
 )
+
+func TestNewRuntimeTaskEventAdapterReturnsNopWhenStoreNil(t *testing.T) {
+	store := NewRuntimeTaskEventAdapter(nil)
+	if _, ok := store.(runtimepkg.NopTaskEventStore); !ok {
+		t.Fatalf("expected NopTaskEventStore when store is nil, got %T", store)
+	}
+}
 
 func TestRuntimeTaskEventAdapterPersistsEventsAndLogsToUnifiedTaskLog(t *testing.T) {
 	store, err := NewFileTaskStore(t.TempDir(), NewInMemoryLocker())
@@ -141,5 +150,87 @@ func TestRuntimeTaskEventAdapterSanitizesMissingAndUnsafeTaskIDs(t *testing.T) {
 	}
 	if sanitizedRecords[0].Type != TaskRecordTypeTaskEventStatus {
 		t.Fatalf("expected sanitized event type %q, got %q", TaskRecordTypeTaskEventStatus, sanitizedRecords[0].Type)
+	}
+}
+
+func TestRuntimeTaskEventAdapterNilReceiverNoops(t *testing.T) {
+	var adapter *RuntimeTaskEventAdapter
+	if err := adapter.AppendTaskEvent(context.Background(), runtimepkg.TaskEvent{}); err != nil {
+		t.Fatalf("expected nil adapter AppendTaskEvent to noop, got %v", err)
+	}
+	if err := adapter.AppendTaskLog(context.Background(), corepkg.TaskID("task"), runtimepkg.TaskLogEntry{}); err != nil {
+		t.Fatalf("expected nil adapter AppendTaskLog to noop, got %v", err)
+	}
+}
+
+func TestRuntimeTaskEventRecordTypeFallbackNormalization(t *testing.T) {
+	if got := runtimeTaskEventRecordType(""); got != TaskRecordTypeTaskEventStatus {
+		t.Fatalf("expected empty type fallback %q, got %q", TaskRecordTypeTaskEventStatus, got)
+	}
+	got := runtimeTaskEventRecordType(runtimepkg.TaskEventType(" custom/type value "))
+	if got != "task_event.custom_type_value" {
+		t.Fatalf("expected normalized fallback type, got %q", got)
+	}
+}
+
+func TestLegacyRuntimeTaskStorePersistsJSONLFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", home)
+
+	store, err := NewDefaultRuntimeTaskStore()
+	if err != nil {
+		t.Fatalf("NewDefaultRuntimeTaskStore failed: %v", err)
+	}
+	event := runtimepkg.TaskEvent{
+		Type:   runtimepkg.TaskEventStatus,
+		TaskID: corepkg.TaskID("legacy/task"),
+		Status: corepkg.TaskPending,
+	}
+	if err := store.AppendTaskEvent(context.Background(), event); err != nil {
+		t.Fatalf("AppendTaskEvent failed: %v", err)
+	}
+	logEntry := runtimepkg.TaskLogEntry{
+		Payload: []byte("legacy-log"),
+	}
+	if err := store.AppendTaskLog(context.Background(), corepkg.TaskID("legacy/task"), logEntry); err != nil {
+		t.Fatalf("AppendTaskLog failed: %v", err)
+	}
+
+	eventPath := filepath.Join(home, "runtime", "tasks", "events", "legacy_task.jsonl")
+	logPath := filepath.Join(home, "runtime", "tasks", "logs", "legacy_task.jsonl")
+	if _, err := os.Stat(eventPath); err != nil {
+		t.Fatalf("expected legacy event file %q, got %v", eventPath, err)
+	}
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("expected legacy log file %q, got %v", logPath, err)
+	}
+
+	eventContent, err := os.ReadFile(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eventContent) == 0 || eventContent[len(eventContent)-1] != '\n' {
+		t.Fatalf("expected legacy event file to contain jsonl content, got %q", string(eventContent))
+	}
+	logContent, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logContent) == 0 || logContent[len(logContent)-1] != '\n' {
+		t.Fatalf("expected legacy log file to contain jsonl content, got %q", string(logContent))
+	}
+}
+
+func TestSanitizeTaskIDFallbackUnknown(t *testing.T) {
+	for _, raw := range []corepkg.TaskID{"", "   ", ".", "..", corepkg.TaskID("a/b"), corepkg.TaskID("a\\b"), corepkg.TaskID("a:b")} {
+		sanitized := sanitizeTaskID(raw)
+		if sanitized == "" {
+			t.Fatalf("expected sanitized task id to be non-empty for %q", raw)
+		}
+		if raw == "" || raw == "   " || raw == "." || raw == ".." {
+			if sanitized != unknownTaskID {
+				t.Fatalf("expected unknown fallback for %q, got %q", raw, sanitized)
+			}
+		}
 	}
 }

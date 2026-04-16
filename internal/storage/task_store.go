@@ -46,6 +46,11 @@ type TaskStore interface {
 	ReadLogFrom(ctx context.Context, taskID corepkg.TaskID, offset int64, limit int) (records []TaskLogRecord, next int64, err error)
 }
 
+type TaskStoreOptions struct {
+	// SyncOnAppend controls whether AppendLog calls fsync per record.
+	SyncOnAppend bool
+}
+
 type taskLogEnvelope struct {
 	Version   int             `json:"v"`
 	Timestamp time.Time       `json:"ts"`
@@ -60,17 +65,30 @@ type FileTaskStore struct {
 	now              func() time.Time
 	newEventID       func() string
 	defaultReadLimit int
+	syncOnAppend     bool
 }
 
 func NewDefaultTaskStore(locker Locker) (*FileTaskStore, error) {
+	return NewDefaultTaskStoreWithOptions(locker, TaskStoreOptions{
+		SyncOnAppend: true,
+	})
+}
+
+func NewDefaultTaskStoreWithOptions(locker Locker, options TaskStoreOptions) (*FileTaskStore, error) {
 	home, err := config.ResolveHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	return NewFileTaskStore(filepath.Join(home, "tasks"), locker)
+	return NewFileTaskStoreWithOptions(filepath.Join(home, "tasks"), locker, options)
 }
 
 func NewFileTaskStore(root string, locker Locker) (*FileTaskStore, error) {
+	return NewFileTaskStoreWithOptions(root, locker, TaskStoreOptions{
+		SyncOnAppend: true,
+	})
+}
+
+func NewFileTaskStoreWithOptions(root string, locker Locker, options TaskStoreOptions) (*FileTaskStore, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return nil, errors.New("task store root is required")
@@ -99,6 +117,7 @@ func NewFileTaskStore(root string, locker Locker) (*FileTaskStore, error) {
 			return "tevt-" + hex.EncodeToString(entropy[:])
 		},
 		defaultReadLimit: defaultTaskReadLimit,
+		syncOnAppend:     options.SyncOnAppend,
 	}, nil
 }
 
@@ -167,8 +186,10 @@ func (s *FileTaskStore) AppendLog(ctx context.Context, taskID corepkg.TaskID, re
 	if _, err := file.Write(line); err != nil {
 		return 0, err
 	}
-	if err := file.Sync(); err != nil {
-		return 0, err
+	if s.syncOnAppend {
+		if err := file.Sync(); err != nil {
+			return 0, err
+		}
 	}
 	return offset, nil
 }

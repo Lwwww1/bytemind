@@ -285,6 +285,34 @@ func TestNewFileTaskStoreCreatesDefaultLockerWhenNil(t *testing.T) {
 	}
 }
 
+func TestNewFileTaskStoreWithOptionsAllowsDisablingSync(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "tasks")
+	store, err := NewFileTaskStoreWithOptions(root, NewInMemoryLocker(), TaskStoreOptions{
+		SyncOnAppend: false,
+	})
+	if err != nil {
+		t.Fatalf("expected NewFileTaskStoreWithOptions to succeed, got %v", err)
+	}
+	if store.syncOnAppend {
+		t.Fatal("expected syncOnAppend=false when options disable fsync")
+	}
+	taskID := corepkg.TaskID("task-no-fsync")
+	if _, err := store.AppendLog(context.Background(), taskID, TaskLogRecord{
+		Type:    "status",
+		EventID: "evt-no-fsync",
+		Payload: []byte(`{"ok":true}`),
+	}); err != nil {
+		t.Fatalf("AppendLog failed with sync disabled: %v", err)
+	}
+	records, _, err := store.ReadLogFrom(context.Background(), taskID, 0, 10)
+	if err != nil {
+		t.Fatalf("ReadLogFrom failed with sync disabled: %v", err)
+	}
+	if len(records) != 1 || records[0].EventID != "evt-no-fsync" {
+		t.Fatalf("unexpected records with sync disabled: %#v", records)
+	}
+}
+
 func TestCombineTaskUnlockError(t *testing.T) {
 	plain := errors.New("write failed")
 	if got := combineTaskUnlockError(plain, nil, "task-1"); !errors.Is(got, plain) {
@@ -476,6 +504,36 @@ func TestReplayTaskLogDeduplicatesByEventIDAcrossPagesAndRestart(t *testing.T) {
 	}
 }
 
+func TestReplayTaskLogRejectsNilStore(t *testing.T) {
+	_, err := ReplayTaskLog(context.Background(), nil, corepkg.TaskID("task"), 10)
+	if err == nil {
+		t.Fatal("expected ReplayTaskLog to reject nil store")
+	}
+	if !strings.Contains(err.Error(), "task store is nil") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReplayTaskLogUsesDefaultPageSizeWhenNonPositive(t *testing.T) {
+	fake := &recordingTaskStore{
+		batches: [][]TaskLogRecord{
+			{{EventID: "evt-1", Offset: 0}},
+			{},
+		},
+		nextOffsets: []int64{1, 1},
+	}
+	records, err := ReplayTaskLog(nil, fake, corepkg.TaskID("task"), 0)
+	if err != nil {
+		t.Fatalf("ReplayTaskLog failed: %v", err)
+	}
+	if fake.lastLimit != defaultTaskReadLimit {
+		t.Fatalf("expected default page size %d, got %d", defaultTaskReadLimit, fake.lastLimit)
+	}
+	if len(records) != 1 || records[0].EventID != "evt-1" {
+		t.Fatalf("unexpected replay records: %#v", records)
+	}
+}
+
 func TestFileTaskStoreReadLogFromCorruptedAndPartialLineAcrossRestart(t *testing.T) {
 	root := t.TempDir()
 	storeA, err := NewFileTaskStore(root, NewInMemoryLocker())
@@ -604,4 +662,29 @@ func TestFileTaskStoreReadLogFromCorruptedAndPartialLineAcrossRestart(t *testing
 	if nextC != infoAfterResume.Size() {
 		t.Fatalf("expected next offset %d after resume, got %d", infoAfterResume.Size(), nextC)
 	}
+}
+
+type recordingTaskStore struct {
+	batches     [][]TaskLogRecord
+	nextOffsets []int64
+	index       int
+	lastLimit   int
+}
+
+func (s *recordingTaskStore) AppendLog(context.Context, corepkg.TaskID, TaskLogRecord) (int64, error) {
+	return 0, errors.New("not implemented")
+}
+
+func (s *recordingTaskStore) ReadLogFrom(_ context.Context, taskID corepkg.TaskID, offset int64, limit int) ([]TaskLogRecord, int64, error) {
+	s.lastLimit = limit
+	if s.index >= len(s.batches) {
+		return []TaskLogRecord{}, offset, nil
+	}
+	batch := s.batches[s.index]
+	next := offset
+	if s.index < len(s.nextOffsets) {
+		next = s.nextOffsets[s.index]
+	}
+	s.index++
+	return batch, next, nil
 }

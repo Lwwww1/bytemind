@@ -80,3 +80,66 @@ func TestBootstrapPersistsRuntimeTasksOnlyToUnifiedTaskLog(t *testing.T) {
 		t.Fatalf("expected no legacy runtime log files, found %d", len(legacyLogFiles))
 	}
 }
+
+func TestBootstrapFallsBackToLegacyRuntimeTaskStoreWhenUnifiedInitFails(t *testing.T) {
+	workspace := t.TempDir()
+	home := filepath.Join(workspace, ".bytemind-home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "tasks"), []byte("not-a-dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BYTEMIND_HOME", home)
+
+	configPath := filepath.Join(workspace, "config.json")
+	data, err := json.Marshal(map[string]any{
+		"provider": map[string]any{
+			"type":     "openai-compatible",
+			"base_url": "https://api.openai.com/v1",
+			"model":    "gpt-5.4-mini",
+			"api_key":  "test-key",
+		},
+		"stream": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := Bootstrap(BootstrapRequest{
+		Workspace:     workspace,
+		ConfigPath:    configPath,
+		RequireAPIKey: true,
+		Stdin:         strings.NewReader(""),
+		Stdout:        ioDiscard{},
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap failed: %v", err)
+	}
+
+	taskID, err := rt.TaskManager.Submit(context.Background(), runtimepkg.TaskSpec{Name: "legacy-fallback"})
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+	if err := rt.TaskManager.Cancel(context.Background(), taskID, "test"); err != nil {
+		t.Fatalf("Cancel failed: %v", err)
+	}
+
+	legacyEventFiles, err := filepath.Glob(filepath.Join(home, "runtime", "tasks", "events", "*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob legacy events failed: %v", err)
+	}
+	if len(legacyEventFiles) == 0 {
+		t.Fatal("expected legacy runtime event files when unified init fails")
+	}
+	legacyLogFiles, err := filepath.Glob(filepath.Join(home, "runtime", "tasks", "logs", "*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob legacy logs failed: %v", err)
+	}
+	if len(legacyLogFiles) == 0 {
+		t.Fatal("expected legacy runtime log files when unified init fails")
+	}
+}

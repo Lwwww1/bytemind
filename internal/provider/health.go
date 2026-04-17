@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"bytemind/internal/config"
 )
 
 const (
@@ -41,6 +43,15 @@ func NewHealthChecker(cfg HealthConfig, checker func(context.Context, ProviderID
 		checker:   checker,
 		providers: make(map[ProviderID]*healthState),
 	}
+}
+
+func HealthConfigFromRuntime(cfg config.ProviderHealthRuntimeConfig) HealthConfig {
+	return normalizeHealthConfig(HealthConfig{
+		FailThreshold:           cfg.FailThreshold,
+		RecoverProbeSec:         cfg.RecoverProbeSec,
+		RecoverSuccessThreshold: cfg.RecoverSuccessThreshold,
+		WindowSize:              cfg.WindowSize,
+	})
 }
 
 func normalizeHealthConfig(cfg HealthConfig) HealthConfig {

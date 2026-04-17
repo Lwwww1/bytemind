@@ -95,7 +95,7 @@ func TestHealthSchedulerTick(t *testing.T) {
 		return nil
 	}), func(context.Context) ([]ProviderID, error) {
 		return []ProviderID{"openai", "anthropic"}, nil
-	}, HealthConfig{CheckIntervalSec: 1})
+	}, HealthConfig{})
 	if err := scheduler.Tick(context.Background()); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

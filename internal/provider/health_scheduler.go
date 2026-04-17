@@ -1,22 +1,14 @@
 package provider
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
 type HealthScheduler struct {
-	health   HealthChecker
-	ids      func(context.Context) ([]ProviderID, error)
-	interval time.Duration
+	health HealthChecker
+	ids    func(context.Context) ([]ProviderID, error)
 }
 
-func NewHealthScheduler(health HealthChecker, ids func(context.Context) ([]ProviderID, error), cfg HealthConfig) *HealthScheduler {
-	interval := time.Duration(normalizeHealthConfig(cfg).CheckIntervalSec) * time.Second
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	return &HealthScheduler{health: health, ids: ids, interval: interval}
+func NewHealthScheduler(health HealthChecker, ids func(context.Context) ([]ProviderID, error), _ HealthConfig) *HealthScheduler {
+	return &HealthScheduler{health: health, ids: ids}
 }
 
 func (s *HealthScheduler) Tick(ctx context.Context) error {

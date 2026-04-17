@@ -199,6 +199,33 @@ func TestLegacyRuntimeConfigWithEmptyTypeBuildsRegistry(t *testing.T) {
 	}
 }
 
+func TestNewRouterClient(t *testing.T) {
+	client, err := NewRouterClient(config.ProviderRuntimeConfig{DefaultProvider: "openai", DefaultModel: "gpt-5.4", AllowFallback: true, Providers: map[string]config.ProviderConfig{"openai": {Type: "openai-compatible", BaseURL: "https://api.openai.com/v1", APIKey: "key", Model: "gpt-5.4"}}}, nil)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	routed, ok := client.(*RoutedClient)
+	if !ok {
+		t.Fatalf("expected routed client, got %T", client)
+	}
+	if !routed.allowFallback {
+		t.Fatal("expected routed client fallback to be enabled")
+	}
+	if routed.health == nil {
+		t.Fatal("expected default health checker to be wired")
+	}
+	if _, err := NewRouterClient(config.ProviderRuntimeConfig{Providers: map[string]config.ProviderConfig{"broken": {Type: ""}}}, nil); err == nil {
+		t.Fatal("expected registry error")
+	}
+}
+
+func TestHealthConfigFromRuntime(t *testing.T) {
+	cfg := HealthConfigFromRuntime(config.ProviderHealthRuntimeConfig{FailThreshold: 4, RecoverProbeSec: 12, RecoverSuccessThreshold: 3, WindowSize: 6})
+	if cfg.FailThreshold != 4 || cfg.RecoverProbeSec != 12 || cfg.RecoverSuccessThreshold != 3 || cfg.WindowSize != 6 {
+		t.Fatalf("unexpected health config %#v", cfg)
+	}
+}
+
 func TestNewDomainClientRejectsEmptyType(t *testing.T) {
 	client, err := NewDomainClient(config.ProviderConfig{
 		Type:    "",

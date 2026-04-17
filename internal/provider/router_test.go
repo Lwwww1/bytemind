@@ -511,20 +511,3 @@ func TestExecuteTargetCoversBranches(t *testing.T) {
 		t.Fatalf("expected delta termination error, got %v", err)
 	}
 }
-
-func TestNewRouterClient(t *testing.T) {
-	client, err := NewRouterClient(config.ProviderRuntimeConfig{DefaultProvider: "openai", DefaultModel: "gpt-5.4", AllowFallback: true, Providers: map[string]config.ProviderConfig{"openai": {Type: "openai-compatible", BaseURL: "https://api.openai.com/v1", APIKey: "key", Model: "gpt-5.4"}}}, nil)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	routed, ok := client.(*RoutedClient)
-	if !ok {
-		t.Fatalf("expected routed client, got %T", client)
-	}
-	if !routed.allowFallback {
-		t.Fatal("expected routed client fallback to be enabled")
-	}
-	if _, err := NewRouterClient(config.ProviderRuntimeConfig{Providers: map[string]config.ProviderConfig{"broken": {Type: ""}}}, nil); err == nil {
-		t.Fatal("expected registry error")
-	}
-}

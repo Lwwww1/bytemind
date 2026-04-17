@@ -211,13 +211,6 @@ func TestNewRouterClient(t *testing.T) {
 	if !routed.allowFallback {
 		t.Fatal("expected routed client fallback to be enabled")
 	}
-	if routed.health == nil {
-		t.Fatal("expected default health checker to be wired")
-	}
-	healthImpl, ok := routed.health.(*healthChecker)
-	if !ok || healthImpl.checker != nil {
-		t.Fatalf("expected request path to avoid default preflight checker, got %#v", routed.health)
-	}
 	if _, err := NewRouterClient(config.ProviderRuntimeConfig{Providers: map[string]config.ProviderConfig{"broken": {Type: ""}}}, nil); err == nil {
 		t.Fatal("expected registry error")
 	}

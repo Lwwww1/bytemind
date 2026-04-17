@@ -1,6 +1,27 @@
 package extensions
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+func TestNopManagerLoad(t *testing.T) {
+	mgr := NopManager{}
+	item, err := mgr.Load(nil, ".bytemind/skills/review")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !item.IsZero() {
+		t.Fatal("expected zero extension info")
+	}
+}
+
+func TestNopManagerUnload(t *testing.T) {
+	mgr := NopManager{}
+	if err := mgr.Unload(nil, "skill.review"); err != nil {
+		t.Fatalf("Unload failed: %v", err)
+	}
+}
 
 func TestNopManagerGet(t *testing.T) {
 	mgr := NopManager{}
@@ -44,6 +65,7 @@ func TestExtensionInfoValid(t *testing.T) {
 		{Name: "review", Kind: ExtensionSkill},
 		{ID: "skill.review", Kind: ExtensionSkill},
 		{ID: "skill.review", Name: "review"},
+		{ID: "skill.review", Name: "review", Kind: ExtensionKind("unknown")},
 	}
 	for _, tc := range cases {
 		if tc.Valid() {
@@ -66,7 +88,12 @@ func TestExtensionInfoIsZero(t *testing.T) {
 		{Source: ExtensionSource{Ref: ".bytemind/skills/review"}},
 		{Capabilities: CapabilitySet{Tools: 1}},
 		{Manifest: Manifest{Name: "review"}},
+		{Manifest: Manifest{Kind: ExtensionSkill}},
+		{Manifest: Manifest{Source: ExtensionSource{Ref: "manifest.json"}}},
 		{Health: HealthSnapshot{Status: ExtensionStatusReady}},
+		{Health: HealthSnapshot{Message: "ok"}},
+		{Health: HealthSnapshot{LastError: ErrCodeLoadFailed}},
+		{Health: HealthSnapshot{CheckedAtUTC: "2026-04-17T00:00:00Z"}},
 		{Status: ExtensionStatusReady},
 	}
 	for _, tc := range cases {
@@ -87,5 +114,39 @@ func TestExtensionErrorWrap(t *testing.T) {
 	}
 	if extErr.Message == "" {
 		t.Fatal("expected message")
+	}
+	if extErr.Unwrap() != nil {
+		t.Fatal("expected nil unwrap")
+	}
+	if extErr.CodeString() != string(ErrCodeLoadFailed) {
+		t.Fatalf("unexpected code string: %q", extErr.CodeString())
+	}
+}
+
+func TestExtensionErrorWithCause(t *testing.T) {
+	cause := errors.New("boom")
+	err := wrapError(ErrCodeUnloadFailed, "unload extension", cause)
+	extErr, ok := err.(*ExtensionError)
+	if !ok {
+		t.Fatalf("expected ExtensionError, got %T", err)
+	}
+	if !errors.Is(extErr, cause) {
+		t.Fatal("expected wrapped cause")
+	}
+	if extErr.Error() == "" {
+		t.Fatal("expected error string")
+	}
+}
+
+func TestNilExtensionErrorBehaviors(t *testing.T) {
+	var err *ExtensionError
+	if err.Error() != "" {
+		t.Fatalf("expected empty error string, got %q", err.Error())
+	}
+	if err.Unwrap() != nil {
+		t.Fatal("expected nil unwrap")
+	}
+	if err.CodeString() != "" {
+		t.Fatalf("expected empty code string, got %q", err.CodeString())
 	}
 }

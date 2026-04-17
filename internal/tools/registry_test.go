@@ -199,6 +199,119 @@ func TestRegistryGetReturnsClonedTypedSchemaValues(t *testing.T) {
 	}
 }
 
+func TestRegistryGetRejectsBlankName(t *testing.T) {
+	registry := &Registry{}
+	if _, ok := registry.Get("   "); ok {
+		t.Fatal("expected blank lookup to fail")
+	}
+}
+
+func TestRegistrySpecRejectsUnknownName(t *testing.T) {
+	registry := &Registry{}
+	if _, ok := registry.Spec("missing"); ok {
+		t.Fatal("expected missing spec lookup to fail")
+	}
+}
+
+func TestRegistryUnregisterRejectsBlankName(t *testing.T) {
+	registry := &Registry{}
+	err := registry.Unregister("   ")
+	if err == nil {
+		t.Fatal("expected invalid tool key error")
+	}
+	regErr, ok := err.(*RegistryError)
+	if !ok {
+		t.Fatalf("unexpected error type: %T", err)
+	}
+	if regErr.Code != RegistryErrorInvalidToolKey {
+		t.Fatalf("unexpected code: %s", regErr.Code)
+	}
+}
+
+func TestRegistryListReturnsSortedSnapshot(t *testing.T) {
+	registry := &Registry{}
+	if err := registry.Register(testTool{name: "z_tool"}, RegisterOptions{Source: RegistrationSourceBuiltin}); err != nil {
+		t.Fatalf("register z_tool failed: %v", err)
+	}
+	if err := registry.Register(testTool{name: "a_tool"}, RegisterOptions{Source: RegistrationSourceBuiltin}); err != nil {
+		t.Fatalf("register a_tool failed: %v", err)
+	}
+	items := registry.List()
+	if len(items) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(items))
+	}
+	if got := []string{items[0].Definition.Function.Name, items[1].Definition.Function.Name}; !slices.Equal(got, []string{"a_tool", "z_tool"}) {
+		t.Fatalf("unexpected order: %v", got)
+	}
+	items[0].Definition.Function.Parameters["type"] = "array"
+	itemsAgain := registry.List()
+	if itemsAgain[0].Definition.Function.Parameters["type"] != "object" {
+		t.Fatalf("registry list snapshot mutated: %#v", itemsAgain[0].Definition.Function.Parameters)
+	}
+}
+
+func TestRegistryResolveForModeRejectsUnavailableTool(t *testing.T) {
+	registry := &Registry{}
+	if err := registry.Register(invalidSpecTool{
+		testTool: testTool{name: "build_only_tool"},
+		spec:     ToolSpec{Name: "build_only_tool", AllowedModes: []planpkg.AgentMode{planpkg.ModeBuild}},
+	}, RegisterOptions{Source: RegistrationSourceBuiltin}); err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+	_, err := registry.ResolveForMode(planpkg.ModePlan, "build_only_tool")
+	if err == nil {
+		t.Fatal("expected permission error")
+	}
+}
+
+func TestRegistryDefinitionsUsesBuildMode(t *testing.T) {
+	registry := DefaultRegistry()
+	defs := registry.Definitions()
+	for _, def := range defs {
+		if def.Function.Name == "write_file" {
+			return
+		}
+	}
+	t.Fatal("expected build definitions to include write_file")
+}
+
+func TestRegistryErrorHelpersAndCloneCoverage(t *testing.T) {
+	if (&RegistryError{}).Error() != "" {
+		t.Fatal("expected zero-value error string to be empty")
+	}
+	if (*RegistryError)(nil).Error() != "" {
+		t.Fatal("expected nil registry error string to be empty")
+	}
+	if (*RegistryError)(nil).Unwrap() != nil {
+		t.Fatal("expected nil registry error unwrap to be nil")
+	}
+	cause := fmt.Errorf("boom")
+	if (&RegistryError{Cause: cause}).Unwrap() != cause {
+		t.Fatal("expected unwrap to return cause")
+	}
+	if normalizeRegistrationSource(" builtin ") != RegistrationSourceBuiltin {
+		t.Fatal("expected builtin source to normalize")
+	}
+	if normalizeRegistrationSource(" extension ") != RegistrationSourceExtension {
+		t.Fatal("expected extension source to normalize")
+	}
+	if normalizeRegistrationSource("unknown") != "" {
+		t.Fatal("expected unknown source to normalize to empty")
+	}
+	if cloneAnySlice(nil) != nil {
+		t.Fatal("expected nil any slice clone to stay nil")
+	}
+	if cloneAnyMap(nil) != nil {
+		t.Fatal("expected nil any map clone to stay nil")
+	}
+	if cloneAny([]string{"a"}).([]string)[0] != "a" {
+		t.Fatal("expected []string clone to preserve values")
+	}
+	if cloneAny(map[string]string{"k": "v"}).(map[string]string)["k"] != "v" {
+		t.Fatal("expected map[string]string clone to preserve values")
+	}
+}
+
 type testTool struct {
 	name       string
 	parameters map[string]any

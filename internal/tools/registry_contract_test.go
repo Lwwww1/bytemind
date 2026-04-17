@@ -37,6 +37,36 @@ func (t contractInvalidSpecTool) Spec() ToolSpec {
 	return t.spec
 }
 
+func TestRegistryContractInvalidTool(t *testing.T) {
+	registry := &Registry{}
+	err := registry.Register(nil, RegisterOptions{Source: RegistrationSourceBuiltin})
+	if err == nil {
+		t.Fatal("expected invalid tool error")
+	}
+	var regErr *RegistryError
+	if !errors.As(err, &regErr) {
+		t.Fatalf("expected RegistryError, got %T", err)
+	}
+	if regErr.Code != RegistryErrorInvalidTool {
+		t.Fatalf("unexpected code: %s", regErr.Code)
+	}
+}
+
+func TestRegistryContractBuiltinRejectsExtensionID(t *testing.T) {
+	registry := &Registry{}
+	err := registry.Register(contractTestTool{name: "contract_tool"}, RegisterOptions{Source: RegistrationSourceBuiltin, ExtensionID: "skill.demo"})
+	if err == nil {
+		t.Fatal("expected invalid source error")
+	}
+	var regErr *RegistryError
+	if !errors.As(err, &regErr) {
+		t.Fatalf("expected RegistryError, got %T", err)
+	}
+	if regErr.Code != RegistryErrorInvalidSource {
+		t.Fatalf("unexpected code: %s", regErr.Code)
+	}
+}
+
 func TestRegistryContractInvalidSource(t *testing.T) {
 	registry := &Registry{}
 	err := registry.Register(contractTestTool{name: "contract_tool"}, RegisterOptions{})
@@ -174,6 +204,24 @@ func TestRegistryContractRejectsSpecNameMismatch(t *testing.T) {
 		t.Fatalf("expected RegistryError, got %T", err)
 	}
 	if regErr.Code != RegistryErrorInvalidToolKey {
+		t.Fatalf("unexpected code: %s", regErr.Code)
+	}
+}
+
+func TestRegistryContractAddRejectsReRegistrationWithDifferentInstance(t *testing.T) {
+	registry := &Registry{}
+	if err := registry.Add(contractTestTool{name: "contract_tool"}); err != nil {
+		t.Fatalf("first add failed: %v", err)
+	}
+	err := registry.Add(contractTestTool{name: "contract_tool"})
+	if err == nil {
+		t.Fatal("expected duplicate error")
+	}
+	var regErr *RegistryError
+	if !errors.As(err, &regErr) {
+		t.Fatalf("expected RegistryError, got %T", err)
+	}
+	if regErr.Code != RegistryErrorDuplicateName {
 		t.Fatalf("unexpected code: %s", regErr.Code)
 	}
 }

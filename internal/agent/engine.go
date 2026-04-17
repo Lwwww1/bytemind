@@ -38,6 +38,8 @@ func (e *defaultEngine) HandleTurn(ctx context.Context, req TurnRequest) (<-chan
 	events := stream.Events()
 
 	go func() {
+		runCtx := withTurnEventSink(ctx, stream)
+
 		if err := stream.Emit(TurnEvent{Type: TurnEventStart}); err != nil {
 			stream.CloseWithoutTerminal()
 			return
@@ -52,7 +54,7 @@ func (e *defaultEngine) HandleTurn(ctx context.Context, req TurnRequest) (<-chan
 			return
 		}
 
-		setup, err := e.runner.prepareRunPrompt(req.Session, req.Input, req.Mode)
+		setup, err := e.prepareRunPrompt(req.Session, req.Input, req.Mode)
 		if err != nil {
 			_ = stream.Emit(TurnEvent{
 				Type:      TurnEventError,
@@ -62,7 +64,7 @@ func (e *defaultEngine) HandleTurn(ctx context.Context, req TurnRequest) (<-chan
 			return
 		}
 
-		answer, err := e.runner.runPromptTurns(ctx, req.Session, setup, req.Out)
+		answer, err := e.runPromptTurns(runCtx, req.Session, setup, req.Out)
 		if err != nil {
 			_ = stream.Emit(TurnEvent{
 				Type:      TurnEventError,

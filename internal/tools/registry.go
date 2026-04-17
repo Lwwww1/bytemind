@@ -63,6 +63,20 @@ func DefaultRegistry() *Registry {
 }
 
 func (r *Registry) Add(tool Tool) error {
+	definition := cloneToolDefinition(tool.Definition())
+	toolKey := strings.TrimSpace(definition.Function.Name)
+	if toolKey == "" {
+		return &RegistryError{Code: RegistryErrorInvalidToolKey, Message: "tool key is required", Source: RegistrationSourceBuiltin}
+	}
+	resolved, ok := r.Get(toolKey)
+	if ok && resolved.Tool != tool {
+		return &RegistryError{
+			Code:    RegistryErrorInvalidSource,
+			Message: fmt.Sprintf("tool %q must use Register with explicit source", toolKey),
+			ToolKey: toolKey,
+			Source:  RegistrationSourceBuiltin,
+		}
+	}
 	return r.Register(tool, RegisterOptions{Source: RegistrationSourceBuiltin})
 }
 

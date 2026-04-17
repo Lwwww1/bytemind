@@ -161,6 +161,44 @@ func TestRegistryConcurrentAccess(t *testing.T) {
 	}
 }
 
+func TestRegistryGetReturnsClonedTypedSchemaValues(t *testing.T) {
+	registry := &Registry{}
+	tool := testTool{
+		name: "typed_clone_tool",
+		parameters: map[string]any{
+			"type":     "object",
+			"required": []string{"path"},
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type": "string",
+					"enum": []string{"a", "b"},
+				},
+			},
+		},
+	}
+	if err := registry.Register(tool, RegisterOptions{Source: RegistrationSourceBuiltin}); err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+	resolved, ok := registry.Get("typed_clone_tool")
+	if !ok {
+		t.Fatal("expected tool")
+	}
+	resolved.Definition.Function.Parameters["required"].([]string)[0] = "mutated"
+	resolvedProps := resolved.Definition.Function.Parameters["properties"].(map[string]any)
+	resolvedProps["path"].(map[string]any)["enum"].([]string)[0] = "mutated"
+	resolvedAgain, ok := registry.Get("typed_clone_tool")
+	if !ok {
+		t.Fatal("expected tool on second get")
+	}
+	if got := resolvedAgain.Definition.Function.Parameters["required"].([]string)[0]; got != "path" {
+		t.Fatalf("registry required slice mutated: %#v", resolvedAgain.Definition.Function.Parameters["required"])
+	}
+	propsAgain := resolvedAgain.Definition.Function.Parameters["properties"].(map[string]any)
+	if got := propsAgain["path"].(map[string]any)["enum"].([]string)[0]; got != "a" {
+		t.Fatalf("registry enum slice mutated: %#v", propsAgain["path"])
+	}
+}
+
 type testTool struct {
 	name       string
 	parameters map[string]any

@@ -85,11 +85,21 @@ func buildRegistration(tool Tool, opts RegisterOptions) (RegistrationMeta, Resol
 	}
 	definition := cloneToolDefinition(tool.Definition())
 	meta.ToolKey = strings.TrimSpace(definition.Function.Name)
-	spec := DefaultToolSpec(definition)
-	if provider, ok := tool.(ToolSpecProvider); ok {
-		spec = MergeToolSpec(spec, provider.Spec())
+	if meta.ToolKey == "" {
+		return RegistrationMeta{}, ResolvedTool{}, &RegistryError{Code: RegistryErrorInvalidToolKey, Message: "tool key is required", Source: meta.Source, ExtensionID: meta.ExtensionID}
 	}
-	spec = NormalizeToolSpec(spec)
+	definition.Function.Name = meta.ToolKey
+	if provider, ok := tool.(ToolSpecProvider); ok {
+		spec := NormalizeToolSpec(MergeToolSpec(DefaultToolSpec(definition), provider.Spec()))
+		if strings.TrimSpace(spec.Name) != "" && spec.Name != meta.ToolKey {
+			return RegistrationMeta{}, ResolvedTool{}, &RegistryError{Code: RegistryErrorInvalidToolKey, Message: fmt.Sprintf("tool spec name %q must match tool key %q", spec.Name, meta.ToolKey), ToolKey: meta.ToolKey, Source: meta.Source, ExtensionID: meta.ExtensionID}
+		}
+		if err := ValidateToolSpec(spec); err != nil {
+			return RegistrationMeta{}, ResolvedTool{}, &RegistryError{Code: RegistryErrorInvalidSchema, Message: err.Error(), ToolKey: meta.ToolKey, Source: meta.Source, ExtensionID: meta.ExtensionID, Cause: err}
+		}
+		return meta, ResolvedTool{Definition: definition, Spec: cloneToolSpec(spec), Tool: tool}, nil
+	}
+	spec := NormalizeToolSpec(DefaultToolSpec(definition))
 	if err := ValidateToolSpec(spec); err != nil {
 		return RegistrationMeta{}, ResolvedTool{}, &RegistryError{Code: RegistryErrorInvalidSchema, Message: err.Error(), ToolKey: meta.ToolKey, Source: meta.Source, ExtensionID: meta.ExtensionID, Cause: err}
 	}
@@ -154,6 +164,30 @@ func cloneAny(value any) any {
 		return cloneAnyMap(typed)
 	case []any:
 		return cloneAnySlice(typed)
+	case map[string]string:
+		cloned := make(map[string]string, len(typed))
+		for key, item := range typed {
+			cloned[key] = item
+		}
+		return cloned
+	case []string:
+		return append([]string(nil), typed...)
+	case []map[string]any:
+		cloned := make([]map[string]any, len(typed))
+		for i, item := range typed {
+			cloned[i] = cloneAnyMap(item)
+		}
+		return cloned
+	case []map[string]string:
+		cloned := make([]map[string]string, len(typed))
+		for i, item := range typed {
+			next := make(map[string]string, len(item))
+			for key, value := range item {
+				next[key] = value
+			}
+			cloned[i] = next
+		}
+		return cloned
 	default:
 		return typed
 	}

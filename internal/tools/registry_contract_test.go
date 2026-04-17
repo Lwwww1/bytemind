@@ -145,6 +145,39 @@ func TestRegistryContractInvalidSchemaIncludesCause(t *testing.T) {
 	}
 }
 
+func TestRegistryContractRejectsEmptyToolKey(t *testing.T) {
+	registry := &Registry{}
+	err := registry.Register(contractTestTool{name: ""}, RegisterOptions{Source: RegistrationSourceExtension, ExtensionID: "skill.demo"})
+	if err == nil {
+		t.Fatal("expected invalid tool key error")
+	}
+	var regErr *RegistryError
+	if !errors.As(err, &regErr) {
+		t.Fatalf("expected RegistryError, got %T", err)
+	}
+	if regErr.Code != RegistryErrorInvalidToolKey {
+		t.Fatalf("unexpected code: %s", regErr.Code)
+	}
+}
+
+func TestRegistryContractRejectsSpecNameMismatch(t *testing.T) {
+	registry := &Registry{}
+	err := registry.Register(contractInvalidSpecTool{
+		contractTestTool: contractTestTool{name: "real_tool"},
+		spec:             ToolSpec{Name: "spoofed_tool"},
+	}, RegisterOptions{Source: RegistrationSourceExtension, ExtensionID: "skill.demo"})
+	if err == nil {
+		t.Fatal("expected invalid tool key error")
+	}
+	var regErr *RegistryError
+	if !errors.As(err, &regErr) {
+		t.Fatalf("expected RegistryError, got %T", err)
+	}
+	if regErr.Code != RegistryErrorInvalidToolKey {
+		t.Fatalf("unexpected code: %s", regErr.Code)
+	}
+}
+
 func TestRegistryContractAddReturnsStructuredError(t *testing.T) {
 	registry := &Registry{}
 	if err := registry.Add(contractTestTool{name: "contract_tool"}); err != nil {

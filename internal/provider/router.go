@@ -203,13 +203,6 @@ func sortRouteCandidates(candidates []routeCandidate, requested ModelID, rc Rout
 	preferredProvider := preferredRouteProvider(requested, rc)
 	preferLatency := rc.PreferLatency
 	preferLowCost := rc.PreferLowCost
-	preference := make(map[ProviderID]int, len(ordered))
-	for _, candidate := range ordered {
-		if _, ok := preference[candidate.ProviderID]; ok {
-			continue
-		}
-		preference[candidate.ProviderID] = routeHealthRank(candidate.HealthStatus)
-	}
 	sort.SliceStable(ordered, func(i, j int) bool {
 		left := ordered[i]
 		right := ordered[j]

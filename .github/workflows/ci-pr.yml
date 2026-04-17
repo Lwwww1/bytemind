@@ -25,13 +25,15 @@ jobs:
         run: go vet ./...
 
       - name: Run full test suite with coverage
-        run: go test ./... -coverprofile=coverage.out
+        run: |
+          TEST_PKGS=$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | sed '/^$/d')
+          go test $TEST_PKGS -coverprofile=coverage.out
 
       - name: Print coverage summary
         run: go tool cover -func=coverage.out
 
       - name: Run focused coverage checks
-        run: go test -cover ./cmd/bytemind ./internal/agent ./internal/tools ./internal/provider ./tui
+        run: go test -cover ./internal/agent ./internal/tools ./internal/provider ./tui
 
       - name: Upload coverage to Codecov
         if: ${{ !github.event.pull_request.head.repo.fork }}

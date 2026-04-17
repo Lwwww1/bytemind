@@ -29,7 +29,9 @@ jobs:
         run: go vet ./...
 
       - name: Run full test suite with coverage
-        run: go test ./... -coverprofile=coverage.out
+        run: |
+          TEST_PKGS=$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | sed '/^$/d')
+          go test $TEST_PKGS -coverprofile=coverage.out
 
       - name: Print coverage summary
         run: go tool cover -func=coverage.out

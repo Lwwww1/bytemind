@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"slices"
@@ -189,12 +188,6 @@ func TestDefaultEngineHandleTurnEmitsToolUseAndResultEvents(t *testing.T) {
 	sess := session.New(workspace)
 
 	registry := tools.DefaultRegistry()
-	registry.Add(&fakeTool{
-		name: "fake_tool",
-		run: func(raw json.RawMessage, execCtx *tools.ExecutionContext) (string, error) {
-			return `{"ok":true,"value":"done"}`, nil
-		},
-	})
 
 	client := &recordingClient{replies: []llm.Message{
 		{
@@ -203,8 +196,8 @@ func TestDefaultEngineHandleTurnEmitsToolUseAndResultEvents(t *testing.T) {
 				ID:   "call-1",
 				Type: "function",
 				Function: llm.ToolFunctionCall{
-					Name:      "fake_tool",
-					Arguments: `{"input":"hello"}`,
+					Name:      "list_files",
+					Arguments: `{"path":".","depth":1,"limit":20}`,
 				},
 			}},
 		},
@@ -257,7 +250,7 @@ func TestDefaultEngineHandleTurnEmitsToolUseAndResultEvents(t *testing.T) {
 	}
 
 	toolUse := got[1]
-	if toolUse.Payload["tool_name"] != "fake_tool" {
+	if toolUse.Payload["tool_name"] != "list_files" {
 		t.Fatalf("expected tool_use payload to include tool name, got %#v", toolUse.Payload)
 	}
 	if toolUse.Payload["tool_call_id"] != "call-1" {
@@ -265,7 +258,7 @@ func TestDefaultEngineHandleTurnEmitsToolUseAndResultEvents(t *testing.T) {
 	}
 
 	toolResult := got[2]
-	if toolResult.Payload["tool_name"] != "fake_tool" {
+	if toolResult.Payload["tool_name"] != "list_files" {
 		t.Fatalf("expected tool_result payload to include tool name, got %#v", toolResult.Payload)
 	}
 	resultRaw, _ := toolResult.Payload["tool_result"].(string)

@@ -77,6 +77,12 @@ func (m *extensionManager) Unload(_ context.Context, extensionID string) error {
 	defer m.mu.Unlock()
 	if _, ok := m.catalog[id]; !ok {
 		if _, ok := m.manual[id]; !ok {
+			if err, ok := m.discoverErrs[id]; ok {
+				return err
+			}
+			if discoverErr := m.discoveryErrorLocked(); discoverErr != nil {
+				return discoverErr
+			}
 			return wrapError(ErrCodeNotFound, "extension not found", nil)
 		}
 	}
@@ -97,6 +103,18 @@ func (m *extensionManager) Get(_ context.Context, extensionID string) (Extension
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if discoverErr := m.discoveryErrorLocked(); discoverErr != nil {
+		if item, ok := m.catalog[id]; ok {
+			if _, disabled := m.disabled[id]; disabled {
+				return ExtensionInfo{}, wrapError(ErrCodeNotFound, "extension not found", nil)
+			}
+			return item, discoverErr
+		}
+		if err, ok := m.discoverErrs[id]; ok {
+			return ExtensionInfo{}, err
+		}
+		return ExtensionInfo{}, discoverErr
+	}
 	if _, disabled := m.disabled[id]; disabled {
 		return ExtensionInfo{}, wrapError(ErrCodeNotFound, "extension not found", nil)
 	}
@@ -123,6 +141,9 @@ func (m *extensionManager) List(_ context.Context) ([]ExtensionInfo, error) {
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].ID < items[j].ID
 	})
+	if discoverErr := m.discoveryErrorLocked(); discoverErr != nil {
+		return items, discoverErr
+	}
 	return items, nil
 }
 
@@ -198,7 +219,11 @@ func discoverScope(scope ExtensionScope, root string) ([]ExtensionInfo, map[stri
 		if os.IsNotExist(err) {
 			return nil, nil, nil
 		}
-		return nil, nil, wrapError(ErrCodeLoadFailed, fmt.Sprintf("discover extensions from %s", root), err)
+		id := extensionIDForDir(filepath.Base(root))
+		if id == "" {
+			id = root
+		}
+		return nil, map[string]error{id: wrapError(ErrCodeLoadFailed, fmt.Sprintf("discover extensions from %s", root), err)}, nil
 	}
 	items := make([]ExtensionInfo, 0, len(entries))
 	discoverErrs := make(map[string]error)
@@ -323,6 +348,32 @@ func buildExtensionInfo(scope ExtensionScope, dir, dirName string, manifest Mani
 			CheckedAtUTC: now,
 		},
 	}
+}
+
+func discoveryError(discoverErrs map[string]error) error {
+	if len(discoverErrs) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(discoverErrs))
+	for id := range discoverErrs {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		keys = append(keys, id)
+	}
+	if len(keys) == 0 {
+		return wrapError(ErrCodeLoadFailed, "extension discovery encountered errors", nil)
+	}
+	sort.Strings(keys)
+	first := keys[0]
+	if err := discoverErrs[first]; err != nil {
+		return wrapError(ErrCodeLoadFailed, fmt.Sprintf("extension discovery encountered errors (first failure: %s)", first), err)
+	}
+	return wrapError(ErrCodeLoadFailed, fmt.Sprintf("extension discovery encountered errors (first failure: %s)", first), nil)
+}
+
+func (m *extensionManager) discoveryErrorLocked() error {
+	return discoveryError(m.discoverErrs)
 }
 
 func scopeForPath(path string, m *extensionManager) (ExtensionScope, bool) {

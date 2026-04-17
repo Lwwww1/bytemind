@@ -211,16 +211,34 @@ func (a *clientAdapter) Stream(ctx context.Context, req Request) (<-chan Event, 
 
 		deltas := make(chan string, 16)
 		deltaDone := make(chan struct{})
+		deltaInputClosed := make(chan struct{})
 		go func() {
 			defer close(deltaDone)
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case delta, ok := <-deltas:
-					if !ok {
-						return
+				case <-deltaInputClosed:
+					for {
+						select {
+						case delta := <-deltas:
+							if strings.TrimSpace(delta) == "" {
+								continue
+							}
+							if !normalizeEvent(ctx, normalizer, stream, Event{
+								Type:       EventDelta,
+								TraceID:    req.TraceID,
+								ProviderID: a.providerID,
+								ModelID:    modelID,
+								Delta:      delta,
+							}) {
+								return
+							}
+						default:
+							return
+						}
 					}
+				case delta := <-deltas:
 					if strings.TrimSpace(delta) == "" {
 						continue
 					}
@@ -241,10 +259,12 @@ func (a *clientAdapter) Stream(ctx context.Context, req Request) (<-chan Event, 
 			select {
 			case <-ctx.Done():
 				return
+			case <-deltaInputClosed:
+				return
 			case deltas <- delta:
 			}
 		})
-		close(deltas)
+		close(deltaInputClosed)
 		<-deltaDone
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {

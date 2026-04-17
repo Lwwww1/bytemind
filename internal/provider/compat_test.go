@@ -31,6 +31,8 @@ func (s stubCompatClient) StreamMessage(ctx context.Context, _ llm.ChatRequest, 
 
 type asyncDeltaCompatClient struct {
 	message llm.Message
+	release chan struct{}
+	done    chan struct{}
 }
 
 func (s asyncDeltaCompatClient) CreateMessage(context.Context, llm.ChatRequest) (llm.Message, error) {
@@ -41,22 +43,19 @@ func (s asyncDeltaCompatClient) StreamMessage(_ context.Context, _ llm.ChatReque
 	if onDelta == nil {
 		return s.message, nil
 	}
-	started := make(chan struct{})
-	release := make(chan struct{})
-	done := make(chan struct{})
+	onDelta("hello")
 	go func() {
-		defer close(done)
-		onDelta("hello")
-		close(started)
-		<-release
+		<-s.release
 		onDelta(" late")
+		close(s.done)
 	}()
-	<-started
 	return s.message, nil
 }
 
 func TestWrapClientStreamIgnoresAsyncDeltaAfterTerminal(t *testing.T) {
-	adapter := WrapClient(ProviderOpenAI, ModelID("gpt-5.4"), asyncDeltaCompatClient{message: llm.Message{Role: llm.RoleAssistant, Content: "hello"}})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	adapter := WrapClient(ProviderOpenAI, ModelID("gpt-5.4"), asyncDeltaCompatClient{message: llm.Message{Role: llm.RoleAssistant, Content: "hello"}, release: release, done: done})
 	stream, err := adapter.Stream(context.Background(), Request{ChatRequest: llm.ChatRequest{Model: "gpt-5.4"}, TraceID: "trace-async"})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -64,6 +63,10 @@ func TestWrapClientStreamIgnoresAsyncDeltaAfterTerminal(t *testing.T) {
 	var events []Event
 	for event := range stream {
 		events = append(events, event)
+		if event.Type == EventResult {
+			close(release)
+			<-done
+		}
 	}
 	if len(events) != 3 {
 		t.Fatalf("expected start, delta, result only, got %#v", events)

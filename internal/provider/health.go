@@ -117,7 +117,7 @@ func (h *healthChecker) Check(ctx context.Context, id ProviderID) error {
 	}
 	err := h.checker(ctx, id)
 	if errors.Is(err, context.Canceled) {
-		h.finishProbe(id, true)
+		h.finishProbe(id, false)
 		return err
 	}
 	if err != nil {
@@ -225,7 +225,7 @@ func (h *healthChecker) now() time.Time {
 	return time.Now()
 }
 
-func (h *healthChecker) finishProbe(id ProviderID, preserveOnCancel bool) {
+func (h *healthChecker) finishProbe(id ProviderID, _ bool) {
 	if h == nil {
 		return
 	}
@@ -233,9 +233,6 @@ func (h *healthChecker) finishProbe(id ProviderID, preserveOnCancel bool) {
 	defer h.mu.Unlock()
 	state, ok := h.providers[id]
 	if !ok {
-		return
-	}
-	if preserveOnCancel && state.status == HealthStatusHalfOpen {
 		return
 	}
 	state.probeInFlight = false

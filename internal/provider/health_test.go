@@ -189,6 +189,33 @@ func TestHealthCheckerOnlyAllowsOneHalfOpenProbe(t *testing.T) {
 	}
 }
 
+func TestHealthCheckerCancelledProbeReleasesGate(t *testing.T) {
+	calls := 0
+	checker := NewHealthChecker(HealthConfig{FailThreshold: 1, RecoverProbeSec: 1, RecoverSuccessThreshold: 1}, func(_ context.Context, _ ProviderID) error {
+		calls++
+		if calls == 1 {
+			return context.Canceled
+		}
+		return nil
+	}).(*healthChecker)
+	now := time.Date(2026, 4, 17, 10, 0, 0, 0, time.UTC)
+	checker.clock = func() time.Time { return now }
+	checker.RecordFailure(context.Background(), "openai", &Error{Code: ErrCodeUnavailable, Retryable: true})
+	checker.providers["openai"].nextProbeAt = now
+	if err := checker.Check(context.Background(), "openai"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled probe, got %v", err)
+	}
+	if checker.providers["openai"].probeInFlight {
+		t.Fatal("expected canceled probe to release gate")
+	}
+	if err := checker.Check(context.Background(), "openai"); err != nil {
+		t.Fatalf("expected next probe to proceed, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected probe to retry after cancel, got %d calls", calls)
+	}
+}
+
 func TestCountsTowardAvailability(t *testing.T) {
 	if countsTowardAvailability(nil) || countsTowardAvailability(context.Canceled) {
 		t.Fatal("expected nil/canceled to be ignored")

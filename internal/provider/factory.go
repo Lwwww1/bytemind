@@ -63,8 +63,11 @@ func NewRouterClient(cfg config.ProviderRuntimeConfig, health HealthChecker) (ll
 	if err != nil {
 		return nil, err
 	}
+	if health == nil {
+		health = NewHealthChecker(HealthConfigFromRuntime(cfg.Health), nil)
+	}
 	return NewRoutedClientWithPolicy(NewRouter(reg, health, RouterConfig{
 		DefaultProvider: ProviderID(cfg.DefaultProvider),
 		DefaultModel:    ModelID(cfg.DefaultModel),
-	}), cfg.AllowFallback), nil
+	}), health, cfg.AllowFallback), nil
 }

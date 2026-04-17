@@ -59,7 +59,9 @@ func TestRunPromptPolicyGatewayDeniesToolBeforeExecutor(t *testing.T) {
 		},
 	}
 	registry := tools.DefaultRegistry()
-	registry.Add(blockedTool)
+	if err := registry.Register(blockedTool, tools.RegisterOptions{Source: tools.RegistrationSourceBuiltin}); err != nil {
+		t.Fatal(err)
+	}
 
 	client := &recordingClient{replies: []llm.Message{
 		{
@@ -169,7 +171,9 @@ func TestRunPromptPolicyGatewayAskRequestsApprovalAndExecutesTool(t *testing.T) 
 		},
 	}
 	registry := tools.DefaultRegistry()
-	registry.Add(askTool)
+	if err := registry.Register(askTool, tools.RegisterOptions{Source: tools.RegistrationSourceBuiltin}); err != nil {
+		t.Fatal(err)
+	}
 
 	client := &recordingClient{replies: []llm.Message{
 		{

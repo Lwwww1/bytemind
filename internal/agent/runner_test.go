@@ -85,7 +85,9 @@ func TestRunPromptInjectsRuntimeAndExtensionsIntoExecutionContext(t *testing.T) 
 	sess := session.New(workspace)
 	probe := &managerProbeTool{}
 	registry := tools.DefaultRegistry()
-	registry.Add(probe)
+	if err := registry.Register(probe, tools.RegisterOptions{Source: tools.RegistrationSourceBuiltin}); err != nil {
+		t.Fatal(err)
+	}
 	client := &fakeClient{replies: []llm.Message{
 		{
 			Role: llm.RoleAssistant,

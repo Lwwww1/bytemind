@@ -41,9 +41,16 @@ func (t executorTestTool) Run(ctx context.Context, raw json.RawMessage, execCtx 
 	return t.result, t.err
 }
 
+func registerBuiltinExecutorTool(t *testing.T, registry *Registry, tool executorTestTool) {
+	t.Helper()
+	if err := registry.Register(tool, RegisterOptions{Source: RegistrationSourceBuiltin}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExecutorRejectsUnknownArgumentsByDefault(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{name: "strict_tool", result: `{"ok":true}`})
+	registerBuiltinExecutorTool(t, registry, executorTestTool{name: "strict_tool", result: `{"ok":true}`})
 	executor := NewExecutor(registry)
 
 	_, err := executor.Execute(context.Background(), "strict_tool", `{"path":"a.txt","extra":true}`, &ExecutionContext{})
@@ -61,10 +68,7 @@ func TestExecutorRejectsUnknownArgumentsByDefault(t *testing.T) {
 
 func TestExecutorRejectsUnknownArgumentsWhenSchemaHasNoProperties(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{
-		name:   "strict_tool",
-		result: `{"ok":true}`,
-	})
+	registerBuiltinExecutorTool(t, registry, executorTestTool{name: "strict_tool", result: `{"ok":true}`})
 	registry.tools["strict_tool"] = ResolvedTool{
 		Definition: llm.ToolDefinition{
 			Type: "function",
@@ -95,7 +99,7 @@ func TestExecutorRejectsUnknownArgumentsWhenSchemaHasNoProperties(t *testing.T) 
 
 func TestExecutorDefaultsEmptyArgsToJSONObject(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{
+	registerBuiltinExecutorTool(t, registry, executorTestTool{
 		name: "strict_tool",
 		run: func(_ context.Context, raw json.RawMessage, _ *ExecutionContext) (string, error) {
 			if string(raw) != "{}" {
@@ -117,7 +121,7 @@ func TestExecutorDefaultsEmptyArgsToJSONObject(t *testing.T) {
 
 func TestExecutorRejectsUnknownArgumentsWhenSchemaForbidsThem(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{
+	registerBuiltinExecutorTool(t, registry, executorTestTool{
 		name:   "strict_tool",
 		result: `{"ok":true}`,
 		run:    nil,
@@ -156,7 +160,7 @@ func TestExecutorRejectsUnknownArgumentsWhenSchemaForbidsThem(t *testing.T) {
 
 func TestExecutorAllowsUnknownArgumentsWhenSchemaAllowsAdditionalProperties(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{
+	registerBuiltinExecutorTool(t, registry, executorTestTool{
 		name:   "strict_tool",
 		result: `{"ok":true}`,
 	})
@@ -190,7 +194,7 @@ func TestExecutorAllowsUnknownArgumentsWhenSchemaAllowsAdditionalProperties(t *t
 
 func TestExecutorMapsPolicyFailuresToPermissionDenied(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{name: "strict_tool", result: `{"ok":true}`})
+	registerBuiltinExecutorTool(t, registry, executorTestTool{name: "strict_tool", result: `{"ok":true}`})
 	executor := NewExecutor(registry)
 
 	_, err := executor.Execute(context.Background(), "strict_tool", `{"path":"a.txt"}`, &ExecutionContext{
@@ -207,7 +211,7 @@ func TestExecutorMapsPolicyFailuresToPermissionDenied(t *testing.T) {
 
 func TestExecutorNormalizesToolFailure(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{name: "failing_tool", err: errors.New("command is required")})
+	registerBuiltinExecutorTool(t, registry, executorTestTool{name: "failing_tool", err: errors.New("command is required")})
 	executor := NewExecutor(registry)
 
 	_, err := executor.Execute(context.Background(), "failing_tool", `{"path":"a.txt"}`, &ExecutionContext{})
@@ -225,7 +229,7 @@ func TestExecutorNormalizesToolFailure(t *testing.T) {
 
 func TestExecutorPreservesValidJSONOutputWhenOverLimit(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{name: "strict_tool", result: `{"content":"` + strings.Repeat("a", 70000) + `"}`})
+	registerBuiltinExecutorTool(t, registry, executorTestTool{name: "strict_tool", result: `{"content":"` + strings.Repeat("a", 70000) + `"}`})
 	executor := NewExecutor(registry)
 
 	got, err := executor.Execute(context.Background(), "strict_tool", `{"path":"a.txt"}`, &ExecutionContext{})
@@ -239,7 +243,7 @@ func TestExecutorPreservesValidJSONOutputWhenOverLimit(t *testing.T) {
 
 func TestExecutorTruncatesNonJSONOutputSafely(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{name: "strict_tool", result: strings.Repeat("a", 70000)})
+	registerBuiltinExecutorTool(t, registry, executorTestTool{name: "strict_tool", result: strings.Repeat("a", 70000)})
 	executor := NewExecutor(registry)
 
 	got, err := executor.Execute(context.Background(), "strict_tool", `{"path":"a.txt"}`, &ExecutionContext{})
@@ -253,7 +257,7 @@ func TestExecutorTruncatesNonJSONOutputSafely(t *testing.T) {
 
 func TestExecutorHonorsRequestedTimeoutSeconds(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{
+	registerBuiltinExecutorTool(t, registry, executorTestTool{
 		name: "strict_tool",
 		run: func(ctx context.Context, _ json.RawMessage, _ *ExecutionContext) (string, error) {
 			deadline, ok := ctx.Deadline()
@@ -276,7 +280,7 @@ func TestExecutorHonorsRequestedTimeoutSeconds(t *testing.T) {
 
 func TestExecutorRequiresApprovalForDestructiveToolsByDefault(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{name: "write_file", result: `{"ok":true}`})
+	registerBuiltinExecutorTool(t, registry, executorTestTool{name: "write_file", result: `{"ok":true}`})
 	executor := NewExecutor(registry)
 
 	_, err := executor.Execute(context.Background(), "write_file", `{"path":"a.txt"}`, &ExecutionContext{
@@ -296,7 +300,7 @@ func TestExecutorRequiresApprovalForDestructiveToolsByDefault(t *testing.T) {
 
 func TestExecutorRequiresApprovalForDestructiveToolsWhenContextMissing(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{name: "write_file", result: `{"ok":true}`})
+	registerBuiltinExecutorTool(t, registry, executorTestTool{name: "write_file", result: `{"ok":true}`})
 	executor := NewExecutor(registry)
 
 	_, err := executor.Execute(context.Background(), "write_file", `{"path":"a.txt"}`, nil)
@@ -314,7 +318,7 @@ func TestExecutorRequiresApprovalForDestructiveToolsWhenContextMissing(t *testin
 
 func TestExecutorAllowsDestructiveToolWhenApprovalGranted(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{name: "write_file", result: `{"ok":true}`})
+	registerBuiltinExecutorTool(t, registry, executorTestTool{name: "write_file", result: `{"ok":true}`})
 	executor := NewExecutor(registry)
 
 	got, err := executor.Execute(context.Background(), "write_file", `{"path":"a.txt"}`, &ExecutionContext{
@@ -339,7 +343,7 @@ func TestExecutorAllowsDestructiveToolWhenApprovalGranted(t *testing.T) {
 
 func TestExecutorSkipsDestructiveApprovalWhenPolicyNever(t *testing.T) {
 	registry := &Registry{}
-	registry.Add(executorTestTool{name: "write_file", result: `{"ok":true}`})
+	registerBuiltinExecutorTool(t, registry, executorTestTool{name: "write_file", result: `{"ok":true}`})
 	executor := NewExecutor(registry)
 
 	got, err := executor.Execute(context.Background(), "write_file", `{"path":"a.txt"}`, &ExecutionContext{

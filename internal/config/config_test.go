@@ -188,6 +188,7 @@ func TestLoadMergesUserAndProjectConfigWithProjectPrecedence(t *testing.T) {
 	workspace := t.TempDir()
 	home := t.TempDir()
 	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv("BYTEMIND_API_KEY", "")
 
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
@@ -245,6 +246,7 @@ func TestLoadIgnoresLegacyBytemindConfigJSON(t *testing.T) {
 	workspace := t.TempDir()
 	home := t.TempDir()
 	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv("BYTEMIND_API_KEY", "")
 
 	if err := writeConfig(filepath.Join(home, "config.json"), map[string]any{
 		"provider": map[string]any{

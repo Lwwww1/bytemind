@@ -11,6 +11,8 @@ import (
 )
 
 func TestCheckAvailabilityReturnsMissingKey(t *testing.T) {
+	t.Setenv("BYTEMIND_API_KEY", "")
+
 	result := CheckAvailability(context.Background(), config.ProviderConfig{
 		Type:    "openai-compatible",
 		BaseURL: "https://api.openai.com/v1",

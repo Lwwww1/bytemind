@@ -110,6 +110,8 @@ func (r *Runner) buildTurnMessages(sess *session.Session, setup runPromptSetup) 
 		SystemPrompt: systemPrompt(PromptInput{
 			Workspace:      r.workspace,
 			ApprovalPolicy: r.config.ApprovalPolicy,
+			ApprovalMode:   r.config.ApprovalMode,
+			AwayPolicy:     r.config.AwayPolicy,
 			Model:          r.config.Provider.Model,
 			Mode:           setup.Mode,
 			Skills:         setup.AvailableSkills,

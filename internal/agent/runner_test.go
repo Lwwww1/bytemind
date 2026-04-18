@@ -578,6 +578,9 @@ func TestRunPromptEncodesToolExecutionErrorsAndContinues(t *testing.T) {
 	if !strings.Contains(sess.Messages[2].Content, `"ok":false`) || !strings.Contains(sess.Messages[2].Content, `unknown tool`) {
 		t.Fatalf("expected encoded tool error payload, got %q", sess.Messages[2].Content)
 	}
+	if !strings.Contains(sess.Messages[2].Content, `"status":"error"`) || !strings.Contains(sess.Messages[2].Content, `"reason_code":"invalid_args"`) {
+		t.Fatalf("expected tool error status and reason_code, got %q", sess.Messages[2].Content)
+	}
 }
 
 func TestRunPromptAwayAutoDenyContinueKeepsRunningAfterPermissionDenied(t *testing.T) {
@@ -634,6 +637,9 @@ func TestRunPromptAwayAutoDenyContinueKeepsRunningAfterPermissionDenied(t *testi
 	toolMsg := sess.Messages[2]
 	if !strings.Contains(toolMsg.Content, `"ok":false`) || !strings.Contains(toolMsg.Content, "away mode") {
 		t.Fatalf("expected away-mode denial payload, got %q", toolMsg.Content)
+	}
+	if !strings.Contains(toolMsg.Content, `"status":"denied"`) || !strings.Contains(toolMsg.Content, `"reason_code":"permission_denied"`) {
+		t.Fatalf("expected denied status and permission reason_code, got %q", toolMsg.Content)
 	}
 }
 
@@ -693,6 +699,9 @@ func TestRunPromptAwayFailFastStopsAfterPermissionDenied(t *testing.T) {
 	}
 	if !strings.Contains(sess.Messages[2].Content, "away_policy=fail_fast") {
 		t.Fatalf("expected denied tool payload to include fail_fast policy, got %q", sess.Messages[2].Content)
+	}
+	if !strings.Contains(sess.Messages[2].Content, `"status":"denied"`) || !strings.Contains(sess.Messages[2].Content, `"reason_code":"permission_denied"`) {
+		t.Fatalf("expected denied status and reason code in fail_fast payload, got %q", sess.Messages[2].Content)
 	}
 }
 

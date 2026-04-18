@@ -61,11 +61,25 @@ func (r *Runner) executeToolCall(
 		AllowedTools:   allowedTools,
 		DeniedTools:    deniedTools,
 	})
+	errorReasonCode := ""
+	errorStatus := ""
 	if execErr != nil {
-		result = marshalToolResult(map[string]any{
-			"ok":    false,
-			"error": execErr.Error(),
-		})
+		errorStatus = "error"
+		if code := toolErrorReasonCode(execErr); code != "" {
+			errorReasonCode = code
+			if code == string(tools.ToolErrorPermissionDenied) {
+				errorStatus = "denied"
+			}
+		}
+		payload := map[string]any{
+			"ok":     false,
+			"error":  execErr.Error(),
+			"status": errorStatus,
+		}
+		if errorReasonCode != "" {
+			payload["reason_code"] = errorReasonCode
+		}
+		result = marshalToolResult(payload)
 	}
 	if out != nil {
 		r.renderToolFeedback(out, call.Function.Name, result)
@@ -88,14 +102,17 @@ func (r *Runner) executeToolCall(
 		auditResult = "error"
 	}
 	r.appendAudit(ctx, storagepkg.AuditEvent{
-		SessionID: corepkg.SessionID(sess.ID),
-		Actor:     "agent",
-		Action:    "tool_execute_result",
-		Result:    auditResult,
-		LatencyMS: time.Since(execStartedAt).Milliseconds(),
+		SessionID:  corepkg.SessionID(sess.ID),
+		Actor:      "agent",
+		Action:     "tool_execute_result",
+		Result:     auditResult,
+		ReasonCode: errorReasonCode,
+		LatencyMS:  time.Since(execStartedAt).Milliseconds(),
 		Metadata: map[string]string{
-			"tool_name": call.Function.Name,
-			"error":     errText,
+			"tool_name":   call.Function.Name,
+			"error":       errText,
+			"status":      errorStatus,
+			"reason_code": errorReasonCode,
 		},
 	})
 
@@ -134,4 +151,15 @@ func shouldStopRunForAwayFailFast(err error, approvalMode, awayPolicy string) bo
 		return false
 	}
 	return execErr.Code == tools.ToolErrorPermissionDenied
+}
+
+func toolErrorReasonCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	execErr, ok := tools.AsToolExecError(err)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(string(execErr.Code))
 }

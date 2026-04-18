@@ -11,7 +11,9 @@ import (
 	"bytemind/internal/config"
 	"bytemind/internal/llm"
 	policypkg "bytemind/internal/policy"
+	"bytemind/internal/provider"
 	runtimepkg "bytemind/internal/runtime"
+	"bytemind/internal/session"
 	"bytemind/internal/tools"
 )
 
@@ -35,7 +37,39 @@ func (c *streamFallbackClient) StreamMessage(_ context.Context, _ llm.ChatReques
 	return c.streamMsg, nil
 }
 
+func TestRunPromptWithRoutedClientReturnsAssistantContent(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	client := &routeContextClient{}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:        config.ProviderConfig{Model: "gpt-5.4-mini"},
+			ProviderRuntime: config.ProviderRuntimeConfig{DefaultProvider: "openai", DefaultModel: "gpt-5.4-mini"},
+			MaxIterations:   4,
+			Stream:          false,
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+	answer, err := runner.RunPrompt(context.Background(), sess, "inspect repo", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("unexpected answer %q", answer)
+	}
+}
+
 func TestRunnerSetters(t *testing.T) {
+
 	runner := NewRunner(Options{})
 	if runner.observer != nil {
 		t.Fatal("expected nil observer by default")
@@ -127,6 +161,181 @@ func TestCompleteTurnFallsBackToCreateWhenStreamReplyIsEmpty(t *testing.T) {
 	}
 	if streamed {
 		t.Fatalf("expected streamed=false when no deltas emitted, got true")
+	}
+}
+
+type routeContextClient struct {
+	lastRouteContext provider.RouteContext
+}
+
+func (c *routeContextClient) CreateMessage(ctx context.Context, _ llm.ChatRequest) (llm.Message, error) {
+	c.lastRouteContext = provider.RouteContextFromContext(ctx)
+	return llm.Message{Role: "assistant", Content: "done"}, nil
+}
+
+func (c *routeContextClient) StreamMessage(ctx context.Context, req llm.ChatRequest, onDelta func(string)) (llm.Message, error) {
+	return c.CreateMessage(ctx, req)
+}
+
+func TestCompleteTurnInjectsRouteContext(t *testing.T) {
+	client := &routeContextClient{}
+	runner := NewRunner(Options{
+		Config: config.Config{Stream: false},
+		Client: client,
+	})
+	streamed := false
+	_, err := runner.completeTurn(context.Background(), llm.ChatRequest{}, io.Discard, &streamed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !client.lastRouteContext.AllowFallback {
+		t.Fatalf("expected allow fallback route context, got %#v", client.lastRouteContext)
+	}
+}
+
+func TestCompleteTurnMergesRouteContextFromCaller(t *testing.T) {
+	client := &routeContextClient{}
+	runner := NewRunner(Options{
+		Config: config.Config{Stream: false},
+		Client: client,
+	})
+	streamed := false
+	ctx := provider.WithRouteContext(context.Background(), provider.RouteContext{
+		Scenario:      "incident-response",
+		Region:        "us",
+		PreferLatency: true,
+		Tags: map[string]string{
+			"team": "platform",
+		},
+	})
+	_, err := runner.completeTurn(ctx, llm.ChatRequest{}, io.Discard, &streamed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !client.lastRouteContext.AllowFallback {
+		t.Fatalf("expected allow fallback route context, got %#v", client.lastRouteContext)
+	}
+	if client.lastRouteContext.Scenario != "incident-response" {
+		t.Fatalf("expected scenario to be preserved, got %#v", client.lastRouteContext)
+	}
+	if client.lastRouteContext.Region != "us" {
+		t.Fatalf("expected region to be preserved, got %#v", client.lastRouteContext)
+	}
+	if !client.lastRouteContext.PreferLatency {
+		t.Fatalf("expected prefer_latency to be preserved, got %#v", client.lastRouteContext)
+	}
+	if client.lastRouteContext.Tags["team"] != "platform" {
+		t.Fatalf("expected tags to be preserved, got %#v", client.lastRouteContext)
+	}
+}
+
+func TestRunPromptUsesRuntimeDefaultModelInRequestAndPrompt(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	client := &fakeClient{replies: []llm.Message{{
+		Role:    llm.RoleAssistant,
+		Content: "done",
+	}}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:        config.ProviderConfig{Model: "legacy-model"},
+			ProviderRuntime: config.ProviderRuntimeConfig{DefaultModel: "runtime-model"},
+			MaxIterations:   4,
+			Stream:          false,
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+	answer, err := runner.RunPrompt(context.Background(), sess, "inspect repo", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("unexpected answer %q", answer)
+	}
+	if len(client.requests) == 0 {
+		t.Fatal("expected at least one request")
+	}
+	request := client.requests[0]
+	if request.Model != "runtime-model" {
+		t.Fatalf("expected runtime model in request, got %q", request.Model)
+	}
+	if len(request.Messages) == 0 {
+		t.Fatal("expected system prompt in request messages")
+	}
+	systemPrompt := request.Messages[0].Text()
+	if !strings.Contains(systemPrompt, "runtime-model") {
+		t.Fatalf("expected system prompt to include runtime model, got %q", systemPrompt)
+	}
+	if strings.Contains(systemPrompt, "legacy-model") {
+		t.Fatalf("expected system prompt to avoid legacy model, got %q", systemPrompt)
+	}
+}
+
+func TestTranslateSkillBriefUsesRuntimeDefaultModel(t *testing.T) {
+	client := &fakeClient{replies: []llm.Message{{
+		Role:    llm.RoleAssistant,
+		Content: "translate me",
+	}}}
+	runner := NewRunner(Options{
+		Config: config.Config{
+			Provider:        config.ProviderConfig{Model: "legacy-model"},
+			ProviderRuntime: config.ProviderRuntimeConfig{DefaultModel: "runtime-model"},
+			Stream:          false,
+		},
+		Client: client,
+	})
+	translated, err := runner.translateSkillBriefToEnglish("简述")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if translated != "translate me" {
+		t.Fatalf("unexpected translated text %q", translated)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(client.requests))
+	}
+	if client.requests[0].Model != "runtime-model" {
+		t.Fatalf("expected runtime model in translation request, got %q", client.requests[0].Model)
+	}
+}
+
+func TestRequestCompactionSummaryUsesRuntimeDefaultModel(t *testing.T) {
+	client := &fakeClient{replies: []llm.Message{{
+		Role:    llm.RoleAssistant,
+		Content: "summary",
+	}}}
+	runner := NewRunner(Options{
+		Config: config.Config{
+			Provider:        config.ProviderConfig{Model: "legacy-model"},
+			ProviderRuntime: config.ProviderRuntimeConfig{DefaultModel: "runtime-model"},
+			Stream:          false,
+		},
+		Client: client,
+	})
+	summary, err := runner.requestCompactionSummary(context.Background(), []llm.Message{
+		llm.NewUserTextMessage("goal"),
+		llm.NewAssistantTextMessage("answer"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != "summary" {
+		t.Fatalf("unexpected summary %q", summary)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(client.requests))
+	}
+	if client.requests[0].Model != "runtime-model" {
+		t.Fatalf("expected runtime model in compaction request, got %q", client.requests[0].Model)
 	}
 }
 

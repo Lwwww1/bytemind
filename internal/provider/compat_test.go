@@ -9,6 +9,27 @@ import (
 	"bytemind/internal/llm"
 )
 
+type staticCompatRouter struct {
+	result RouteResult
+	err    error
+}
+
+func (r staticCompatRouter) Route(context.Context, ModelID, RouteContext) (RouteResult, error) {
+	return r.result, r.err
+}
+
+type captureCompatRouter struct {
+	result      RouteResult
+	lastContext RouteContext
+	lastModelID ModelID
+}
+
+func (r *captureCompatRouter) Route(_ context.Context, model ModelID, rc RouteContext) (RouteResult, error) {
+	r.lastModelID = model
+	r.lastContext = rc
+	return r.result, nil
+}
+
 type stubCompatClient struct {
 	message llm.Message
 	err     error
@@ -297,6 +318,62 @@ func TestNormalizeEventRejectsEventsAfterTerminal(t *testing.T) {
 	}
 	if len(events) != 2 || events[0].Type != EventStart || events[1].Type != EventResult {
 		t.Fatalf("unexpected normalized events %#v", events)
+	}
+}
+
+func TestRoutedClientCreateMessageReturnsResultContent(t *testing.T) {
+	target := RouteTarget{
+		ProviderID: ProviderOpenAI,
+		ModelID:    ModelID("gpt-5.4"),
+		Client: WrapClient(ProviderOpenAI, ModelID("gpt-5.4"), stubCompatClient{message: llm.Message{
+			Role:    llm.RoleAssistant,
+			Content: "Task complete.",
+		}}),
+	}
+	client := &RoutedClient{router: staticCompatRouter{result: RouteResult{Primary: target}}}
+	msg, err := client.CreateMessage(context.Background(), llm.ChatRequest{Model: "gpt-5.4"})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if msg.Content != "Task complete." {
+		t.Fatalf("unexpected message %#v", msg)
+	}
+}
+
+func TestRoutedClientPreservesRouteContextAndMergesAllowFallback(t *testing.T) {
+	target := RouteTarget{
+		ProviderID: ProviderOpenAI,
+		ModelID:    ModelID("gpt-5.4"),
+		Client: WrapClient(ProviderOpenAI, ModelID("gpt-5.4"), stubCompatClient{
+			message: llm.Message{Role: llm.RoleAssistant, Content: "ok"},
+		}),
+	}
+	router := &captureCompatRouter{result: RouteResult{Primary: target}}
+	client := &RoutedClient{router: router, allowFallback: false}
+	ctx := WithRouteContext(context.Background(), RouteContext{
+		Scenario:      "incident",
+		Region:        "us",
+		PreferLatency: true,
+		AllowFallback: true,
+		Tags: map[string]string{
+			"team": "platform",
+		},
+	})
+	_, err := client.CreateMessage(ctx, llm.ChatRequest{Model: "gpt-5.4"})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if router.lastModelID != "gpt-5.4" {
+		t.Fatalf("expected routed model id to be preserved, got %q", router.lastModelID)
+	}
+	if router.lastContext.Scenario != "incident" || router.lastContext.Region != "us" || !router.lastContext.PreferLatency {
+		t.Fatalf("expected route context metadata to be preserved, got %#v", router.lastContext)
+	}
+	if router.lastContext.Tags["team"] != "platform" {
+		t.Fatalf("expected route context tags to be preserved, got %#v", router.lastContext)
+	}
+	if !router.lastContext.AllowFallback {
+		t.Fatalf("expected allow_fallback to use merge semantics, got %#v", router.lastContext)
 	}
 }
 

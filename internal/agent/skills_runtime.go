@@ -129,7 +129,7 @@ func (r *Runner) translateSkillBriefToEnglish(brief string) (string, error) {
 	if r.client == nil {
 		return "", fmt.Errorf("llm client is unavailable")
 	}
-	model := strings.TrimSpace(r.config.Provider.Model)
+	model := r.modelID()
 	if model == "" {
 		return "", fmt.Errorf("model is required for translation")
 	}

@@ -20,6 +20,20 @@ type RoutedClient struct {
 	allowFallback bool
 }
 
+type routeContextKey struct{}
+
+func WithRouteContext(ctx context.Context, rc RouteContext) context.Context {
+	return context.WithValue(ctx, routeContextKey{}, normalizeRouteContext(rc))
+}
+
+func RouteContextFromContext(ctx context.Context) RouteContext {
+	if ctx == nil {
+		return RouteContext{}
+	}
+	rc, _ := ctx.Value(routeContextKey{}).(RouteContext)
+	return normalizeRouteContext(rc)
+}
+
 func NewRoutedClient(router Router) llm.Client {
 	return NewRoutedClientWithPolicy(router, nil, false)
 }
@@ -58,7 +72,9 @@ func (c *RoutedClient) execute(ctx context.Context, req llm.ChatRequest, stream 
 	if c == nil || c.router == nil {
 		return llm.Message{}, unavailableRouteError("no provider candidates available")
 	}
-	result, err := c.router.Route(ctx, ModelID(strings.TrimSpace(req.Model)), RouteContext{AllowFallback: c.allowFallback})
+	routeContext := RouteContextFromContext(ctx)
+	routeContext.AllowFallback = routeContext.AllowFallback || c.allowFallback
+	result, err := c.router.Route(ctx, ModelID(strings.TrimSpace(req.Model)), routeContext)
 	if err != nil {
 		return llm.Message{}, err
 	}
@@ -290,6 +306,7 @@ func (a *clientAdapter) Stream(ctx context.Context, req Request) (<-chan Event, 
 			})
 			return
 		}
+		message.Normalize()
 		if message.Usage != nil {
 			if !normalizeEvent(ctx, normalizer, stream, Event{
 				Type:       EventUsage,

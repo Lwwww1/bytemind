@@ -47,6 +47,7 @@ func (e *defaultEngine) processTurn(ctx context.Context, p turnProcessParams) (s
 		Assets:      p.Assets,
 		Temperature: 0.2,
 	})
+	request.Model = runner.modelID()
 
 	streamedText := false
 	turnStart := time.Now()

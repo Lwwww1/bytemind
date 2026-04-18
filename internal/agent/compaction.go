@@ -229,7 +229,7 @@ func (r *Runner) requestCompactionSummary(ctx context.Context, history []llm.Mes
 	}, "\n"))
 
 	request := llm.ChatRequest{
-		Model:       r.config.Provider.Model,
+		Model:       r.modelID(),
 		Temperature: 0,
 		Messages: []llm.Message{
 			llm.NewTextMessage(llm.RoleSystem, compactionSystemPrompt),

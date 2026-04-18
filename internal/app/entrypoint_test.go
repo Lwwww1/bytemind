@@ -83,6 +83,24 @@ func TestBootstrapCreatesSessionInWorkspace(t *testing.T) {
 	}
 }
 
+func TestBootstrapEntrypointRejectsBroadWorkspaceWithoutOverride(t *testing.T) {
+	workspace := t.TempDir()
+	t.Chdir(workspace)
+	t.Setenv("HOME", workspace)
+
+	_, err := BootstrapEntrypoint(EntrypointRequest{
+		RequireAPIKey: false,
+		Stdin:         strings.NewReader(""),
+		Stdout:        &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected broad workspace error")
+	}
+	if !strings.Contains(err.Error(), "too broad for default workspace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestBootstrapFailsWhenHomeLayoutCannotBeCreated(t *testing.T) {
 	workspace := t.TempDir()
 	t.Chdir(workspace)

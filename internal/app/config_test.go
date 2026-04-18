@@ -70,6 +70,33 @@ func TestLoadRuntimeConfigRejectsInvalidStream(t *testing.T) {
 	}
 }
 
+func TestLoadRuntimeConfigRejectsNegativeMaxIterationsOverride(t *testing.T) {
+	workspace := t.TempDir()
+	writeCfg := `{
+  "provider": {
+    "type": "openai-compatible",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-5.4-mini",
+    "api_key": "test-key"
+  }
+}`
+	if err := osWriteFile(workspace+"/config.json", writeCfg); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := LoadRuntimeConfig(ConfigRequest{
+		Workspace:             workspace,
+		ConfigPath:            workspace + "/config.json",
+		MaxIterationsOverride: -1,
+	})
+	if err == nil {
+		t.Fatal("expected error for negative max-iterations")
+	}
+	if !strings.Contains(err.Error(), "-max-iterations must be greater than 0") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func osWriteFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }

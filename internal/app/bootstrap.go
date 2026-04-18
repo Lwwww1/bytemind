@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"bytemind/internal/agent"
@@ -56,8 +57,8 @@ func Bootstrap(req BootstrapRequest) (Runtime, error) {
 	if err != nil {
 		return Runtime{}, err
 	}
-	if req.MaxIterationsOverride < 0 {
-		return Runtime{}, errors.New("-max-iterations must be greater than 0")
+	if req.StreamOverride == "" {
+		req.StreamOverride = strings.TrimSpace(strconv.FormatBool(cfg.Stream))
 	}
 
 	apiKey := cfg.Provider.ResolveAPIKey()
@@ -88,7 +89,11 @@ func Bootstrap(req BootstrapRequest) (Runtime, error) {
 	}
 
 	cfg.Provider.APIKey = apiKey
-	client, err := provider.NewClient(cfg.Provider)
+	runtimeCfg := cfg.ProviderRuntime
+	if len(runtimeCfg.Providers) == 0 {
+		runtimeCfg = config.LegacyProviderRuntimeConfig(cfg.Provider)
+	}
+	client, err := provider.NewClientFromRuntime(runtimeCfg, nil)
 	if err != nil {
 		return Runtime{}, err
 	}

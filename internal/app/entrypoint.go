@@ -1,6 +1,8 @@
 package app
 
-import "io"
+import (
+	"io"
+)
 
 type EntrypointRequest struct {
 	WorkspaceOverride     string

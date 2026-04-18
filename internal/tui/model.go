@@ -520,7 +520,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.shouldKeepStreamingIndexOnRunFinished() {
 				m.streamingIndex = -1
 			}
-			m.statusNote = "Ready."
+			if note, ok := m.latestPendingApprovalStatusNote(); ok {
+				m.statusNote = note
+			} else {
+				m.statusNote = "Ready."
+			}
 			m.phase = "idle"
 		case runFinishReasonCanceled:
 			m.streamingIndex = -1
@@ -535,7 +539,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.failLatestAssistant(msg.Err.Error())
 		default:
 			m.streamingIndex = -1
-			m.statusNote = "Ready."
+			if note, ok := m.latestPendingApprovalStatusNote(); ok {
+				m.statusNote = note
+			} else {
+				m.statusNote = "Ready."
+			}
 			m.phase = "idle"
 		}
 		m.refreshViewport()
@@ -1698,6 +1706,20 @@ func classifyRunFinish(err error, restartedByBTW bool) runFinishReason {
 		return runFinishReasonCanceled
 	}
 	return runFinishReasonFailed
+}
+
+func (m model) latestPendingApprovalStatusNote() (string, bool) {
+	for i := len(m.toolRuns) - 1; i >= 0; i-- {
+		if strings.TrimSpace(strings.ToLower(m.toolRuns[i].Status)) != "pending_approval" {
+			continue
+		}
+		summary := strings.TrimSpace(m.toolRuns[i].Summary)
+		if summary == "" {
+			summary = "Pending approval required."
+		}
+		return summary, true
+	}
+	return "", false
 }
 
 func isContinueExecutionInput(input string) bool {

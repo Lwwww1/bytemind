@@ -3536,6 +3536,25 @@ func TestHandleAgentEventTracksRunLifecyclePhases(t *testing.T) {
 	}
 }
 
+func TestHandleAgentEventRunFinishedKeepsPendingApprovalStatus(t *testing.T) {
+	m := model{
+		phase:      "thinking",
+		statusNote: "Running...",
+		toolRuns: []toolRun{
+			{Name: "run_shell", Summary: "Pending approval required.", Status: "pending_approval"},
+		},
+	}
+
+	m.handleAgentEvent(Event{
+		Type:    EventRunFinished,
+		Content: "Done.",
+	})
+
+	if m.phase != "idle" || m.statusNote != "Pending approval required." {
+		t.Fatalf("expected run finished to keep pending approval note, got phase=%q note=%q", m.phase, m.statusNote)
+	}
+}
+
 func TestToolStartKeepsStreamedAssistantReasoning(t *testing.T) {
 	m := model{
 		chatItems: []chatEntry{
@@ -3840,6 +3859,27 @@ func TestUpdateRunFinishedMsgResetsBusyState(t *testing.T) {
 		}
 		if !updated.llmConnected {
 			t.Fatalf("expected successful run to keep llmConnected=true")
+		}
+	})
+
+	t.Run("success_keeps_pending_approval_note", func(t *testing.T) {
+		m := model{
+			async:          make(chan tea.Msg, 1),
+			busy:           true,
+			streamingIndex: 0,
+			statusNote:     "Running...",
+			phase:          "tool",
+			llmConnected:   true,
+			toolRuns: []toolRun{
+				{Name: "run_shell", Summary: "Pending approval required.", Status: "pending_approval"},
+			},
+		}
+
+		got, _ := m.Update(runFinishedMsg{})
+		updated := got.(model)
+
+		if updated.phase != "idle" || updated.statusNote != "Pending approval required." {
+			t.Fatalf("expected successful run to preserve pending approval status note, got phase=%q note=%q", updated.phase, updated.statusNote)
 		}
 	})
 

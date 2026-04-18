@@ -253,6 +253,26 @@ func mergeDiscoveredState(current, discovered ExtensionInfo) ExtensionInfo {
 		merged.Health.CheckedAtUTC = time.Now().UTC().Format(time.RFC3339)
 		return merged
 	}
+	if current.Status == ExtensionStatusDegraded {
+		recovered, _, err := recoverTransition(ExtensionInfo{
+			ID:          current.ID,
+			Name:        current.Name,
+			Kind:        current.Kind,
+			Version:     current.Version,
+			Title:       current.Title,
+			Description: current.Description,
+			Source:      current.Source,
+			Status:      current.Status,
+			Manifest:    current.Manifest,
+			Health:      current.Health,
+		}, "extension recovered")
+		if err == nil {
+			merged.Status = recovered.Status
+			merged.Health = recovered.Health
+			merged.Health.CheckedAtUTC = time.Now().UTC().Format(time.RFC3339)
+			return merged
+		}
+	}
 	merged.Status = current.Status
 	merged.Health = current.Health
 	merged.Health.CheckedAtUTC = time.Now().UTC().Format(time.RFC3339)

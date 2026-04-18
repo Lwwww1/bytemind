@@ -273,6 +273,19 @@ func TestManagerReloadAppliesDiscoveryDegradeToActiveExtension(t *testing.T) {
 	if items[0].Status != ExtensionStatusDegraded {
 		t.Fatalf("expected degraded status after reload, got %q", items[0].Status)
 	}
+	if err := os.WriteFile(filepath.Join(review, "SKILL.md"), []byte("# /review restored"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	items, err = mgr.List(context.Background())
+	if err != nil {
+		t.Fatalf("recovery list failed: %v", err)
+	}
+	if items[0].Status != ExtensionStatusActive {
+		t.Fatalf("expected active status after recovery, got %q", items[0].Status)
+	}
+	if items[0].Health.Status != ExtensionStatusActive {
+		t.Fatalf("expected active health after recovery, got %q", items[0].Health.Status)
+	}
 }
 
 func TestManagerListDiscoversAcrossScopesWithPriority(t *testing.T) {

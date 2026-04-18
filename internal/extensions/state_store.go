@@ -2,10 +2,16 @@ package extensions
 
 import "sync"
 
+type stateLock struct {
+	mu    sync.Mutex
+	users int
+}
+
 type stateStore struct {
 	mu      sync.RWMutex
 	items   map[string]ExtensionInfo
-	locks   map[string]*sync.Mutex
+	locks   map[string]*stateLock
+	idle    map[string]struct{}
 	events  []ExtensionEvent
 	loading map[string]bool
 }
@@ -13,7 +19,8 @@ type stateStore struct {
 func newStateStore() *stateStore {
 	return &stateStore{
 		items:   map[string]ExtensionInfo{},
-		locks:   map[string]*sync.Mutex{},
+		locks:   map[string]*stateLock{},
+		idle:    map[string]struct{}{},
 		events:  nil,
 		loading: map[string]bool{},
 	}
@@ -21,20 +28,58 @@ func newStateStore() *stateStore {
 
 func (s *stateStore) withLock(id string, fn func() error) error {
 	lock := s.lockFor(id)
-	lock.Lock()
-	defer lock.Unlock()
+	lock.mu.Lock()
+	defer func() {
+		lock.mu.Unlock()
+		s.releaseLock(id, lock)
+	}()
 	return fn()
 }
 
-func (s *stateStore) lockFor(id string) *sync.Mutex {
+func (s *stateStore) lockFor(id string) *stateLock {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	lock, ok := s.locks[id]
 	if !ok {
-		lock = &sync.Mutex{}
+		lock = &stateLock{}
 		s.locks[id] = lock
 	}
+	lock.users++
+	delete(s.idle, id)
 	return lock
+}
+
+func (s *stateStore) releaseLock(id string, lock *stateLock) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.locks[id]
+	if !ok || current != lock {
+		return
+	}
+	if current.users > 0 {
+		current.users--
+	}
+	if current.users == 0 {
+		s.idle[id] = struct{}{}
+	}
+	s.gcIdleLocksLocked()
+}
+
+func (s *stateStore) gcIdleLocksLocked() {
+	for id := range s.idle {
+		if _, itemExists := s.items[id]; itemExists {
+			continue
+		}
+		if s.loading[id] {
+			continue
+		}
+		lock, ok := s.locks[id]
+		if !ok || lock.users != 0 {
+			continue
+		}
+		delete(s.locks, id)
+		delete(s.idle, id)
+	}
 }
 
 func (s *stateStore) beginLoad(id string) error {
@@ -54,6 +99,7 @@ func (s *stateStore) finishLoad(id string, info ExtensionInfo, events ...Extensi
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.loading, id)
+	delete(s.idle, id)
 	s.items[id] = cloneExtensionInfo(info)
 	s.events = append(s.events, cloneEvents(events)...)
 }
@@ -62,6 +108,7 @@ func (s *stateStore) cancelLoad(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.loading, id)
+	s.gcIdleLocksLocked()
 }
 
 func (s *stateStore) get(id string) (ExtensionInfo, bool) {
@@ -74,6 +121,7 @@ func (s *stateStore) get(id string) (ExtensionInfo, bool) {
 func (s *stateStore) set(info ExtensionInfo, events ...ExtensionEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.idle, info.ID)
 	s.items[info.ID] = cloneExtensionInfo(info)
 	s.events = append(s.events, cloneEvents(events)...)
 }
@@ -84,6 +132,7 @@ func (s *stateStore) delete(id string, events ...ExtensionEvent) {
 	delete(s.items, id)
 	delete(s.loading, id)
 	s.events = append(s.events, cloneEvents(events)...)
+	s.gcIdleLocksLocked()
 }
 
 func (s *stateStore) list() []ExtensionInfo {

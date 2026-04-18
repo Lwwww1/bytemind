@@ -211,8 +211,7 @@ func (m *extensionManager) reload() error {
 	for id, item := range loaded {
 		current, ok := m.state.get(id)
 		if ok {
-			item.Status = current.Status
-			item.Health = current.Health
+			item = mergeDiscoveredState(current, item)
 		} else {
 			item = prepareLoadedInfo(item)
 		}
@@ -246,6 +245,22 @@ func prepareLoadedInfo(info ExtensionInfo) ExtensionInfo {
 		return prepared
 	}
 	return active
+}
+
+func mergeDiscoveredState(current, discovered ExtensionInfo) ExtensionInfo {
+	merged := cloneExtensionInfo(discovered)
+	merged.Health.CheckedAtUTC = time.Now().UTC().Format(time.RFC3339)
+	if discovered.Status == ExtensionStatusDegraded {
+		merged.Status = ExtensionStatusDegraded
+		merged.Health = discovered.Health
+		merged.Health.Status = ExtensionStatusDegraded
+		merged.Health.CheckedAtUTC = time.Now().UTC().Format(time.RFC3339)
+		return merged
+	}
+	merged.Status = current.Status
+	merged.Health = current.Health
+	merged.Health.CheckedAtUTC = time.Now().UTC().Format(time.RFC3339)
+	return merged
 }
 
 func (m *extensionManager) discoverOne(source string) (ExtensionInfo, error) {

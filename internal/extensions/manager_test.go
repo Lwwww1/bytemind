@@ -206,6 +206,40 @@ func TestManagerListPreservesDegradedStatusForManifestOnlyExtension(t *testing.T
 	}
 }
 
+func TestManagerReloadAppliesDiscoveryDegradeToActiveExtension(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	review := filepath.Join(project, "review")
+	if err := os.MkdirAll(review, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(review, "skill.json"), []byte(`{"name":"review"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(review, "SKILL.md"), []byte("# /review"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManagerWithDirs(root, filepath.Join(root, "builtin"), filepath.Join(root, "user"), project)
+	items, err := mgr.List(context.Background())
+	if err != nil {
+		t.Fatalf("initial list failed: %v", err)
+	}
+	if items[0].Status != ExtensionStatusActive {
+		t.Fatalf("expected active status, got %q", items[0].Status)
+	}
+	if err := os.Remove(filepath.Join(review, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	items, err = mgr.List(context.Background())
+	if err != nil {
+		t.Fatalf("reload list failed: %v", err)
+	}
+	if items[0].Status != ExtensionStatusDegraded {
+		t.Fatalf("expected degraded status after reload, got %q", items[0].Status)
+	}
+}
+
 func TestManagerListDiscoversAcrossScopesWithPriority(t *testing.T) {
 	root := t.TempDir()
 	builtin := filepath.Join(root, "builtin")

@@ -288,7 +288,7 @@ func inferPreapprovalIntent(userInput string) preapprovalIntent {
 		"修改", "更新", "写入", "重写", "创建", "实现", "修复", "重构", "补丁", "删除", "重命名", "改",
 	)
 	return preapprovalIntent{
-		Shell:       shellHint,
+		Shell:       hasCodeContext && shellHint,
 		Destructive: hasCodeContext && destructiveVerb,
 	}
 }

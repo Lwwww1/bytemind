@@ -298,6 +298,7 @@ type model struct {
 	lastPasteAt           time.Time
 	lastInputAt           time.Time
 	inputBurstSize        int
+	clipboardCaptureArmedUntil time.Time
 	chatAutoFollow        bool
 	draggingScrollbar     bool
 	scrollbarDragOffset   int
@@ -983,6 +984,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if fragment, source, ok := m.pasteFragmentFromKey(msg); ok {
+		m.armClipboardPasteCaptureSignal()
 		m.beginOrAppendPasteTransaction(fragment, source)
 		m.applyDirectPasteInput(fragment, source)
 		return m, nil
@@ -992,6 +994,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Prefer Ctrl+V image paste first. If clipboard has no image, fall through
 	// so regular terminal paste behavior can continue.
 	if ctrlVPasteDetected {
+		m.armClipboardPasteCaptureSignal()
 		beforeClipboard := m.input.Value()
 		clipboardNote := strings.TrimSpace(m.handleEmptyClipboardPaste())
 		if m.input.Value() != beforeClipboard {

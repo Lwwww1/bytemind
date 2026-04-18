@@ -63,6 +63,20 @@ func (f fakeClipboardTextReader) ReadText(ctx context.Context) (string, error) {
 	return f.text, nil
 }
 
+type countingClipboardTextReader struct {
+	text  string
+	err   error
+	calls int
+}
+
+func (f *countingClipboardTextReader) ReadText(_ context.Context) (string, error) {
+	f.calls++
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.text, nil
+}
+
 type compactCommandTestClient struct {
 	replies  []llm.Message
 	requests []llm.ChatRequest
@@ -2761,6 +2775,38 @@ func TestEnterTreatsClipboardContinuationAsPasteNewline(t *testing.T) {
 	}
 }
 
+func TestEnterDoesNotTreatShortSuffixClipboardOverlapAsContinuation(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.SetValue("notes: x")
+	input.CursorEnd()
+
+	clipboardText := strings.Join([]string{
+		"x",
+		"line 2",
+		"line 3",
+		"line 4",
+	}, "\n")
+
+	m := model{
+		screen:        screenChat,
+		input:         input,
+		workspace:     "E:\\bytemind",
+		sess:          session.New("E:\\bytemind"),
+		clipboardRead: fakeClipboardTextReader{text: clipboardText},
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := got.(model)
+
+	if len(updated.chatItems) == 0 {
+		t.Fatalf("expected enter to submit when clipboard overlap is shorter than threshold")
+	}
+	if updated.chatItems[0].Body != "notes: x" {
+		t.Fatalf("expected submitted body to remain unchanged, got %q", updated.chatItems[0].Body)
+	}
+}
+
 func TestEnterSubmitsLongInputWhenClipboardDoesNotMatch(t *testing.T) {
 	input := textarea.New()
 	input.Focus()
@@ -2810,6 +2856,8 @@ func TestPlainRuneStreamCompressesToMarkerWhenItMatchesLongClipboard(t *testing.
 	m.clipboardRead = fakeClipboardTextReader{text: longPaste}
 
 	for _, r := range longPaste {
+		// Simulate a rapid terminal echo burst for implicit paste detection.
+		m.lastInputAt = time.Now()
 		got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 		next := got.(model)
 		m = &next
@@ -2820,6 +2868,36 @@ func TestPlainRuneStreamCompressesToMarkerWhenItMatchesLongClipboard(t *testing.
 	}
 	if len(m.pastedOrder) != 1 {
 		t.Fatalf("expected one stored pasted content item, got %d", len(m.pastedOrder))
+	}
+}
+
+func TestPlainTypingDoesNotPollClipboardWithoutPasteSignal(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	reader := &countingClipboardTextReader{
+		text: strings.Join([]string{
+			"clipboard line 1",
+			"clipboard line 2",
+			"clipboard line 3",
+			"clipboard line 4",
+		}, "\n"),
+	}
+	m.clipboardRead = reader
+
+	for _, r := range "hello world" {
+		// Simulate human typing cadence so we don't accidentally arm the
+		// implicit paste detector's rapid-burst heuristic.
+		m.lastInputAt = time.Now().Add(-(clipboardCaptureImplicitGap + 50*time.Millisecond))
+		got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		next := got.(model)
+		m = &next
+	}
+
+	if reader.calls != 0 {
+		t.Fatalf("expected plain typing not to read clipboard, got %d reads", reader.calls)
+	}
+	if m.input.Value() != "hello world" {
+		t.Fatalf("expected typed input to remain literal, got %q", m.input.Value())
 	}
 }
 
@@ -2844,6 +2922,8 @@ func TestClipboardCaptureConvertsBeforeFullStreamArrives(t *testing.T) {
 
 	runes := []rune(longPaste)
 	for i := 0; i < clipboardCaptureMinPrefixRunes && i < len(runes); i++ {
+		// Simulate a rapid terminal echo burst for implicit paste detection.
+		m.lastInputAt = time.Now()
 		got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{runes[i]}})
 		next := got.(model)
 		m = &next
@@ -2880,6 +2960,8 @@ func TestClipboardCaptureConsumesTrailingEnterEchoAndDoesNotAutoSubmit(t *testin
 	m.clipboardRead = fakeClipboardTextReader{text: longPaste}
 
 	for _, r := range longPaste {
+		// Simulate a rapid terminal echo burst for implicit paste detection.
+		m.lastInputAt = time.Now()
 		got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 		next := got.(model)
 		m = &next

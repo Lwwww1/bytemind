@@ -7,6 +7,10 @@ import (
 
 func (m *model) noteInputMutation(before, after, source string) {
 	now := time.Now()
+	gap := time.Duration(0)
+	if !m.lastInputAt.IsZero() {
+		gap = now.Sub(m.lastInputAt)
+	}
 	delta := len(after) - len(before)
 	if delta < 0 {
 		delta = 0
@@ -21,6 +25,11 @@ func (m *model) noteInputMutation(before, after, source string) {
 
 	if shouldRecordPasteSignal(source) {
 		m.lastPasteAt = now
+		m.armClipboardPasteCaptureSignal()
+		return
+	}
+	if m.shouldArmClipboardCaptureFromImplicitMutation(before, after, source, gap, delta) {
+		m.armClipboardPasteCaptureSignal()
 	}
 }
 
@@ -44,7 +53,7 @@ func (m *model) handleInputMutation(before, after, source string) string {
 			note = fallbackNote
 		}
 	}
-	if !isPasteLikeSource(source) {
+	if m.shouldAttemptClipboardPasteCapture(before, updated, source) {
 		captured, captureNote, ok := m.tryStartClipboardPasteCapture(before, updated, source)
 		if ok {
 			updated = captured

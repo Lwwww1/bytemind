@@ -22,6 +22,8 @@ const (
 	opencodePasteSummaryMinLines   = 3
 	opencodePasteSummaryMinChars   = 150
 	pasteContinuationWindow        = 1500 * time.Millisecond
+	clipboardCaptureArmWindow      = 1200 * time.Millisecond
+	clipboardCaptureImplicitGap    = 80 * time.Millisecond
 	maxSinglePastedCharLength      = 200000
 	pasteSoftWrapWidth             = 72
 	clipboardCaptureMinPrefixRunes = 4
@@ -118,6 +120,54 @@ func (m *model) readClipboardTextForPaste() (string, bool) {
 		return "", false
 	}
 	return normalized, true
+}
+
+func (m *model) armClipboardPasteCaptureSignal() {
+	if m == nil {
+		return
+	}
+	until := time.Now().Add(clipboardCaptureArmWindow)
+	if until.After(m.clipboardCaptureArmedUntil) {
+		m.clipboardCaptureArmedUntil = until
+	}
+}
+
+func (m *model) isClipboardPasteCaptureArmed() bool {
+	if m == nil || m.clipboardCaptureArmedUntil.IsZero() {
+		return false
+	}
+	return time.Now().Before(m.clipboardCaptureArmedUntil)
+}
+
+func (m *model) shouldArmClipboardCaptureFromImplicitMutation(before, after, source string, gap time.Duration, delta int) bool {
+	if m == nil || isPasteLikeSource(source) {
+		return false
+	}
+	if delta <= 0 || m.inputBurstSize < clipboardCaptureMinPrefixRunes {
+		return false
+	}
+	if gap <= clipboardCaptureImplicitGap {
+		return true
+	}
+	_, inserted, _ := insertionDiff(before, after)
+	inserted = strings.ReplaceAll(normalizeNewlines(inserted), ctrlVMarkerRune, "")
+	if inserted == "" {
+		return false
+	}
+	if strings.Contains(inserted, "\n") || strings.Contains(inserted, "\t") {
+		return true
+	}
+	return len([]rune(inserted)) >= clipboardCaptureMinPrefixRunes
+}
+
+func (m *model) shouldAttemptClipboardPasteCapture(before, after, source string) bool {
+	if m == nil || isPasteLikeSource(source) || !m.isClipboardPasteCaptureArmed() {
+		return false
+	}
+	if strings.TrimSpace(after) == "" {
+		return false
+	}
+	return len([]rune(after)) > len([]rune(before))
 }
 
 func (m *model) tryCompressClipboardMatchedPaste(raw string) (string, string, bool) {
@@ -260,13 +310,14 @@ func (m *model) shouldTreatEnterAsClipboardPasteContinuation(raw string) bool {
 
 	// Exact prefix continuation: current buffer is beginning of clipboard,
 	// and the next clipboard rune is a newline.
-	if strings.HasPrefix(normalizedClipboard, normalizedRaw+"\n") {
+	if strings.HasPrefix(normalizedClipboard, normalizedRaw+"\n") &&
+		len([]rune(normalizedRaw)) >= clipboardCaptureMinPrefixRunes {
 		return true
 	}
 
 	// Suffix-prefix continuation: user might already have text before paste.
 	matchLen := longestClipboardPrefixSuffixLen(normalizedRaw, normalizedClipboard)
-	if matchLen <= 0 {
+	if matchLen < clipboardCaptureMinPrefixRunes {
 		return false
 	}
 	clipboardRunes := []rune(normalizedClipboard)

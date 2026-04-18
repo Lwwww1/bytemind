@@ -36,6 +36,12 @@ func (r TaskReport) IsEmpty() bool {
 		len(r.SkippedDueToDependency) == 0
 }
 
+func (r TaskReport) HasNonSuccessOutcomes() bool {
+	return len(r.Denied) > 0 ||
+		len(r.PendingApproval) > 0 ||
+		len(r.SkippedDueToDependency) > 0
+}
+
 func (r TaskReport) JSON() string {
 	payload, err := json.Marshal(r)
 	if err != nil {

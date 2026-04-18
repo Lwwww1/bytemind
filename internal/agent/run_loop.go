@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	contextpkg "bytemind/internal/context"
 	corepkg "bytemind/internal/core"
@@ -49,6 +50,7 @@ func (r *Runner) runPromptTurns(ctx context.Context, sess *session.Session, setu
 			return "", err
 		}
 		if finished {
+			writeCompletionTaskReport(out, taskReport)
 			return answer, nil
 		}
 	}
@@ -60,6 +62,20 @@ func (r *Runner) runPromptTurns(ctx context.Context, sess *session.Session, setu
 		TaskReport:    taskReport,
 	})
 	return r.finishWithSummary(sess, summary, out, false)
+}
+
+func writeCompletionTaskReport(out io.Writer, taskReport *runtimepkg.TaskReport) {
+	if out == nil || taskReport == nil || !taskReport.HasNonSuccessOutcomes() {
+		return
+	}
+	human := strings.TrimSpace(taskReport.HumanSummary())
+	if human == "" {
+		return
+	}
+	_, _ = io.WriteString(out, "\nTask report summary:\n")
+	_, _ = io.WriteString(out, human+"\n")
+	_, _ = io.WriteString(out, "Task report (json):\n")
+	_, _ = io.WriteString(out, taskReport.JSON()+"\n")
 }
 
 func (r *Runner) messagesForStep(ctx context.Context, sess *session.Session, setup runPromptSetup, step int, out io.Writer) ([]llm.Message, error) {

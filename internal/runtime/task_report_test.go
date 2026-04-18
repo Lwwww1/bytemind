@@ -34,6 +34,9 @@ func TestTaskReportJSONAndEmpty(t *testing.T) {
 	if !report.IsEmpty() {
 		t.Fatal("expected zero-value report to be empty")
 	}
+	if report.HasNonSuccessOutcomes() {
+		t.Fatal("expected zero-value report to have no non-success outcomes")
+	}
 	if got := report.JSON(); got != "{}" {
 		t.Fatalf("expected empty JSON object, got %q", got)
 	}
@@ -41,6 +44,9 @@ func TestTaskReportJSONAndEmpty(t *testing.T) {
 	report.RecordExecuted("run_shell")
 	if report.IsEmpty() {
 		t.Fatal("expected non-empty report after recording an entry")
+	}
+	if report.HasNonSuccessOutcomes() {
+		t.Fatal("did not expect executed-only report to mark non-success outcomes")
 	}
 	if got := report.JSON(); !strings.Contains(got, `"executed":["run_shell"]`) {
 		t.Fatalf("expected executed payload in JSON, got %q", got)
@@ -64,5 +70,8 @@ func TestTaskReportHumanSummaryIncludesPendingApproval(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected human summary to contain %q, got %q", want, text)
 		}
+	}
+	if !report.HasNonSuccessOutcomes() {
+		t.Fatal("expected report with denied/pending/skipped entries to mark non-success outcomes")
 	}
 }

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -634,7 +635,8 @@ func TestRunPromptAwayAutoDenyContinueKeepsRunningAfterPermissionDenied(t *testi
 		Stdout:   io.Discard,
 	})
 
-	answer, err := runner.RunPrompt(context.Background(), sess, "trigger permission path", "build", io.Discard)
+	var out bytes.Buffer
+	answer, err := runner.RunPrompt(context.Background(), sess, "trigger permission path", "build", &out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,6 +659,18 @@ func TestRunPromptAwayAutoDenyContinueKeepsRunningAfterPermissionDenied(t *testi
 	}
 	if !strings.Contains(skippedMsg.Content, "skipped because a prior approval-required action was denied") {
 		t.Fatalf("expected skipped message to describe denied dependency, got %q", skippedMsg.Content)
+	}
+	for _, want := range []string{
+		"Task report summary:",
+		"- Pending approval: write_file",
+		"- Skipped due to denied dependency: read_file",
+		"Task report (json):",
+		`"pending_approval":["write_file"]`,
+		`"skipped_due_to_dependency":["read_file"]`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected successful auto_deny_continue output to contain %q, got %q", want, out.String())
+		}
 	}
 }
 

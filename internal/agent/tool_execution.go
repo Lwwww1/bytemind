@@ -27,6 +27,7 @@ func (r *Runner) executeToolCall(
 	runMode planpkg.AgentMode,
 	call llm.ToolCall,
 	out io.Writer,
+	approval tools.ApprovalHandler,
 	allowedTools map[string]struct{},
 	deniedTools map[string]struct{},
 ) (toolExecutionOutcome, error) {
@@ -57,7 +58,7 @@ func (r *Runner) executeToolCall(
 		ApprovalPolicy: r.config.ApprovalPolicy,
 		ApprovalMode:   r.config.ApprovalMode,
 		AwayPolicy:     r.config.AwayPolicy,
-		Approval:       r.approval,
+		Approval:       approval,
 		Session:        sess,
 		TaskManager:    r.taskManager,
 		Extensions:     r.extensions,

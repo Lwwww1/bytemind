@@ -136,3 +136,102 @@ func TestRunPromptSkipsApprovalPrecheckWhenPolicyNever(t *testing.T) {
 		t.Fatalf("did not expect approval precheck under policy never, got %q", out.String())
 	}
 }
+
+func TestPrepareRunApprovalHandlerPreApprovesRunShellAndDestructive(t *testing.T) {
+	requests := make([]tools.ApprovalRequest, 0, 4)
+	runner := &Runner{
+		config: config.Config{
+			ApprovalPolicy: "on-request",
+			ApprovalMode:   "interactive",
+		},
+		registry: tools.DefaultRegistry(),
+		approval: func(req tools.ApprovalRequest) (bool, error) {
+			requests = append(requests, req)
+			return true, nil
+		},
+	}
+
+	handler := runner.prepareRunApprovalHandler(runPromptSetup{RunMode: planpkg.ModeBuild}, io.Discard)
+	if handler == nil {
+		t.Fatal("expected approval handler")
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected two pre-approval requests, got %d (%+v)", len(requests), requests)
+	}
+	if !strings.Contains(requests[0].Command, "run_shell") || !strings.Contains(requests[0].Reason, "pre-approve") {
+		t.Fatalf("unexpected run_shell pre-approval request: %+v", requests[0])
+	}
+	if !strings.Contains(requests[1].Command, "workspace-modifying tools") || !strings.Contains(requests[1].Reason, "pre-approve") {
+		t.Fatalf("unexpected destructive pre-approval request: %+v", requests[1])
+	}
+
+	approved, err := handler(tools.ApprovalRequest{
+		Command: "go test ./...",
+		Reason:  "may modify files or environment: go",
+	})
+	if err != nil || !approved {
+		t.Fatalf("expected pre-approved run_shell request, approved=%v err=%v", approved, err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected run_shell request to skip runtime approval prompt, got %d calls", len(requests))
+	}
+
+	approved, err = handler(tools.ApprovalRequest{
+		Command: "write_file",
+		Reason:  "destructive tool may modify workspace files: write_file",
+	})
+	if err != nil || !approved {
+		t.Fatalf("expected pre-approved destructive request, approved=%v err=%v", approved, err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected destructive request to skip runtime approval prompt, got %d calls", len(requests))
+	}
+}
+
+func TestPrepareRunApprovalHandlerFallsBackWhenPreApprovalDenied(t *testing.T) {
+	requests := make([]tools.ApprovalRequest, 0, 4)
+	runner := &Runner{
+		config: config.Config{
+			ApprovalPolicy: "on-request",
+			ApprovalMode:   "interactive",
+		},
+		registry: tools.DefaultRegistry(),
+		approval: func(req tools.ApprovalRequest) (bool, error) {
+			requests = append(requests, req)
+			if strings.Contains(req.Reason, "pre-approve") {
+				return false, nil
+			}
+			return true, nil
+		},
+	}
+
+	handler := runner.prepareRunApprovalHandler(runPromptSetup{RunMode: planpkg.ModeBuild}, io.Discard)
+	if handler == nil {
+		t.Fatal("expected approval handler")
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected two pre-approval requests, got %d (%+v)", len(requests), requests)
+	}
+
+	approved, err := handler(tools.ApprovalRequest{
+		Command: "go test ./...",
+		Reason:  "may modify files or environment: go",
+	})
+	if err != nil || !approved {
+		t.Fatalf("expected runtime run_shell approval fallback, approved=%v err=%v", approved, err)
+	}
+	if len(requests) != 3 {
+		t.Fatalf("expected runtime run_shell request to call base handler after pre-approval denial, got %d calls", len(requests))
+	}
+
+	approved, err = handler(tools.ApprovalRequest{
+		Command: "write_file",
+		Reason:  "destructive tool may modify workspace files: write_file",
+	})
+	if err != nil || !approved {
+		t.Fatalf("expected runtime destructive approval fallback, approved=%v err=%v", approved, err)
+	}
+	if len(requests) != 4 {
+		t.Fatalf("expected runtime destructive request to call base handler after pre-approval denial, got %d calls", len(requests))
+	}
+}

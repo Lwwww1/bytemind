@@ -14,6 +14,7 @@ import (
 	runtimepkg "bytemind/internal/runtime"
 	"bytemind/internal/session"
 	"bytemind/internal/tokenusage"
+	"bytemind/internal/tools"
 )
 
 type turnProcessParams struct {
@@ -28,6 +29,7 @@ type turnProcessParams struct {
 	SequenceTracker  *runtimepkg.ToolSequenceTracker
 	ExecutedTools    *[]string
 	TaskReport       *runtimepkg.TaskReport
+	Approval         tools.ApprovalHandler
 	Out              io.Writer
 }
 
@@ -90,7 +92,7 @@ func (r *Runner) processTurn(ctx context.Context, p turnProcessParams) (string, 
 	}
 	for idx, call := range reply.ToolCalls {
 		*p.ExecutedTools = append(*p.ExecutedTools, call.Function.Name)
-		outcome, err := r.executeToolCall(ctx, p.Session, p.RunMode, call, p.Out, p.AllowedTools, p.DeniedTools)
+		outcome, err := r.executeToolCall(ctx, p.Session, p.RunMode, call, p.Out, p.Approval, p.AllowedTools, p.DeniedTools)
 		if p.TaskReport != nil {
 			if outcome.Executed {
 				p.TaskReport.RecordExecuted(call.Function.Name)

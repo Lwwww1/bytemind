@@ -16,7 +16,7 @@ func (r *Runner) runPromptTurns(ctx context.Context, sess *session.Session, setu
 	toolSequenceTracker := runtimepkg.NewToolSequenceTracker(runtimepkg.DefaultRepeatedToolSequenceThreshold)
 	executedToolNames := make([]string, 0, 16)
 	taskReport := &runtimepkg.TaskReport{}
-	r.renderApprovalPrecheck(out, setup)
+	approvalHandler := r.prepareRunApprovalHandler(setup, out)
 
 	for step := 0; step < r.config.MaxIterations; step++ {
 		messages, err := r.messagesForStep(ctx, sess, setup, step, out)
@@ -35,6 +35,7 @@ func (r *Runner) runPromptTurns(ctx context.Context, sess *session.Session, setu
 			SequenceTracker:  toolSequenceTracker,
 			ExecutedTools:    &executedToolNames,
 			TaskReport:       taskReport,
+			Approval:         approvalHandler,
 			Out:              out,
 		})
 		if err != nil {

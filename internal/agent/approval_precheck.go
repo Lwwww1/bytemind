@@ -7,12 +7,73 @@ import (
 	"strings"
 
 	planpkg "bytemind/internal/plan"
+	"bytemind/internal/tools"
 )
 
 var destructiveApprovalTools = map[string]struct{}{
 	"apply_patch":     {},
 	"replace_in_file": {},
 	"write_file":      {},
+}
+
+const destructiveApprovalReasonPrefix = "destructive tool may modify workspace files:"
+
+type runApprovalGrants struct {
+	Shell       bool
+	Destructive bool
+}
+
+func (g runApprovalGrants) hasAny() bool {
+	return g.Shell || g.Destructive
+}
+
+func (r *Runner) prepareRunApprovalHandler(setup runPromptSetup, out io.Writer) tools.ApprovalHandler {
+	base := r.approval
+	r.renderApprovalPrecheck(out, setup)
+	if !shouldAttemptPreapproval(r, setup, base) {
+		return base
+	}
+
+	toolNames := filteredToolNamesForMode(r.registry, setup.RunMode, setup.AllowedToolNames, setup.DeniedToolNames)
+	hasShell, destructive := classifyPreapprovalToolGroups(toolNames)
+	if !hasShell && len(destructive) == 0 {
+		return base
+	}
+
+	grants := runApprovalGrants{}
+	if hasShell {
+		approved, err := base(tools.ApprovalRequest{
+			Command: "run_shell (session pre-approval)",
+			Reason:  "pre-approve approval-required run_shell commands for this run",
+		})
+		writePreapprovalResult(out, "run_shell", approved, err)
+		if err == nil && approved {
+			grants.Shell = true
+		}
+	}
+	if len(destructive) > 0 {
+		approved, err := base(tools.ApprovalRequest{
+			Command: "workspace-modifying tools (session pre-approval)",
+			Reason:  fmt.Sprintf("pre-approve destructive tool calls for this run: %s", strings.Join(destructive, ", ")),
+		})
+		writePreapprovalResult(out, "workspace-modifying tools", approved, err)
+		if err == nil && approved {
+			grants.Destructive = true
+		}
+	}
+	if !grants.hasAny() {
+		return base
+	}
+
+	return func(req tools.ApprovalRequest) (bool, error) {
+		if grants.Destructive && isDestructiveToolApprovalRequest(req) {
+			return true, nil
+		}
+		if grants.Shell && isRunShellApprovalRequest(req) {
+			return true, nil
+		}
+		return base(req)
+	}
 }
 
 func (r *Runner) renderApprovalPrecheck(out io.Writer, setup runPromptSetup) {
@@ -112,6 +173,77 @@ func buildApprovalPrecheckSummary(input approvalPrecheckSummaryInput) string {
 
 	lines = append(lines, "")
 	return strings.Join(lines, "\n")
+}
+
+func shouldAttemptPreapproval(r *Runner, setup runPromptSetup, base tools.ApprovalHandler) bool {
+	if r == nil || r.registry == nil || base == nil {
+		return false
+	}
+	if setup.RunMode != planpkg.ModeBuild {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(r.config.ApprovalMode))
+	if mode == "" {
+		mode = "interactive"
+	}
+	if mode != "interactive" {
+		return false
+	}
+	policy := strings.ToLower(strings.TrimSpace(r.config.ApprovalPolicy))
+	return policy != "never"
+}
+
+func classifyPreapprovalToolGroups(toolNames []string) (bool, []string) {
+	toolSet := make(map[string]struct{}, len(toolNames))
+	for _, name := range toolNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		toolSet[name] = struct{}{}
+	}
+	_, hasShell := toolSet["run_shell"]
+
+	destructive := make([]string, 0, len(destructiveApprovalTools))
+	for name := range destructiveApprovalTools {
+		if _, ok := toolSet[name]; !ok {
+			continue
+		}
+		destructive = append(destructive, name)
+	}
+	sort.Strings(destructive)
+	return hasShell, destructive
+}
+
+func writePreapprovalResult(out io.Writer, category string, approved bool, err error) {
+	if out == nil {
+		return
+	}
+	category = strings.TrimSpace(category)
+	if category == "" {
+		category = "approvals"
+	}
+	switch {
+	case err != nil:
+		fmt.Fprintf(out, "%sapproval precheck%s failed to pre-approve %s (%s); runtime approvals remain enabled\n", ansiDim, ansiReset, category, strings.TrimSpace(err.Error()))
+	case approved:
+		fmt.Fprintf(out, "%sapproval precheck%s pre-approved %s for this run\n", ansiDim, ansiReset, category)
+	default:
+		fmt.Fprintf(out, "%sapproval precheck%s %s pre-approval denied; runtime approvals remain enabled\n", ansiDim, ansiReset, category)
+	}
+}
+
+func isDestructiveToolApprovalRequest(req tools.ApprovalRequest) bool {
+	reason := strings.ToLower(strings.TrimSpace(req.Reason))
+	if strings.HasPrefix(reason, destructiveApprovalReasonPrefix) {
+		return true
+	}
+	_, ok := destructiveApprovalTools[strings.TrimSpace(req.Command)]
+	return ok
+}
+
+func isRunShellApprovalRequest(req tools.ApprovalRequest) bool {
+	return !isDestructiveToolApprovalRequest(req)
 }
 
 func filteredToolNamesForMode(registry ToolRegistry, mode planpkg.AgentMode, allowlist, denylist []string) []string {

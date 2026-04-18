@@ -228,15 +228,22 @@ func (m *extensionManager) reload() error {
 }
 
 func prepareLoadedInfo(info ExtensionInfo) ExtensionInfo {
-	loaded := cloneExtensionInfo(info)
-	loaded.Status = ExtensionStatusLoaded
-	loaded.Health.Status = ExtensionStatusLoaded
-	loaded.Health.Message = "extension loaded"
-	loaded.Health.LastError = ""
-	loaded.Health.CheckedAtUTC = time.Now().UTC().Format(time.RFC3339)
-	active, _, err := activateTransition(loaded)
+	prepared := cloneExtensionInfo(info)
+	prepared.Health.CheckedAtUTC = time.Now().UTC().Format(time.RFC3339)
+	if prepared.Status == ExtensionStatusDegraded {
+		prepared.Health.Status = ExtensionStatusDegraded
+		if strings.TrimSpace(prepared.Health.Message) == "" {
+			prepared.Health.Message = "extension degraded"
+		}
+		return prepared
+	}
+	prepared.Status = ExtensionStatusLoaded
+	prepared.Health.Status = ExtensionStatusLoaded
+	prepared.Health.Message = "extension loaded"
+	prepared.Health.LastError = ""
+	active, _, err := activateTransition(prepared)
 	if err != nil {
-		return loaded
+		return prepared
 	}
 	return active
 }

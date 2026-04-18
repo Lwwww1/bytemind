@@ -179,6 +179,33 @@ func TestManagerUnloadCanDisableBrokenExtension(t *testing.T) {
 	}
 }
 
+func TestManagerListPreservesDegradedStatusForManifestOnlyExtension(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	degraded := filepath.Join(project, "degraded")
+	if err := os.MkdirAll(degraded, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(degraded, "skill.json"), []byte(`{"name":"degraded"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManagerWithDirs(root, filepath.Join(root, "builtin"), filepath.Join(root, "user"), project)
+	items, err := mgr.List(context.Background())
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 extension, got %d", len(items))
+	}
+	if items[0].Status != ExtensionStatusDegraded {
+		t.Fatalf("expected degraded status, got %q", items[0].Status)
+	}
+	if items[0].Health.Status != ExtensionStatusDegraded {
+		t.Fatalf("expected degraded health, got %q", items[0].Health.Status)
+	}
+}
+
 func TestManagerListDiscoversAcrossScopesWithPriority(t *testing.T) {
 	root := t.TempDir()
 	builtin := filepath.Join(root, "builtin")

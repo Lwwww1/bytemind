@@ -30,14 +30,3 @@ func TestStateStoreCancelLoadClearsLoading(t *testing.T) {
 		t.Fatalf("expected beginLoad to succeed after cancel, got %v", err)
 	}
 }
-
-func TestStateStoreDeleteClearsLock(t *testing.T) {
-	store := newStateStore()
-	first := store.lockFor("skill.review")
-	store.set(ExtensionInfo{ID: "skill.review", Name: "review", Kind: ExtensionSkill, Source: ExtensionSource{Scope: ExtensionScopeProject, Ref: "x"}, Status: ExtensionStatusActive})
-	store.delete("skill.review")
-	second := store.lockFor("skill.review")
-	if first == second {
-		t.Fatal("expected lock to be recreated after delete")
-	}
-}

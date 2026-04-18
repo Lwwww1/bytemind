@@ -213,12 +213,28 @@ func TestOpenAICompatibleStreamMessageRejectsInvalidChunk(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatibleStreamMessageHandlesVeryLongDataLine(t *testing.T) {
-	longContent := strings.Repeat("a", 2*1024*1024)
+func TestOpenAICompatibleStreamMessageHandlesLargeSSELine(t *testing.T) {
+	largeContent := strings.Repeat("a", 2*1024*1024)
+	deltaChunk, err := json.Marshal(map[string]any{
+		"choices": []map[string]any{{
+			"delta": map[string]any{
+				"role":    "assistant",
+				"content": largeContent,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal delta chunk: %v", err)
+	}
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"" + longContent + "\"}}]}\n"))
-		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte(strings.Join([]string{
+			"data: " + string(deltaChunk),
+			`data: {"choices":[]}`,
+			`data: [DONE]`,
+			"",
+		}, "\n")))
 	}))
 	defer server.Close()
 
@@ -227,8 +243,8 @@ func TestOpenAICompatibleStreamMessageHandlesVeryLongDataLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msg.Content != longContent {
-		t.Fatalf("expected long streamed content to be preserved, got %d bytes", len(msg.Content))
+	if msg.Content != largeContent {
+		t.Fatalf("expected large stream content to be preserved, got length=%d want=%d", len(msg.Content), len(largeContent))
 	}
 }
 

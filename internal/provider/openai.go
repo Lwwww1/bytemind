@@ -15,7 +15,10 @@ import (
 	"bytemind/internal/llm"
 )
 
-const legacyToolCallIndex = -1
+const (
+	legacyToolCallIndex = -1
+	sseMaxLineBytes     = 8 * 1024 * 1024
+)
 
 type Config struct {
 	Type             string
@@ -146,6 +149,9 @@ func (c *OpenAICompatible) StreamMessage(ctx context.Context, req llm.ChatReques
 		rawLine, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
 			return llm.Message{}, err
+		}
+		if len(rawLine) > sseMaxLineBytes {
+			return llm.Message{}, fmt.Errorf("sse line too long: %d bytes exceeds %d-byte limit", len(rawLine), sseMaxLineBytes)
 		}
 		line := strings.TrimSpace(rawLine)
 		if err == io.EOF && line == "" {

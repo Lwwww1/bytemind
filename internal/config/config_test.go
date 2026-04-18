@@ -57,8 +57,8 @@ func TestLoadIgnoresInvalidTokenQuotaEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.TokenQuota != 5000 {
-		t.Fatalf("expected invalid token quota to fall back to default 5000, got %d", cfg.TokenQuota)
+	if cfg.TokenQuota != DefaultTokenQuota {
+		t.Fatalf("expected invalid token quota to fall back to default %d, got %d", DefaultTokenQuota, cfg.TokenQuota)
 	}
 }
 

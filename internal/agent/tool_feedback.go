@@ -9,10 +9,18 @@ import (
 
 func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 	var envelope struct {
-		OK    *bool  `json:"ok"`
-		Error string `json:"error"`
+		OK         *bool  `json:"ok"`
+		Error      string `json:"error"`
+		Status     string `json:"status"`
+		ReasonCode string `json:"reason_code"`
 	}
 	if err := json.Unmarshal([]byte(payload), &envelope); err == nil && envelope.Error != "" {
+		status := strings.ToLower(strings.TrimSpace(envelope.Status))
+		reasonCode := strings.ToLower(strings.TrimSpace(envelope.ReasonCode))
+		if status == "denied" || reasonCode == "permission_denied" {
+			fmt.Fprintf(out, "  %spending approval%s %s\n\n", ansiYellow, ansiReset, normalizeApprovalErrorMessage(envelope.Error, reasonCode))
+			return
+		}
 		fmt.Fprintf(out, "  %serror%s %s\n\n", ansiRed, ansiReset, envelope.Error)
 		return
 	}
@@ -247,4 +255,19 @@ func compactWhitespace(text string, limit int) string {
 		return string(runes[:limit])
 	}
 	return string(runes[:limit-3]) + "..."
+}
+
+func normalizeApprovalErrorMessage(message, reasonCode string) string {
+	message = strings.TrimSpace(message)
+	reasonCode = strings.ToLower(strings.TrimSpace(reasonCode))
+	if reasonCode != "" {
+		prefix := reasonCode + ":"
+		if strings.HasPrefix(strings.ToLower(message), prefix) {
+			message = strings.TrimSpace(message[len(prefix):])
+		}
+	}
+	if message == "" {
+		return "approval required"
+	}
+	return message
 }

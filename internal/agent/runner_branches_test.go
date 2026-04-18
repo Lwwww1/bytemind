@@ -146,6 +146,23 @@ func TestRenderToolFeedbackBranches(t *testing.T) {
 	}
 }
 
+func TestRenderToolFeedbackPendingApprovalBranch(t *testing.T) {
+	runner := NewRunner(Options{})
+	var out bytes.Buffer
+
+	runner.renderToolFeedback(&out, "run_shell", `{"ok":false,"error":"permission_denied: shell command was not run because approval was denied","status":"denied","reason_code":"permission_denied"}`)
+
+	got := out.String()
+	for _, want := range []string{"pending approval", "approval was denied"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, got)
+		}
+	}
+	if strings.Contains(got, "permission_denied:") {
+		t.Fatalf("expected reason_code prefix to be trimmed, got %q", got)
+	}
+}
+
 func TestRenderToolFeedbackAdditionalBranches(t *testing.T) {
 	runner := NewRunner(Options{})
 	var out bytes.Buffer

@@ -46,3 +46,23 @@ func TestTaskReportJSONAndEmpty(t *testing.T) {
 		t.Fatalf("expected executed payload in JSON, got %q", got)
 	}
 }
+
+func TestTaskReportHumanSummaryIncludesPendingApproval(t *testing.T) {
+	report := TaskReport{
+		Executed:               []string{"read_file"},
+		Denied:                 []string{"write_file"},
+		PendingApproval:        []string{"write_file"},
+		SkippedDueToDependency: []string{"update_plan"},
+	}
+	text := report.HumanSummary()
+	for _, want := range []string{
+		"- Executed: read_file",
+		"- Denied: write_file",
+		"- Pending approval: write_file",
+		"- Skipped due to denied dependency: update_plan",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected human summary to contain %q, got %q", want, text)
+		}
+	}
+}

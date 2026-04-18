@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -41,6 +42,29 @@ func (r TaskReport) JSON() string {
 		return "{}"
 	}
 	return string(payload)
+}
+
+func (r TaskReport) HumanSummary() string {
+	lines := r.HumanSummaryLines()
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (r TaskReport) HumanSummaryLines() []string {
+	lines := make([]string, 0, 4)
+	appendLine := func(label string, items []string) {
+		if len(items) == 0 {
+			return
+		}
+		lines = append(lines, fmt.Sprintf("- %s: %s", label, strings.Join(items, ", ")))
+	}
+	appendLine("Executed", r.Executed)
+	appendLine("Denied", r.Denied)
+	appendLine("Pending approval", r.PendingApproval)
+	appendLine("Skipped due to denied dependency", r.SkippedDueToDependency)
+	return lines
 }
 
 func (r *TaskReport) appendUnique(target *[]string, name string) {

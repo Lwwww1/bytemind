@@ -705,6 +705,10 @@ func TestRunPromptAwayFailFastStopsAfterPermissionDenied(t *testing.T) {
 		t.Fatalf("expected fail_fast stop reason, got %v", err)
 	}
 	for _, want := range []string{
+		"Task report summary:",
+		"- Pending approval: write_file",
+		"- Skipped due to denied dependency: read_file",
+		"Task report (json):",
 		`"denied":["write_file"]`,
 		`"pending_approval":["write_file"]`,
 		`"skipped_due_to_dependency":["read_file"]`,

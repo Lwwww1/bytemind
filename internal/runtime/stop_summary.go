@@ -34,7 +34,12 @@ func BuildStopSummary(in StopSummaryInput) string {
 		}
 	}
 	if in.TaskReport != nil && !in.TaskReport.IsEmpty() {
-		builder.WriteString("\nTask report:\n")
+		builder.WriteString("\nTask report summary:\n")
+		if human := strings.TrimSpace(in.TaskReport.HumanSummary()); human != "" {
+			builder.WriteString(human)
+			builder.WriteString("\n")
+		}
+		builder.WriteString("Task report (json):\n")
 		builder.WriteString(in.TaskReport.JSON())
 		builder.WriteString("\n")
 	}

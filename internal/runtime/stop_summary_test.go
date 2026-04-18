@@ -58,7 +58,10 @@ func TestBuildStopSummaryIncludesTaskReportWhenPresent(t *testing.T) {
 		TaskReport: report,
 	})
 	for _, want := range []string{
-		"Task report:",
+		"Task report summary:",
+		"- Pending approval: write_file",
+		"- Skipped due to denied dependency: update_plan",
+		"Task report (json):",
 		`"executed":["read_file"]`,
 		`"denied":["write_file"]`,
 		`"pending_approval":["write_file"]`,

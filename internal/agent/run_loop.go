@@ -39,7 +39,11 @@ func (r *Runner) runPromptTurns(ctx context.Context, sess *session.Session, setu
 		})
 		if err != nil {
 			if !taskReport.IsEmpty() {
-				return "", fmt.Errorf("%w\nTask report:\n%s", err, taskReport.JSON())
+				human := taskReport.HumanSummary()
+				if human != "" {
+					return "", fmt.Errorf("%w\nTask report summary:\n%s\nTask report (json):\n%s", err, human, taskReport.JSON())
+				}
+				return "", fmt.Errorf("%w\nTask report (json):\n%s", err, taskReport.JSON())
 			}
 			return "", err
 		}

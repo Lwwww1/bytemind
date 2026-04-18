@@ -70,12 +70,12 @@ func TestApplyLongPastedTextPipelineCompressesSplitPasteChunks(t *testing.T) {
 	m.handleInputMutation(before, after, "paste")
 
 	got := m.input.Value()
-	re := regexp.MustCompile(`^\[Paste #\d+ ~\d+ lines\]$`)
+	re := regexp.MustCompile(`^(?:\s*\[Paste #\d+ ~\d+ lines\]\s*){2}$`)
 	if !re.MatchString(got) {
-		t.Fatalf("expected split paste to compress into marker, got %q", got)
+		t.Fatalf("expected split explicit paste boundaries to produce two markers, got %q", got)
 	}
-	if len(m.pastedContents) != 1 {
-		t.Fatalf("expected one stored pasted content after split paste, got %d", len(m.pastedContents))
+	if len(m.pastedContents) != 2 {
+		t.Fatalf("expected two stored pasted content entries after split explicit paste, got %d", len(m.pastedContents))
 	}
 }
 
@@ -182,9 +182,9 @@ func TestApplyLongPastedTextPipelineCompressesTailAfterMarkerIntoNewMarker(t *te
 	m.handleInputMutation(before, after, "paste")
 
 	got := m.input.Value()
-	re := regexp.MustCompile(`^\[Paste #\d+ ~\d+ lines\]$`)
+	re := regexp.MustCompile(`^(?:\s*\[Paste #\d+ ~\d+ lines\]\s*){2}$`)
 	if !re.MatchString(got) {
-		t.Fatalf("expected immediate followup paste chunk to merge into latest marker, got %q", got)
+		t.Fatalf("expected followup explicit paste to create a new marker, got %q", got)
 	}
 }
 
@@ -953,12 +953,18 @@ func TestProtectCompressedMarkerChainBackspaceDeletesLatestMarkerInChain(t *test
 	}
 }
 
-func TestShouldMergeIntoLatestMarkerAllowsFastPasteChunks(t *testing.T) {
+func TestShouldMergeIntoLatestMarkerSkipsExplicitPasteBoundaries(t *testing.T) {
 	now := time.Now()
-	if !shouldMergeIntoLatestMarker("paste", now.Add(-80*time.Millisecond)) {
-		t.Fatalf("expected immediate paste chunk to merge into latest marker")
+	if shouldMergeIntoLatestMarker("paste", now.Add(-80*time.Millisecond)) {
+		t.Fatalf("expected explicit paste chunk not to merge into latest marker")
 	}
-	if shouldMergeIntoLatestMarker("paste", now.Add(-900*time.Millisecond)) {
-		t.Fatalf("expected delayed paste chunk not to merge into latest marker")
+	if shouldMergeIntoLatestMarker("ctrl+v", now.Add(-80*time.Millisecond)) {
+		t.Fatalf("expected explicit ctrl+v chunk not to merge into latest marker")
+	}
+	if !shouldMergeIntoLatestMarker("rune", now.Add(-120*time.Millisecond)) {
+		t.Fatalf("expected immediate non-paste rune chunk to merge into latest marker")
+	}
+	if shouldMergeIntoLatestMarker("rune", now.Add(-900*time.Millisecond)) {
+		t.Fatalf("expected delayed non-paste chunk not to merge into latest marker")
 	}
 }

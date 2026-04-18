@@ -2133,8 +2133,17 @@ func TestPasteMsgTransactionConsumesEchoedPlainKeyStream(t *testing.T) {
 	if len(updated.chatItems) != 0 {
 		t.Fatalf("expected echoed paste stream not to submit, got %d items", len(updated.chatItems))
 	}
+	if !updated.pasteTransaction.Active {
+		t.Fatalf("expected paste transaction to stay active briefly to guard trailing enter echo")
+	}
+
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = got.(model)
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected trailing enter echo to be consumed, got %d items", len(updated.chatItems))
+	}
 	if updated.pasteTransaction.Active {
-		t.Fatalf("expected paste transaction to clear after payload echo is consumed")
+		t.Fatalf("expected paste transaction to clear after trailing enter echo is consumed")
 	}
 
 	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
@@ -2168,8 +2177,17 @@ func TestPasteKeyTransactionConsumesEchoedPlainKeyStream(t *testing.T) {
 	if len(updated.chatItems) != 0 {
 		t.Fatalf("expected echoed plain stream not to submit, got %d items", len(updated.chatItems))
 	}
+	if !updated.pasteTransaction.Active {
+		t.Fatalf("expected paste transaction to stay active briefly to guard trailing enter echo")
+	}
+
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = got.(model)
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected trailing enter echo to be consumed, got %d items", len(updated.chatItems))
+	}
 	if updated.pasteTransaction.Active {
-		t.Fatalf("expected paste transaction to clear after full payload echo")
+		t.Fatalf("expected paste transaction to clear after trailing enter echo")
 	}
 }
 
@@ -2205,14 +2223,61 @@ func TestPasteKeyTransactionAccumulatesSplitPasteFragmentsForEchoConsumption(t *
 	if len(updated.chatItems) != 0 {
 		t.Fatalf("expected echoed plain stream not to submit, got %d items", len(updated.chatItems))
 	}
+	if !updated.pasteTransaction.Active {
+		t.Fatalf("expected transaction to stay active briefly to guard trailing enter echo")
+	}
+
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = got.(model)
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected trailing enter echo to be consumed, got %d items", len(updated.chatItems))
+	}
 	if updated.pasteTransaction.Active {
-		t.Fatalf("expected transaction to clear after split payload echo is consumed")
+		t.Fatalf("expected transaction to clear after trailing enter echo is consumed")
 	}
 
 	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	updated = got.(model)
 	if len(updated.chatItems) == 0 {
 		t.Fatalf("expected enter after split-transaction completion to submit")
+	}
+}
+
+func TestPasteKeySecondPasteStartsNewBoundaryAfterAppendWindow(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+
+	first := strings.Join([]string{
+		"first block line 1",
+		"first block line 2",
+		"first block line 3",
+		"first block line 4",
+	}, "\n")
+	second := strings.Join([]string{
+		"second block line 1",
+		"second block line 2",
+		"second block line 3",
+		"second block line 4",
+	}, "\n")
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(first), Paste: true})
+	updated := got.(model)
+	if strings.Count(updated.input.Value(), "[Paste #") != 1 {
+		t.Fatalf("expected first paste-key boundary to create one marker, got %q", updated.input.Value())
+	}
+
+	// Simulate a user-triggered second paste after the first boundary has aged
+	// out. This should start a new transaction instead of appending payload.
+	updated.pasteTransaction.StartedAt = time.Now().Add(-2 * pasteTransactionAppendWindow)
+	updated.pasteTransaction.LastEchoAt = time.Now().Add(-2 * pasteTransactionAppendWindow)
+
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(second), Paste: true})
+	updated = got.(model)
+	if strings.Count(updated.input.Value(), "[Paste #") < 2 {
+		t.Fatalf("expected second paste-key boundary to create another marker, got %q", updated.input.Value())
+	}
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected second paste-key boundary not to submit, got %d chat items", len(updated.chatItems))
 	}
 }
 
@@ -2262,8 +2327,179 @@ func TestCtrlVTextTransactionIgnoresControlMarkerEcho(t *testing.T) {
 	if len(updated.chatItems) != 0 {
 		t.Fatalf("expected echoed ctrl+v stream not to submit, got %d items", len(updated.chatItems))
 	}
+	if !updated.pasteTransaction.Active {
+		t.Fatalf("expected transaction to stay active briefly to guard trailing enter echo")
+	}
+
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = got.(model)
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected trailing enter echo to be consumed, got %d items", len(updated.chatItems))
+	}
 	if updated.pasteTransaction.Active {
-		t.Fatalf("expected transaction to clear after payload echo is consumed")
+		t.Fatalf("expected transaction to clear after trailing enter echo is consumed")
+	}
+}
+
+func TestCtrlVAllowsSecondPasteAfterStaleTransaction(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	m.clipboard = fakeClipboardImageReader{
+		err: errors.New("clipboard backend unavailable"),
+	}
+	m.clipboardRead = fakeClipboardTextReader{
+		text: strings.Join([]string{
+			"first block line 1",
+			"first block line 2",
+			"first block line 3",
+			"first block line 4",
+		}, "\n"),
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlV})
+	updated := got.(model)
+	if !updated.pasteTransaction.Active {
+		t.Fatalf("expected first ctrl+v to start paste transaction")
+	}
+	beforeSecond := updated.input.Value()
+	if len(updated.pastedOrder) == 0 {
+		t.Fatalf("expected first ctrl+v to create compressed paste entry")
+	}
+
+	// Simulate a terminal that does not emit plain-key echo for this paste.
+	// The next Ctrl+V should be treated as a fresh paste, not swallowed forever.
+	updated.pasteTransaction.StartedAt = time.Now().Add(-2 * pasteCtrlVControlEchoWindow)
+	updated.clipboardRead = fakeClipboardTextReader{
+		text: strings.Join([]string{
+			"second block line 1",
+			"second block line 2",
+			"second block line 3",
+			"second block line 4",
+		}, "\n"),
+	}
+
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyCtrlV})
+	updated = got.(model)
+
+	if updated.input.Value() == beforeSecond {
+		t.Fatalf("expected second ctrl+v to be handled, input stayed unchanged: %q", updated.input.Value())
+	}
+	if len(updated.pastedOrder) == 0 {
+		t.Fatalf("expected second ctrl+v to keep compressed paste entry state")
+	}
+	latestID := updated.pastedOrder[len(updated.pastedOrder)-1]
+	latest, ok := updated.findPastedContent(latestID)
+	if !ok {
+		t.Fatalf("expected latest pasted content to be available")
+	}
+	if !strings.Contains(latest.Content, "second block line 4") {
+		t.Fatalf("expected latest pasted content to include second block text, got %q", latest.Content)
+	}
+}
+
+func TestCtrlVMarkerRuneAllowsSecondPasteAfterStaleTransaction(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	m.clipboard = fakeClipboardImageReader{
+		err: errors.New("clipboard backend unavailable"),
+	}
+	m.clipboardRead = fakeClipboardTextReader{
+		text: strings.Join([]string{
+			"first block line 1",
+			"first block line 2",
+			"first block line 3",
+			"first block line 4",
+		}, "\n"),
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlV})
+	updated := got.(model)
+	if strings.Count(updated.input.Value(), "[Paste #") != 1 {
+		t.Fatalf("expected first ctrl+v to create one marker, got %q", updated.input.Value())
+	}
+
+	// Some terminals surface Ctrl+V as a control marker rune (\x16) instead of
+	// tea.KeyCtrlV. When transaction state is stale, this should start a fresh
+	// paste boundary rather than being swallowed as echo noise.
+	updated.pasteTransaction.StartedAt = time.Now().Add(-2 * pasteCtrlVControlEchoWindow)
+	updated.pasteTransaction.LastEchoAt = time.Now().Add(-2 * pasteCtrlVControlEchoWindow)
+	updated.clipboardRead = fakeClipboardTextReader{
+		text: strings.Join([]string{
+			"second block line 1",
+			"second block line 2",
+			"second block line 3",
+			"second block line 4",
+		}, "\n"),
+	}
+
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\x16'}})
+	updated = got.(model)
+	if strings.Count(updated.input.Value(), "[Paste #") < 2 {
+		t.Fatalf("expected second ctrl+v marker-rune paste to create another marker, got %q", updated.input.Value())
+	}
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected second ctrl+v marker-rune paste not to submit, got %d chat items", len(updated.chatItems))
+	}
+}
+
+func TestSecondCtrlVPasteEchoTrailingEnterDoesNotAutoSubmit(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	m.clipboard = fakeClipboardImageReader{
+		err: errors.New("clipboard backend unavailable"),
+	}
+	first := strings.Join([]string{
+		"first block line 1",
+		"first block line 2",
+		"first block line 3",
+		"first block line 4",
+	}, "\n")
+	second := strings.Join([]string{
+		"second block line 1",
+		"second block line 2",
+		"second block line 3",
+		"second block line 4",
+	}, "\n")
+
+	m.clipboardRead = fakeClipboardTextReader{text: first}
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlV})
+	updated := got.(model)
+	if strings.Count(updated.input.Value(), "[Paste #") != 1 {
+		t.Fatalf("expected first ctrl+v to create one marker, got %q", updated.input.Value())
+	}
+
+	updated.pasteTransaction.StartedAt = time.Now().Add(-2 * pasteCtrlVControlEchoWindow)
+	updated.clipboardRead = fakeClipboardTextReader{text: second}
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyCtrlV})
+	updated = got.(model)
+
+	if strings.Count(updated.input.Value(), "[Paste #") < 2 {
+		t.Fatalf("expected second ctrl+v to create another marker, got %q", updated.input.Value())
+	}
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected second paste not to submit, got %d chat items", len(updated.chatItems))
+	}
+	afterSecondPaste := updated.input.Value()
+
+	for i, line := range strings.Split(second, "\n") {
+		if strings.TrimSpace(line) != "" {
+			got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(line)})
+			updated = got.(model)
+		}
+		if i < len(strings.Split(second, "\n"))-1 {
+			got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+			updated = got.(model)
+		}
+	}
+	// Some terminals emit an extra trailing Enter after echoed paste payload.
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = got.(model)
+
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected trailing echoed enter not to submit, got %d chat items", len(updated.chatItems))
+	}
+	if updated.input.Value() != afterSecondPaste {
+		t.Fatalf("expected markers to remain unchanged after echoed stream, got %q", updated.input.Value())
 	}
 }
 
@@ -2665,6 +2901,89 @@ func TestClipboardCaptureConsumesTrailingEnterEchoAndDoesNotAutoSubmit(t *testin
 	updated = got.(model)
 	if len(updated.chatItems) == 0 {
 		t.Fatalf("expected second enter to submit marker prompt")
+	}
+}
+
+func TestSecondClipboardCaptureAfterExistingMarkerDoesNotAutoSubmitAndCreatesSecondMarker(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	m.clipboard = fakeClipboardImageReader{
+		err: errors.New("clipboard backend unavailable"),
+	}
+
+	first := strings.Join([]string{
+		"first block line 1",
+		"first block line 2",
+		"first block line 3",
+		"first block line 4",
+	}, "\n")
+	second := strings.Join([]string{
+		"second block line 1",
+		"second block line 2",
+		"second block line 3",
+		"second block line 4",
+	}, "\n")
+
+	// First explicit paste boundary: turns into marker #1.
+	m.clipboardRead = fakeClipboardTextReader{text: first}
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlV})
+	firstPaste := got.(model)
+	if strings.Count(firstPaste.input.Value(), "[Paste #") != 1 {
+		t.Fatalf("expected first paste to create one marker, got %q", firstPaste.input.Value())
+	}
+	if len(firstPaste.chatItems) != 0 {
+		t.Fatalf("expected first paste not to submit, got %d chat items", len(firstPaste.chatItems))
+	}
+
+	// Second paste arrives as plain rune stream (terminal echo path), not as
+	// msg.Paste boundary. It should still be captured and summarized into
+	// marker #2 even though marker #1 already exists in input.
+	firstPaste.clipboardRead = fakeClipboardTextReader{text: second}
+	next := &firstPaste
+	lines := strings.Split(second, "\n")
+	prevItems := len(next.chatItems)
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			for _, r := range line {
+				got, _ := next.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+				updated := got.(model)
+				if len(updated.chatItems) > prevItems {
+					t.Fatalf("unexpected submit during rune echo %q at line %d: tx active=%v consumed=%d input=%q",
+						string(r), i, updated.pasteTransaction.Active, updated.pasteTransaction.Consumed, updated.input.Value())
+				}
+				next = &updated
+				prevItems = len(updated.chatItems)
+			}
+		}
+		if i < len(lines)-1 {
+			got, _ := next.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+			updated := got.(model)
+			if len(updated.chatItems) > prevItems {
+				t.Fatalf("unexpected submit during line-enter echo at line %d: tx active=%v consumed=%d input=%q",
+					i, updated.pasteTransaction.Active, updated.pasteTransaction.Consumed, updated.input.Value())
+			}
+			next = &updated
+			prevItems = len(updated.chatItems)
+		}
+	}
+	if strings.Count(next.input.Value(), "[Paste #") < 2 {
+		t.Fatalf("expected second paste to create another marker before trailing enter, got %q", next.input.Value())
+	}
+	if len(next.chatItems) != 0 {
+		t.Fatalf("expected second paste stream not to submit before trailing enter, got %d items", len(next.chatItems))
+	}
+	if !next.pasteTransaction.Active {
+		t.Fatalf("expected second clipboard capture transaction to remain active before trailing enter")
+	}
+
+	// Simulate terminal trailing enter echo after second paste stream.
+	got, _ = next.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	afterEcho := got.(model)
+	if len(afterEcho.chatItems) != 0 {
+		t.Fatalf("expected trailing enter echo not to submit, got %d chat items", len(afterEcho.chatItems))
+	}
+	if strings.Count(afterEcho.input.Value(), "[Paste #") < 2 {
+		t.Fatalf("expected second paste to create another marker, got %q", afterEcho.input.Value())
 	}
 }
 
@@ -5802,7 +6121,7 @@ func TestUpdatePasteMsgCompressesLongTextImmediately(t *testing.T) {
 	}
 }
 
-func TestUpdatePasteMsgAllowsImmediateEnterSubmit(t *testing.T) {
+func TestUpdatePasteMsgRequiresSecondEnterSubmit(t *testing.T) {
 	m := newImagePipelineModel(t)
 	m.screen = screenChat
 	longPaste := strings.Join([]string{
@@ -5813,13 +6132,19 @@ func TestUpdatePasteMsgAllowsImmediateEnterSubmit(t *testing.T) {
 	got, _ := m.handlePastePayload(longPaste + "\r\n")
 	afterPaste := got.(model)
 	got, _ = afterPaste.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	afterEnter := got.(model)
+	afterFirstEnter := got.(model)
 
-	if len(afterEnter.chatItems) == 0 {
-		t.Fatalf("expected immediate enter after paste to submit")
+	if len(afterFirstEnter.chatItems) != 0 {
+		t.Fatalf("expected first enter after paste to be consumed, got %d chat items", len(afterFirstEnter.chatItems))
 	}
-	if !strings.Contains(afterEnter.chatItems[0].Body, "[Paste #") {
-		t.Fatalf("expected submitted body to include compressed marker, got %q", afterEnter.chatItems[0].Body)
+
+	got, _ = afterFirstEnter.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	afterSecondEnter := got.(model)
+	if len(afterSecondEnter.chatItems) == 0 {
+		t.Fatalf("expected second enter after paste to submit")
+	}
+	if !strings.Contains(afterSecondEnter.chatItems[0].Body, "[Paste #") {
+		t.Fatalf("expected submitted body to include compressed marker, got %q", afterSecondEnter.chatItems[0].Body)
 	}
 }
 

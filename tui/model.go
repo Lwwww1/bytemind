@@ -223,6 +223,8 @@ type pasteTransactionState struct {
 	Source             string
 	Payload            string
 	Consumed           int
+	StartedAt          time.Time
+	LastEchoAt         time.Time
 	AwaitTrailingEnter bool
 }
 

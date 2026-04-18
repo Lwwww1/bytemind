@@ -172,11 +172,8 @@ func (m *model) tryStartClipboardPasteCapture(before, after, source string) (str
 	if isPasteLikeSource(source) || m.pasteTransaction.Active {
 		return after, "", false
 	}
-	if strings.Contains(after, "[Paste #") || strings.Contains(after, "[Pasted #") {
-		return after, "", false
-	}
 	trimmedAfter := strings.TrimSpace(after)
-	if trimmedAfter == "" || strings.HasPrefix(trimmedAfter, "/") {
+	if trimmedAfter == "" {
 		return after, "", false
 	}
 
@@ -184,29 +181,53 @@ func (m *model) tryStartClipboardPasteCapture(before, after, source string) (str
 	if !ok || !m.isLongPastedText(clipboardText) {
 		return after, "", false
 	}
-	normalizedBefore := normalizeNewlines(before)
-	normalizedAfter := normalizeNewlines(after)
+	prefix, inserted, suffix := insertionDiff(before, after)
+	inserted = strings.ReplaceAll(inserted, ctrlVMarkerRune, "")
+	normalizedInserted := normalizeNewlines(inserted)
+
 	normalizedClipboard := normalizeNewlines(clipboardText)
 	if strings.TrimSpace(normalizedClipboard) == "" {
 		return after, "", false
 	}
-	if normalizedBefore != "" && !strings.HasPrefix(normalizedClipboard, normalizedBefore) {
+	var buildReplacement func(marker string) string
+	consumedRunes := 0
+	insertedRunes := len([]rune(normalizedInserted))
+	if normalizedInserted != "" &&
+		insertedRunes >= clipboardCaptureMinPrefixRunes &&
+		strings.HasPrefix(normalizedClipboard, normalizedInserted) {
+		consumedRunes = insertedRunes
+		buildReplacement = func(marker string) string {
+			return after[:prefix] + marker + after[len(after)-suffix:]
+		}
+	} else {
+		normalizedBefore := normalizeNewlines(strings.ReplaceAll(before, ctrlVMarkerRune, ""))
+		normalizedAfter := normalizeNewlines(strings.ReplaceAll(after, ctrlVMarkerRune, ""))
+		beforeMatched := longestClipboardPrefixSuffixLen(normalizedBefore, normalizedClipboard)
+		afterMatched := longestClipboardPrefixSuffixLen(normalizedAfter, normalizedClipboard)
+		if afterMatched < clipboardCaptureMinPrefixRunes || afterMatched <= beforeMatched {
+			return after, "", false
+		}
+		afterRunes := []rune(after)
+		if afterMatched > len(afterRunes) {
+			return after, "", false
+		}
+		consumedRunes = afterMatched
+		buildReplacement = func(marker string) string {
+			return string(afterRunes[:len(afterRunes)-afterMatched]) + marker
+		}
+	}
+	if buildReplacement == nil {
 		return after, "", false
 	}
-	if !strings.HasPrefix(normalizedClipboard, normalizedAfter) {
-		return after, "", false
-	}
-	if len([]rune(strings.TrimSpace(normalizedAfter))) < clipboardCaptureMinPrefixRunes {
-		return after, "", false
-	}
-
 	marker, content, err := m.compressPastedText(normalizedClipboard)
 	if err != nil {
 		return after, err.Error(), false
 	}
+	replacement := buildReplacement(marker)
+
 	m.beginPasteTransaction(normalizedClipboard, "clipboard-capture")
 	if m.pasteTransaction.Active {
-		consumed := len([]rune(normalizedAfter))
+		consumed := consumedRunes
 		total := len([]rune(m.pasteTransaction.Payload))
 		if consumed > total {
 			consumed = total
@@ -217,7 +238,7 @@ func (m *model) tryStartClipboardPasteCapture(before, after, source string) (str
 	}
 	note := fmt.Sprintf("Detected clipboard paste and compressed it as %s (%d lines).",
 		marker, content.Lines)
-	return marker, note, true
+	return replacement, note, true
 }
 
 func (m *model) shouldTreatEnterAsClipboardPasteContinuation(raw string) bool {
@@ -253,6 +274,25 @@ func (m *model) shouldTreatEnterAsClipboardPasteContinuation(raw string) bool {
 		return false
 	}
 	return clipboardRunes[matchLen] == '\n'
+}
+
+func (m *model) isLikelyClipboardPrefixTail(rawTail string) bool {
+	if m == nil {
+		return false
+	}
+	normalizedTail := normalizeNewlines(strings.ReplaceAll(rawTail, ctrlVMarkerRune, ""))
+	if normalizedTail == "" {
+		return false
+	}
+	clipboardText, ok := m.readClipboardTextForPaste()
+	if !ok || !m.isLongPastedText(clipboardText) {
+		return false
+	}
+	normalizedClipboard := normalizeNewlines(clipboardText)
+	if strings.TrimSpace(normalizedClipboard) == "" {
+		return false
+	}
+	return strings.HasPrefix(normalizedClipboard, normalizedTail)
 }
 
 func longestClipboardPrefixSuffixLen(raw, clipboard string) int {
@@ -626,7 +666,9 @@ func (m *model) applyLongPastedTextPipeline(before, after, source string) (strin
 					len(extractInlineImagePathSpans(tail)) == 0
 				// Some terminals split one clipboard paste into multiple non-paste rune bursts.
 				// Merge those bursts into the latest marker to avoid leaking trailing raw text.
-				if safeTail && shouldMergeIntoLatestMarker(source, m.lastCompressedPasteAt) {
+				if safeTail &&
+					!m.isLikelyClipboardPrefixTail(rawTail) &&
+					shouldMergeIntoLatestMarker(source, m.lastCompressedPasteAt) {
 					merged, ok, err := m.mergeTailIntoLatestMarker(chain, rawTail)
 					if err != nil {
 						return after, err.Error()
@@ -645,7 +687,8 @@ func (m *model) applyLongPastedTextPipeline(before, after, source string) (strin
 						marker, content.Lines)
 					return updated, note
 				}
-				if shouldHoldCompressedMarker(before, after, source, m.lastPasteAt, m.inputBurstSize) {
+				if shouldHoldCompressedMarker(before, after, source, m.lastPasteAt, m.inputBurstSize) &&
+					!m.isLikelyClipboardPrefixTail(rawTail) {
 					// Hide transient continuation tails so split paste chunks do not
 					// visibly appear/disappear before marker coalescing completes.
 					return strings.TrimSpace(chain), ""
@@ -695,8 +738,11 @@ func shouldMergeIntoLatestMarker(source string, lastCompressedAt time.Time) bool
 	if lastCompressedAt.IsZero() {
 		return false
 	}
+	source = strings.ToLower(strings.TrimSpace(source))
+	// Keep explicit paste boundaries independent, matching opencode behavior
+	// where each paste operation is represented as its own placeholder.
 	if isPasteLikeSource(source) {
-		return time.Since(lastCompressedAt) <= 300*time.Millisecond
+		return false
 	}
 	return time.Since(lastCompressedAt) <= 500*time.Millisecond
 }

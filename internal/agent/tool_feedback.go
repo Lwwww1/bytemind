@@ -21,7 +21,7 @@ func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 			fmt.Fprintf(out, "  %spending approval%s %s\n\n", ansiYellow, ansiReset, normalizeApprovalErrorMessage(envelope.Error, reasonCode))
 			return
 		}
-		if status == "skipped" || reasonCode == reasonCodeDeniedDependency {
+		if status == "skipped" || reasonCode == "denied_dependency" {
 			fmt.Fprintf(out, "  %sskipped%s %s\n\n", ansiDim, ansiReset, normalizeSkippedDependencyMessage(envelope.Error, reasonCode))
 			return
 		}

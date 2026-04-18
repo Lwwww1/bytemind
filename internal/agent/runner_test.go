@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -753,6 +754,184 @@ func TestRunPromptEncodesToolExecutionErrorsAndContinues(t *testing.T) {
 	}
 	if !strings.Contains(sess.Messages[2].Content, `"ok":false`) || !strings.Contains(sess.Messages[2].Content, `unknown tool`) {
 		t.Fatalf("expected encoded tool error payload, got %q", sess.Messages[2].Content)
+	}
+	if !strings.Contains(sess.Messages[2].Content, `"status":"error"`) || !strings.Contains(sess.Messages[2].Content, `"reason_code":"invalid_args"`) {
+		t.Fatalf("expected tool error status and reason_code, got %q", sess.Messages[2].Content)
+	}
+}
+
+func TestRunPromptAwayAutoDenyContinueKeepsRunningAfterPermissionDenied(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "call-1",
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "write_file",
+						Arguments: `{"path":"x.txt","content":"x"}`,
+					},
+				},
+				{
+					ID:   "call-2",
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "read_file",
+						Arguments: `{"path":"x.txt"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:    "assistant",
+			Content: "continued after denied approval",
+		},
+	}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:       config.ProviderConfig{Model: "test-model"},
+			MaxIterations:  4,
+			Stream:         false,
+			ApprovalPolicy: "on-request",
+			ApprovalMode:   "away",
+			AwayPolicy:     "auto_deny_continue",
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	var out bytes.Buffer
+	answer, err := runner.RunPrompt(context.Background(), sess, "trigger permission path", "build", &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "continued after denied approval" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+	if len(sess.Messages) < 4 {
+		t.Fatalf("expected tool result message, got %#v", sess.Messages)
+	}
+	toolMsg := sess.Messages[2]
+	if !strings.Contains(toolMsg.Content, `"ok":false`) || !strings.Contains(toolMsg.Content, "away mode") {
+		t.Fatalf("expected away-mode denial payload, got %q", toolMsg.Content)
+	}
+	if !strings.Contains(toolMsg.Content, `"status":"denied"`) || !strings.Contains(toolMsg.Content, `"reason_code":"permission_denied"`) {
+		t.Fatalf("expected denied status and permission reason_code, got %q", toolMsg.Content)
+	}
+	skippedMsg := sess.Messages[3]
+	if !strings.Contains(skippedMsg.Content, `"status":"skipped"`) || !strings.Contains(skippedMsg.Content, `"reason_code":"denied_dependency"`) {
+		t.Fatalf("expected skipped due dependency payload, got %q", skippedMsg.Content)
+	}
+	if !strings.Contains(skippedMsg.Content, "skipped because a prior approval-required action was denied") {
+		t.Fatalf("expected skipped message to describe denied dependency, got %q", skippedMsg.Content)
+	}
+	for _, want := range []string{
+		"Task report summary:",
+		"- Pending approval: write_file",
+		"- Skipped due to denied dependency: read_file",
+		"Task report (json):",
+		`"pending_approval":["write_file"]`,
+		`"skipped_due_to_dependency":["read_file"]`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected successful auto_deny_continue output to contain %q, got %q", want, out.String())
+		}
+	}
+}
+
+func TestRunPromptAwayFailFastStopsAfterPermissionDenied(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "call-1",
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "write_file",
+						Arguments: `{"path":"x.txt","content":"x"}`,
+					},
+				},
+				{
+					ID:   "call-2",
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "read_file",
+						Arguments: `{"path":"x.txt"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:    "assistant",
+			Content: "this reply should not be consumed",
+		},
+	}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:       config.ProviderConfig{Model: "test-model"},
+			MaxIterations:  4,
+			Stream:         false,
+			ApprovalPolicy: "on-request",
+			ApprovalMode:   "away",
+			AwayPolicy:     "fail_fast",
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "trigger permission path", "build", io.Discard)
+	if err == nil {
+		t.Fatal("expected fail_fast mode to stop run after permission denial")
+	}
+	if strings.TrimSpace(answer) != "" {
+		t.Fatalf("expected empty answer when fail_fast stops run, got %q", answer)
+	}
+	if !strings.Contains(err.Error(), "fail_fast stopped run") {
+		t.Fatalf("expected fail_fast stop reason, got %v", err)
+	}
+	for _, want := range []string{
+		"Task report summary:",
+		"- Pending approval: write_file",
+		"- Skipped due to denied dependency: read_file",
+		"Task report (json):",
+		`"denied":["write_file"]`,
+		`"pending_approval":["write_file"]`,
+		`"skipped_due_to_dependency":["read_file"]`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected fail_fast error to include task report item %q, got %v", want, err)
+		}
+	}
+	if len(sess.Messages) != 3 {
+		t.Fatalf("expected session to stop after first denied tool call, got %#v", sess.Messages)
+	}
+	if !strings.Contains(sess.Messages[2].Content, "away_policy=fail_fast") {
+		t.Fatalf("expected denied tool payload to include fail_fast policy, got %q", sess.Messages[2].Content)
+	}
+	if !strings.Contains(sess.Messages[2].Content, `"status":"denied"`) || !strings.Contains(sess.Messages[2].Content, `"reason_code":"permission_denied"`) {
+		t.Fatalf("expected denied status and reason code in fail_fast payload, got %q", sess.Messages[2].Content)
 	}
 }
 

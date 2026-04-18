@@ -355,6 +355,40 @@ func TestRenderToolFeedbackBranches(t *testing.T) {
 	}
 }
 
+func TestRenderToolFeedbackPendingApprovalBranch(t *testing.T) {
+	runner := NewRunner(Options{})
+	var out bytes.Buffer
+
+	runner.renderToolFeedback(&out, "run_shell", `{"ok":false,"error":"permission_denied: shell command was not run because approval was denied","status":"denied","reason_code":"permission_denied"}`)
+
+	got := out.String()
+	for _, want := range []string{"pending approval", "approval was denied"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, got)
+		}
+	}
+	if strings.Contains(got, "permission_denied:") {
+		t.Fatalf("expected reason_code prefix to be trimmed, got %q", got)
+	}
+}
+
+func TestRenderToolFeedbackSkippedDependencyBranch(t *testing.T) {
+	runner := NewRunner(Options{})
+	var out bytes.Buffer
+
+	runner.renderToolFeedback(&out, "read_file", `{"ok":false,"error":"denied_dependency: tool \"read_file\" was skipped because a prior approval-required action was denied in away mode","status":"skipped","reason_code":"denied_dependency"}`)
+
+	got := out.String()
+	for _, want := range []string{"skipped", "read_file", "prior approval-required action was denied"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, got)
+		}
+	}
+	if strings.Contains(got, "denied_dependency:") {
+		t.Fatalf("expected reason_code prefix to be trimmed, got %q", got)
+	}
+}
+
 func TestRenderToolFeedbackAdditionalBranches(t *testing.T) {
 	runner := NewRunner(Options{})
 	var out bytes.Buffer

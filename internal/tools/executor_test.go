@@ -356,3 +356,61 @@ func TestExecutorSkipsDestructiveApprovalWhenPolicyNever(t *testing.T) {
 		t.Fatalf("unexpected result: %q", got)
 	}
 }
+
+func TestExecutorAwayModeAutoDenySkipsDestructiveApprovalPrompt(t *testing.T) {
+	registry := &Registry{}
+	registry.Add(executorTestTool{name: "write_file", result: `{"ok":true}`})
+	executor := NewExecutor(registry)
+
+	asked := false
+	_, err := executor.Execute(context.Background(), "write_file", `{"path":"a.txt"}`, &ExecutionContext{
+		ApprovalPolicy: "on-request",
+		ApprovalMode:   "away",
+		AwayPolicy:     "auto_deny_continue",
+		Approval: func(req ApprovalRequest) (bool, error) {
+			asked = true
+			return true, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected away mode to deny destructive tool without prompting")
+	}
+	if asked {
+		t.Fatal("expected away mode to skip approval prompt handler")
+	}
+	execErr, ok := AsToolExecError(err)
+	if !ok {
+		t.Fatalf("expected ToolExecError, got %T", err)
+	}
+	if execErr.Code != ToolErrorPermissionDenied {
+		t.Fatalf("unexpected code: %s", execErr.Code)
+	}
+	if !strings.Contains(execErr.Error(), "away mode") {
+		t.Fatalf("expected away mode reason, got %v", execErr)
+	}
+}
+
+func TestExecutorAwayModeFailFastStillReturnsPermissionDeniedForDestructiveTool(t *testing.T) {
+	registry := &Registry{}
+	registry.Add(executorTestTool{name: "write_file", result: `{"ok":true}`})
+	executor := NewExecutor(registry)
+
+	_, err := executor.Execute(context.Background(), "write_file", `{"path":"a.txt"}`, &ExecutionContext{
+		ApprovalPolicy: "on-request",
+		ApprovalMode:   "away",
+		AwayPolicy:     "fail_fast",
+	})
+	if err == nil {
+		t.Fatal("expected away fail_fast to deny destructive tool")
+	}
+	execErr, ok := AsToolExecError(err)
+	if !ok {
+		t.Fatalf("expected ToolExecError, got %T", err)
+	}
+	if execErr.Code != ToolErrorPermissionDenied {
+		t.Fatalf("unexpected code: %s", execErr.Code)
+	}
+	if !strings.Contains(execErr.Error(), "away_policy=fail_fast") {
+		t.Fatalf("expected fail_fast policy in error, got %v", execErr)
+	}
+}

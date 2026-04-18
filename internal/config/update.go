@@ -76,6 +76,12 @@ func upsertProviderValues(configPath string, values map[string]string) (string, 
 	if _, ok := raw["approval_policy"]; !ok {
 		raw["approval_policy"] = "on-request"
 	}
+	if _, ok := raw["approval_mode"]; !ok {
+		raw["approval_mode"] = "interactive"
+	}
+	if _, ok := raw["away_policy"]; !ok {
+		raw["away_policy"] = "auto_deny_continue"
+	}
 	if _, ok := raw["max_iterations"]; !ok {
 		raw["max_iterations"] = 32
 	}

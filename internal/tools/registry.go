@@ -19,6 +19,8 @@ import (
 type ExecutionContext struct {
 	Workspace      string
 	ApprovalPolicy string
+	ApprovalMode   string
+	AwayPolicy     string
 	Approval       ApprovalHandler
 	Session        *session.Session
 	TaskManager    runtimepkg.TaskManager
@@ -28,6 +30,43 @@ type ExecutionContext struct {
 	Stdout         io.Writer
 	AllowedTools   map[string]struct{}
 	DeniedTools    map[string]struct{}
+}
+
+const (
+	approvalModeInteractive = "interactive"
+	approvalModeAway        = "away"
+
+	awayPolicyAutoDenyContinue = "auto_deny_continue"
+	awayPolicyFailFast         = "fail_fast"
+)
+
+func (c *ExecutionContext) isAwayMode() bool {
+	if c == nil {
+		return false
+	}
+	return c.approvalMode() == approvalModeAway
+}
+
+func (c *ExecutionContext) approvalMode() string {
+	if c == nil {
+		return approvalModeInteractive
+	}
+	mode := strings.ToLower(strings.TrimSpace(c.ApprovalMode))
+	if mode == "" {
+		return approvalModeInteractive
+	}
+	return mode
+}
+
+func (c *ExecutionContext) awayPolicy() string {
+	if c == nil {
+		return awayPolicyAutoDenyContinue
+	}
+	policy := strings.ToLower(strings.TrimSpace(c.AwayPolicy))
+	if policy == "" {
+		return awayPolicyAutoDenyContinue
+	}
+	return policy
 }
 
 type Tool interface {
@@ -60,6 +99,13 @@ func DefaultRegistry() *Registry {
 	r.mustRegisterBuiltin(UpdatePlanTool{})
 	r.mustRegisterBuiltin(RunShellTool{})
 	return r
+}
+
+// Add keeps backward compatibility with tests and call sites that used the old API.
+func (r *Registry) Add(tool Tool) {
+	if err := r.addBuiltin(tool); err != nil {
+		panic(err)
+	}
 }
 
 func (r *Registry) Register(tool Tool, opts RegisterOptions) error {

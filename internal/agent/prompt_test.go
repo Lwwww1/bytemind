@@ -19,6 +19,8 @@ func TestSystemPromptRendersMainModeSystemAndInstruction(t *testing.T) {
 	prompt := systemPrompt(PromptInput{
 		Workspace:      workspace,
 		ApprovalPolicy: "on-request",
+		ApprovalMode:   "away",
+		AwayPolicy:     "fail_fast",
 		Model:          "gpt-5.4-mini",
 		Mode:           "plan",
 		Platform:       "linux/amd64",
@@ -52,6 +54,8 @@ func TestSystemPromptRendersMainModeSystemAndInstruction(t *testing.T) {
 	assertContains(t, prompt, "model: gpt-5.4-mini")
 	assertContains(t, prompt, "mode: plan")
 	assertContains(t, prompt, "approval_policy: on-request")
+	assertContains(t, prompt, "approval_mode: away")
+	assertContains(t, prompt, "away_policy: fail_fast")
 	assertContains(t, prompt, "[Available Skills]")
 	assertContains(t, prompt, "Skills are reusable task profiles available in this session")
 	assertContains(t, prompt, "- review: Review code changes for regressions.")
@@ -87,6 +91,8 @@ func TestSystemPromptOmitsOptionalBlocksWhenEmpty(t *testing.T) {
 	assertContains(t, prompt, "- none")
 	assertContains(t, prompt, "[Available Tools]")
 	assertContains(t, prompt, "- none")
+	assertContains(t, prompt, "approval_mode: interactive")
+	assertContains(t, prompt, "away_policy: auto_deny_continue")
 	if strings.Contains(prompt, "[Instructions]") {
 		t.Fatalf("did not expect instruction block in prompt: %q", prompt)
 	}

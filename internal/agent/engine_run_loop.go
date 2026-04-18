@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	contextpkg "bytemind/internal/context"
 	corepkg "bytemind/internal/core"
@@ -20,6 +21,8 @@ func (e *defaultEngine) runPromptTurns(ctx context.Context, sess *session.Sessio
 	runner := e.runner
 	toolSequenceTracker := runtimepkg.NewToolSequenceTracker(runtimepkg.DefaultRepeatedToolSequenceThreshold)
 	executedToolNames := make([]string, 0, 16)
+	taskReport := &runtimepkg.TaskReport{}
+	approvalHandler := runner.prepareRunApprovalHandler(setup, out)
 
 	for step := 0; step < runner.config.MaxIterations; step++ {
 		messages, err := e.messagesForStep(ctx, sess, setup, step, out)
@@ -37,12 +40,15 @@ func (e *defaultEngine) runPromptTurns(ctx context.Context, sess *session.Sessio
 			DeniedTools:      setup.DeniedTools,
 			SequenceTracker:  toolSequenceTracker,
 			ExecutedTools:    &executedToolNames,
+			Approval:         approvalHandler,
+			TaskReport:       taskReport,
 			Out:              out,
 		})
 		if err != nil {
-			return "", err
+			return "", appendTaskReportToError(err, taskReport)
 		}
 		if finished {
+			writeCompletionTaskReport(out, taskReport)
 			return answer, nil
 		}
 	}
@@ -51,6 +57,7 @@ func (e *defaultEngine) runPromptTurns(ctx context.Context, sess *session.Sessio
 		SessionID:     corepkg.SessionID(sess.ID),
 		Reason:        fmt.Sprintf("I reached the current execution budget of %d turns before producing a final answer.", runner.config.MaxIterations),
 		ExecutedTools: executedToolNames,
+		TaskReport:    taskReport,
 	})
 	return e.finishWithSummary(sess, summary, out, false)
 }
@@ -111,4 +118,29 @@ func (e *defaultEngine) messagesForStep(ctx context.Context, sess *session.Sessi
 		fmt.Fprintf(out, "%scontext compacted to fit long-history budget%s\n", ansiDim, ansiReset)
 	}
 	return e.buildTurnMessages(sess, setup)
+}
+
+func appendTaskReportToError(err error, taskReport *runtimepkg.TaskReport) error {
+	if err == nil || taskReport == nil || taskReport.IsEmpty() {
+		return err
+	}
+	human := strings.TrimSpace(taskReport.HumanSummary())
+	if human != "" {
+		return fmt.Errorf("%w\nTask report summary:\n%s\nTask report (json):\n%s", err, human, taskReport.JSON())
+	}
+	return fmt.Errorf("%w\nTask report (json):\n%s", err, taskReport.JSON())
+}
+
+func writeCompletionTaskReport(out io.Writer, taskReport *runtimepkg.TaskReport) {
+	if out == nil || taskReport == nil || !taskReport.HasNonSuccessOutcomes() {
+		return
+	}
+	human := strings.TrimSpace(taskReport.HumanSummary())
+	if human == "" {
+		return
+	}
+	_, _ = io.WriteString(out, "\nTask report summary:\n")
+	_, _ = io.WriteString(out, human+"\n")
+	_, _ = io.WriteString(out, "Task report (json):\n")
+	_, _ = io.WriteString(out, taskReport.JSON()+"\n")
 }

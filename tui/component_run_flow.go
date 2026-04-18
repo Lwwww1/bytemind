@@ -196,7 +196,9 @@ func (m *model) handleAgentEvent(event Event) {
 	case EventUsageUpdated:
 		m.applyUsage(event.Usage)
 	case EventRunFinished:
-		if strings.TrimSpace(event.Content) != "" {
+		if note, ok := m.latestPendingApprovalStatusNote(); ok {
+			m.statusNote = note
+		} else if strings.TrimSpace(event.Content) != "" {
 			m.statusNote = "Run finished."
 		}
 		m.phase = "idle"

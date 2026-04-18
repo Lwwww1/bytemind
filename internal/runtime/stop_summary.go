@@ -13,6 +13,7 @@ type StopSummaryInput struct {
 	SessionID       corepkg.SessionID
 	Reason          string
 	ExecutedTools   []string
+	TaskReport      *TaskReport
 	RecentToolLimit int
 }
 
@@ -31,6 +32,16 @@ func BuildStopSummary(in StopSummaryInput) string {
 		for _, toolName := range recentTools {
 			fmt.Fprintf(&builder, "- %s\n", toolName)
 		}
+	}
+	if in.TaskReport != nil && !in.TaskReport.IsEmpty() {
+		builder.WriteString("\nTask report summary:\n")
+		if human := strings.TrimSpace(in.TaskReport.HumanSummary()); human != "" {
+			builder.WriteString(human)
+			builder.WriteString("\n")
+		}
+		builder.WriteString("Task report (json):\n")
+		builder.WriteString(in.TaskReport.JSON())
+		builder.WriteString("\n")
 	}
 
 	fmt.Fprintf(&builder, "\nYou can continue by reusing session %s with -session %s, or raise the budget with -max-iterations <n>.", in.SessionID, in.SessionID)

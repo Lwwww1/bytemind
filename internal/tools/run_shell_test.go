@@ -158,6 +158,42 @@ func TestRequireApprovalReturnsClearDenialMessage(t *testing.T) {
 	}
 }
 
+func TestRequireApprovalAwayModeAutoDenyDoesNotPrompt(t *testing.T) {
+	var out bytes.Buffer
+	err := requireApproval("go test ./...", &ExecutionContext{
+		ApprovalPolicy: "on-request",
+		ApprovalMode:   "away",
+		AwayPolicy:     "auto_deny_continue",
+		Stdin:          strings.NewReader("yes\n"),
+		Stdout:         &out,
+	})
+	if err == nil {
+		t.Fatal("expected away mode to deny approval-required shell command")
+	}
+	if out.Len() != 0 {
+		t.Fatalf("expected no prompt output in away mode, got %q", out.String())
+	}
+	if !strings.Contains(err.Error(), "away mode") {
+		t.Fatalf("expected away mode message, got %v", err)
+	}
+}
+
+func TestRequireApprovalAwayModeFailFastIncludesPolicyInError(t *testing.T) {
+	err := requireApproval("go test ./...", &ExecutionContext{
+		ApprovalPolicy: "on-request",
+		ApprovalMode:   "away",
+		AwayPolicy:     "fail_fast",
+		Stdin:          strings.NewReader(""),
+		Stdout:         &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected away mode fail_fast to deny approval-required shell command")
+	}
+	if !strings.Contains(err.Error(), "away_policy=fail_fast") {
+		t.Fatalf("expected fail_fast policy in error, got %v", err)
+	}
+}
+
 func TestResolveWindowsShellExecutablePrefersLookPathCandidate(t *testing.T) {
 	got := resolveWindowsShellExecutable(
 		func(file string) (string, error) {

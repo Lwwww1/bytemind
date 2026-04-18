@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	corepkg "bytemind/internal/core"
@@ -23,6 +25,7 @@ func (e *defaultEngine) executeToolCall(
 	out io.Writer,
 	allowedTools map[string]struct{},
 	deniedTools map[string]struct{},
+	approval tools.ApprovalHandler,
 ) error {
 	if e == nil || e.runner == nil {
 		return fmt.Errorf("agent engine is unavailable")
@@ -102,7 +105,9 @@ func (e *defaultEngine) executeToolCall(
 			output, err := runner.executor.ExecuteForMode(execCtx, runMode, call.Function.Name, call.Function.Arguments, &tools.ExecutionContext{
 				Workspace:      runner.workspace,
 				ApprovalPolicy: runner.config.ApprovalPolicy,
-				Approval:       runner.approval,
+				ApprovalMode:   runner.config.ApprovalMode,
+				AwayPolicy:     runner.config.AwayPolicy,
+				Approval:       approval,
 				Session:        sess,
 				TaskManager:    runner.taskManager,
 				Extensions:     runner.extensions,
@@ -135,9 +140,12 @@ func (e *defaultEngine) executeToolCall(
 	}
 
 	if execErr != nil {
+		status, reasonCode := classifyToolExecutionError(execErr)
 		result = marshalToolResult(map[string]any{
-			"ok":    false,
-			"error": execErr.Error(),
+			"ok":          false,
+			"error":       execErr.Error(),
+			"status":      status,
+			"reason_code": reasonCode,
 		})
 	}
 	if out != nil {
@@ -246,6 +254,7 @@ func (e *defaultEngine) handleRejectedToolCall(
 	result := marshalToolResult(map[string]any{
 		"ok":          false,
 		"error":       errorText,
+		"status":      statusDenied,
 		"decision":    decision.Decision,
 		"reason_code": decision.ReasonCode,
 	})
@@ -304,9 +313,10 @@ func (r *Runner) executeToolCall(
 	out io.Writer,
 	allowedTools map[string]struct{},
 	deniedTools map[string]struct{},
+	approval tools.ApprovalHandler,
 ) error {
 	engine := &defaultEngine{runner: r}
-	return engine.executeToolCall(ctx, sess, runMode, call, out, allowedTools, deniedTools)
+	return engine.executeToolCall(ctx, sess, runMode, call, out, allowedTools, deniedTools, approval)
 }
 
 func (r *Runner) toolSafetyClass(name string) tools.SafetyClass {
@@ -323,4 +333,34 @@ func (r *Runner) handleRejectedToolCall(
 ) error {
 	engine := &defaultEngine{runner: r}
 	return engine.handleRejectedToolCall(ctx, sess, call, out, decision)
+}
+
+func classifyToolExecutionError(err error) (status, reasonCode string) {
+	status = statusError
+	reasonCode = string(tools.ToolErrorToolFailed)
+	if err == nil {
+		return status, reasonCode
+	}
+
+	var execErr *tools.ToolExecError
+	if errors.As(err, &execErr) && execErr != nil {
+		code := strings.TrimSpace(string(execErr.Code))
+		if code != "" {
+			reasonCode = code
+		}
+		if reasonCode == reasonCodePermissionDenied {
+			status = statusDenied
+		}
+		return status, reasonCode
+	}
+
+	var runtimeErr runtimeTaskResultError
+	if errors.As(err, &runtimeErr) {
+		if code := strings.TrimSpace(runtimeErr.errorCode); code != "" {
+			reasonCode = code
+		} else {
+			reasonCode = "runtime_task_error"
+		}
+	}
+	return status, reasonCode
 }

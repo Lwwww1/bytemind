@@ -52,9 +52,6 @@ func (r *Runner) prepareRunApprovalHandler(setup runPromptSetup, out io.Writer) 
 	}
 	requestShell := hasShell && (policy == "always" || intent.Shell)
 	requestDestructive := len(destructive) > 0 && (policy == "always" || intent.Destructive)
-	if !requestShell && !requestDestructive {
-		return base
-	}
 
 	grants := runApprovalGrants{}
 	if requestShell {
@@ -77,10 +74,6 @@ func (r *Runner) prepareRunApprovalHandler(setup runPromptSetup, out io.Writer) 
 			grants.Destructive = true
 		}
 	}
-	if !grants.hasAny() {
-		return base
-	}
-
 	return func(req tools.ApprovalRequest) (bool, error) {
 		if grants.Destructive && isDestructiveToolApprovalRequest(req) {
 			return true, nil
@@ -88,7 +81,16 @@ func (r *Runner) prepareRunApprovalHandler(setup runPromptSetup, out io.Writer) 
 		if grants.Shell && isRunShellApprovalRequest(req) {
 			return true, nil
 		}
-		return base(req)
+		approved, err := base(req)
+		if err != nil || !approved {
+			return approved, err
+		}
+		if isDestructiveToolApprovalRequest(req) {
+			grants.Destructive = true
+		} else if isRunShellApprovalRequest(req) {
+			grants.Shell = true
+		}
+		return true, nil
 	}
 }
 

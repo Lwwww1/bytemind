@@ -164,3 +164,31 @@ See [docs/environment-variables.md](docs/environment-variables.md) for runtime T
 ## 📄 License
 
 MIT License
+
+## Installation (No Go required)
+
+### 0) One-line install
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/1024XEngineer/bytemind/main/scripts/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/1024XEngineer/bytemind/main/scripts/install.ps1 | iex
+```
+
+Install a specific version (example `v0.3.0`):
+
+```bash
+BYTEMIND_VERSION=v0.3.0 curl -fsSL https://raw.githubusercontent.com/1024XEngineer/bytemind/main/scripts/install.sh | bash
+```
+
+```powershell
+$env:BYTEMIND_VERSION='v0.3.0'; iwr -useb https://raw.githubusercontent.com/1024XEngineer/bytemind/main/scripts/install.ps1 | iex
+```
+
+More installation options: [docs/installation.md](docs/installation.md)

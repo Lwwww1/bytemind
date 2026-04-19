@@ -87,8 +87,11 @@ func TestToolSequenceTrackerDetectsNameOnlyRepeats(t *testing.T) {
 		t.Fatalf("unexpected first observation: %#v", one)
 	}
 	two := tracker.Observe(second)
-	if !two.ReachedThreshold {
-		t.Fatalf("expected name-only repeat threshold, got %#v", two)
+	if two.ReachedThreshold {
+		t.Fatalf("did not expect name-only repeat to reach stop threshold, got %#v", two)
+	}
+	if two.NameOnlyRepeat != 2 {
+		t.Fatalf("expected name-only repeat count to be tracked as 2, got %#v", two)
 	}
 	if two.MatchMode != "name_only" {
 		t.Fatalf("expected name_only match mode, got %#v", two)

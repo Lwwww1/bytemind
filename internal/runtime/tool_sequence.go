@@ -48,7 +48,7 @@ func (t *ToolSequenceTracker) Observe(calls []llm.ToolCall) ToolSequenceObservat
 		t.lastNameOnlySignature = nameOnly
 		t.nameOnlyRepeatCount = 1
 	}
-	reached := t.repeatCount >= t.threshold || t.nameOnlyRepeatCount >= t.threshold
+	reached := t.repeatCount >= t.threshold
 	matchMode := "exact"
 	repeatCount := t.repeatCount
 	if t.nameOnlyRepeatCount > repeatCount {
@@ -58,9 +58,6 @@ func (t *ToolSequenceTracker) Observe(calls []llm.ToolCall) ToolSequenceObservat
 	if t.repeatCount >= t.threshold {
 		repeatCount = t.repeatCount
 		matchMode = "exact"
-	} else if t.nameOnlyRepeatCount >= t.threshold {
-		repeatCount = t.nameOnlyRepeatCount
-		matchMode = "name_only"
 	}
 	return ToolSequenceObservation{
 		Signature:        signature,

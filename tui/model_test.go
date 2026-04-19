@@ -1931,6 +1931,46 @@ func TestAltVPastesClipboardImage(t *testing.T) {
 	}
 }
 
+func TestAltVUppercaseRunePastesClipboardImage(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	m.clipboard = fakeClipboardImageReader{
+		mediaType: "image/png",
+		data:      []byte("clipboard"),
+		fileName:  "clipboard.png",
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'V'}, Alt: true})
+	updated := got.(model)
+	if updated.input.Value() != "[Image #1]" {
+		t.Fatalf("expected alt+V to paste clipboard image placeholder, got %q", updated.input.Value())
+	}
+}
+
+func TestAltVPasteBypassesPasteEchoTransactionConsumption(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	m.clipboard = fakeClipboardImageReader{
+		mediaType: "image/png",
+		data:      []byte("clipboard"),
+		fileName:  "clipboard.png",
+	}
+	m.pasteTransaction = pasteTransactionState{
+		Active:             true,
+		Source:             "paste-key",
+		Payload:            "value",
+		Consumed:           0,
+		StartedAt:          time.Now(),
+		AwaitTrailingEnter: true,
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}, Alt: true})
+	updated := got.(model)
+	if updated.input.Value() != "[Image #1]" {
+		t.Fatalf("expected alt+v to paste image even when paste echo transaction is active, got %q", updated.input.Value())
+	}
+}
+
 func TestCtrlVPastesClipboardImage(t *testing.T) {
 	m := newImagePipelineModel(t)
 	m.screen = screenChat
@@ -1960,6 +2000,76 @@ func TestCtrlVControlMarkerRunePastesClipboardImage(t *testing.T) {
 	updated := got.(model)
 	if updated.input.Value() != "[Image #1]" {
 		t.Fatalf("expected ctrl+v control marker to paste clipboard image placeholder, got %q", updated.input.Value())
+	}
+}
+
+func TestBackspaceRemovesImagePlaceholderAsAtomicBlock(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	placeholder := mustIngestTestImage(t, m, "atomic-backspace")
+
+	m.input.SetValue("look " + placeholder + " now")
+	m.syncInputImageRefs(m.input.Value())
+	if _, ok := m.inputImageRefs[1]; !ok {
+		t.Fatalf("expected image placeholder to be tracked before deletion")
+	}
+
+	cursor := strings.Index(m.input.Value(), placeholder) + len(placeholder)
+	m.input.SetCursor(cursor)
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	updated := got.(model)
+	if updated.input.Value() != "look  now" {
+		t.Fatalf("expected backspace to remove whole image placeholder, got %q", updated.input.Value())
+	}
+	if strings.Contains(updated.input.Value(), "[Image #") {
+		t.Fatalf("expected no broken image placeholder text, got %q", updated.input.Value())
+	}
+	if _, ok := updated.inputImageRefs[1]; ok {
+		t.Fatalf("expected image placeholder reference to be cleared after atomic deletion")
+	}
+}
+
+func TestDeleteRemovesImagePlaceholderAsAtomicBlock(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	placeholder := mustIngestTestImage(t, m, "atomic-delete")
+
+	m.input.SetValue("look " + placeholder + " now")
+	m.syncInputImageRefs(m.input.Value())
+	if _, ok := m.inputImageRefs[1]; !ok {
+		t.Fatalf("expected image placeholder to be tracked before deletion")
+	}
+
+	cursor := strings.Index(m.input.Value(), placeholder)
+	m.input.SetCursor(cursor)
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyDelete})
+	updated := got.(model)
+	if updated.input.Value() != "look  now" {
+		t.Fatalf("expected delete to remove whole image placeholder, got %q", updated.input.Value())
+	}
+	if strings.Contains(updated.input.Value(), "[Image #") {
+		t.Fatalf("expected no broken image placeholder text, got %q", updated.input.Value())
+	}
+	if _, ok := updated.inputImageRefs[1]; ok {
+		t.Fatalf("expected image placeholder reference to be cleared after atomic deletion")
+	}
+}
+
+func TestBackspaceOutsideImagePlaceholderDoesNotTriggerAtomicDeletion(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	placeholder := mustIngestTestImage(t, m, "atomic-guard")
+
+	m.input.SetValue("x " + placeholder)
+	cursor := strings.Index(m.input.Value(), " ") + 1
+	m.input.SetCursor(cursor)
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	updated := got.(model)
+	if !strings.Contains(updated.input.Value(), placeholder) {
+		t.Fatalf("expected placeholder to remain when backspace is outside token, got %q", updated.input.Value())
 	}
 }
 

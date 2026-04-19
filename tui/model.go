@@ -264,98 +264,98 @@ type model struct {
 	input    textarea.Model
 	spinner  spinner.Model
 
-	viewportContentCache  string
-	viewportTopCache      viewportTopLookupCache
-	chatItems             []chatEntry
-	toolRuns              []toolRun
-	plan                  planpkg.State
-	sessions              []session.Summary
-	sessionLimit          int
-	sessionCursor         int
-	commandCursor         int
-	mentionCursor         int
-	screen                screenKind
-	mode                  agentMode
-	sessionsOpen          bool
-	skillsOpen            bool
-	helpOpen              bool
-	commandOpen           bool
-	mentionOpen           bool
-	promptSearchOpen      bool
-	busy                  bool
-	runStartedAt          time.Time
-	streamingIndex        int
-	statusNote            string
-	phase                 string
-	llmConnected          bool
-	approval              *approvalPrompt
-	mentionQuery          string
-	mentionToken          mention.Token
-	mentionResults        []mention.Candidate
-	mentionIndex          *mention.WorkspaceFileIndex
-	mentionRecent         map[string]int
-	mentionSeq            int
-	lastPasteAt           time.Time
-	lastInputAt           time.Time
-	inputBurstSize        int
+	viewportContentCache       string
+	viewportTopCache           viewportTopLookupCache
+	chatItems                  []chatEntry
+	toolRuns                   []toolRun
+	plan                       planpkg.State
+	sessions                   []session.Summary
+	sessionLimit               int
+	sessionCursor              int
+	commandCursor              int
+	mentionCursor              int
+	screen                     screenKind
+	mode                       agentMode
+	sessionsOpen               bool
+	skillsOpen                 bool
+	helpOpen                   bool
+	commandOpen                bool
+	mentionOpen                bool
+	promptSearchOpen           bool
+	busy                       bool
+	runStartedAt               time.Time
+	streamingIndex             int
+	statusNote                 string
+	phase                      string
+	llmConnected               bool
+	approval                   *approvalPrompt
+	mentionQuery               string
+	mentionToken               mention.Token
+	mentionResults             []mention.Candidate
+	mentionIndex               *mention.WorkspaceFileIndex
+	mentionRecent              map[string]int
+	mentionSeq                 int
+	lastPasteAt                time.Time
+	lastInputAt                time.Time
+	inputBurstSize             int
 	clipboardCaptureArmedUntil time.Time
-	chatAutoFollow        bool
-	draggingScrollbar     bool
-	scrollbarDragOffset   int
-	mouseSelecting        bool
-	mouseSelectionMouseX  int
-	mouseSelectionMouseY  int
-	mouseSelectionTickID  int
-	mouseSelectionActive  bool
-	mouseSelectionStart   viewportSelectionPoint
-	mouseSelectionEnd     viewportSelectionPoint
-	inputMouseSelecting   bool
-	inputSelectionActive  bool
-	inputSelectionStart   viewportSelectionPoint
-	inputSelectionEnd     viewportSelectionPoint
-	selectionToast        string
-	selectionToastID      int
-	tokenUsage            tokenUsageComponent
-	tokenUsedTotal        int
-	tokenBudget           int
-	tokenInput            int
-	tokenOutput           int
-	tokenContext          int
-	tokenHasOfficialUsage bool
-	tempEstimatedOutput   int
-	tokenEstimator        *realtimeTokenEstimator
-	promptHistoryLoaded   bool
-	promptHistoryLoading  bool
-	promptHistoryLoadErr  string
-	promptHistoryEntries  []history.PromptEntry
-	promptSearchMode      promptSearchMode
-	promptSearchQuery     string
-	promptSearchMatches   []history.PromptEntry
-	promptSearchCursor    int
-	promptSearchBaseInput string
-	inputImageRefs        map[int]llm.AssetID
-	inputImageMentions    map[string]llm.AssetID
-	orphanedImages        map[llm.AssetID]time.Time
-	nextImageID           int
-	pastedContents        map[string]pastedContent
-	pastedOrder           []string
-	nextPasteID           int
-	pastedStateLoaded     bool
-	lastCompressedPasteAt time.Time
-	virtualPasteParts     []virtualPastePart
-	nextVirtualPastePart  int
-	pasteTransaction      pasteTransactionState
-	clipboard             clipboardImageReader
-	clipboardRead         clipboardTextReader
-	clipboardText         clipboardTextWriter
-	runCancel             context.CancelFunc
-	pendingBTW            []string
-	interrupting          bool
-	interruptSafe         bool
-	runSeq                int
-	activeRunID           int
-	startupGuide          StartupGuide
-	mouseYOffset          int
+	chatAutoFollow             bool
+	draggingScrollbar          bool
+	scrollbarDragOffset        int
+	mouseSelecting             bool
+	mouseSelectionMouseX       int
+	mouseSelectionMouseY       int
+	mouseSelectionTickID       int
+	mouseSelectionActive       bool
+	mouseSelectionStart        viewportSelectionPoint
+	mouseSelectionEnd          viewportSelectionPoint
+	inputMouseSelecting        bool
+	inputSelectionActive       bool
+	inputSelectionStart        viewportSelectionPoint
+	inputSelectionEnd          viewportSelectionPoint
+	selectionToast             string
+	selectionToastID           int
+	tokenUsage                 tokenUsageComponent
+	tokenUsedTotal             int
+	tokenBudget                int
+	tokenInput                 int
+	tokenOutput                int
+	tokenContext               int
+	tokenHasOfficialUsage      bool
+	tempEstimatedOutput        int
+	tokenEstimator             *realtimeTokenEstimator
+	promptHistoryLoaded        bool
+	promptHistoryLoading       bool
+	promptHistoryLoadErr       string
+	promptHistoryEntries       []history.PromptEntry
+	promptSearchMode           promptSearchMode
+	promptSearchQuery          string
+	promptSearchMatches        []history.PromptEntry
+	promptSearchCursor         int
+	promptSearchBaseInput      string
+	inputImageRefs             map[int]llm.AssetID
+	inputImageMentions         map[string]llm.AssetID
+	orphanedImages             map[llm.AssetID]time.Time
+	nextImageID                int
+	pastedContents             map[string]pastedContent
+	pastedOrder                []string
+	nextPasteID                int
+	pastedStateLoaded          bool
+	lastCompressedPasteAt      time.Time
+	virtualPasteParts          []virtualPastePart
+	nextVirtualPastePart       int
+	pasteTransaction           pasteTransactionState
+	clipboard                  clipboardImageReader
+	clipboardRead              clipboardTextReader
+	clipboardText              clipboardTextWriter
+	runCancel                  context.CancelFunc
+	pendingBTW                 []string
+	interrupting               bool
+	interruptSafe              bool
+	runSeq                     int
+	activeRunID                int
+	startupGuide               StartupGuide
+	mouseYOffset               int
 }
 
 func newModel(opts Options) model {
@@ -701,6 +701,16 @@ func isCtrlVPasteKey(msg tea.KeyMsg) bool {
 	return key == "ctrl+v" || key == "ctrl+shift+v" || key == "shift+insert"
 }
 
+func isAltVImagePasteKey(msg tea.KeyMsg) bool {
+	if normalizeKeyName(msg.String()) == "alt+v" {
+		return true
+	}
+	if !msg.Alt || msg.Type != tea.KeyRunes || len(msg.Runes) != 1 {
+		return false
+	}
+	return strings.EqualFold(string(msg.Runes[0]), "v")
+}
+
 func (m model) pasteFragmentFromKey(msg tea.KeyMsg) (string, string, bool) {
 	if msg.Paste {
 		switch {
@@ -979,6 +989,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	if isAltVImagePasteKey(msg) {
+		if note := m.handleEmptyClipboardPaste(); strings.TrimSpace(note) != "" {
+			m.statusNote = note
+		}
+		m.syncInputOverlays()
+		return m, nil
+	}
+
 	if m.consumePasteEchoKey(msg) {
 		return m, nil
 	}
@@ -1032,12 +1050,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, m.loadSessionsCmd()
-	case "alt+v":
-		if note := m.handleEmptyClipboardPaste(); strings.TrimSpace(note) != "" {
-			m.statusNote = note
-		}
-		m.syncInputOverlays()
-		return m, nil
 	case "ctrl+n":
 		if !m.busy && m.screen == screenChat {
 			if err := m.newSession(); err != nil {

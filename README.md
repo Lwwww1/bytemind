@@ -165,23 +165,23 @@ See [docs/environment-variables.md](docs/environment-variables.md) for runtime T
 
 MIT License
 
-## Installation (No Go required)
+## 安装（无需 Go）
 
-### 0) One-line install
+### 0) 一键安装
 
-macOS / Linux:
+macOS / Linux：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/1024XEngineer/bytemind/main/scripts/install.sh | bash
 ```
 
-Windows PowerShell:
+Windows PowerShell：
 
 ```powershell
 iwr -useb https://raw.githubusercontent.com/1024XEngineer/bytemind/main/scripts/install.ps1 | iex
 ```
 
-Install a specific version (example `v0.3.0`):
+安装指定版本（示例 `v0.3.0`）：
 
 ```bash
 BYTEMIND_VERSION=v0.3.0 curl -fsSL https://raw.githubusercontent.com/1024XEngineer/bytemind/main/scripts/install.sh | bash
@@ -191,4 +191,4 @@ BYTEMIND_VERSION=v0.3.0 curl -fsSL https://raw.githubusercontent.com/1024XEngine
 $env:BYTEMIND_VERSION='v0.3.0'; iwr -useb https://raw.githubusercontent.com/1024XEngineer/bytemind/main/scripts/install.ps1 | iex
 ```
 
-More installation options: [docs/installation.md](docs/installation.md)
+更多安装方式见：[docs/installation.md](docs/installation.md)

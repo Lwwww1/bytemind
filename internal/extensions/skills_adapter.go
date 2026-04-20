@@ -5,12 +5,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	skillspkg "bytemind/internal/skills"
 )
 
 type skillAdapter struct {
+	mu    sync.RWMutex
 	cache map[string]cachedSkillExtension
 }
 
@@ -28,6 +30,9 @@ func (a *skillAdapter) Sync(catalog skillspkg.Catalog) []ExtensionInfo {
 	if a == nil {
 		return nil
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	seen := make(map[string]struct{}, len(catalog.Skills))
 	for _, skill := range catalog.Skills {
 		item := a.FromSkill(skill)

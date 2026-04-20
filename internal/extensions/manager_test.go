@@ -546,6 +546,64 @@ func TestDiscoverOneRejectsMissingDirectory(t *testing.T) {
 	}
 }
 
+func TestDiscoverOneAcceptsSkillMarkdownOnly(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	solo := filepath.Join(project, "solo")
+	if err := os.MkdirAll(solo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(solo, "SKILL.md"), []byte("# /solo\n\nUse this skill when needed."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManagerWithDirs(root, filepath.Join(root, "builtin"), filepath.Join(root, "user"), project)
+	item, err := mgr.(*extensionManager).discoverOne(solo)
+	if err != nil {
+		t.Fatalf("discoverOne should accept SKILL.md-only directory, got %v", err)
+	}
+	if item.ID != "skill.solo" {
+		t.Fatalf("unexpected discovered extension id: %q", item.ID)
+	}
+	if item.Name != "solo" {
+		t.Fatalf("expected name fallback to directory, got %q", item.Name)
+	}
+}
+
+func TestDiscoverOneUsesFrontmatterWhenManifestNameMissing(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	review := filepath.Join(project, "review")
+	if err := os.MkdirAll(review, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(review, "skill.json"), []byte(`{"name":"","description":"from manifest"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(review, "SKILL.md"), []byte(`---
+name: review
+allowed-tools: "read_file,search_text"
+---
+# /review
+
+Use this skill when reviewing changes.
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManagerWithDirs(root, filepath.Join(root, "builtin"), filepath.Join(root, "user"), project)
+	item, err := mgr.(*extensionManager).discoverOne(review)
+	if err != nil {
+		t.Fatalf("discoverOne should fallback to frontmatter name, got %v", err)
+	}
+	if item.ID != "skill.review" {
+		t.Fatalf("unexpected discovered extension id: %q", item.ID)
+	}
+	if item.Capabilities.Tools != 2 {
+		t.Fatalf("expected frontmatter allowed-tools to map to tool capabilities, got %#v", item.Capabilities)
+	}
+}
+
 func TestDiscoverOneIgnoresBrokenSibling(t *testing.T) {
 	root := t.TempDir()
 	project := filepath.Join(root, "project")

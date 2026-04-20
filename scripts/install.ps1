@@ -23,10 +23,38 @@ function Get-LatestReleaseTag {
 }
 
 function Resolve-Architecture {
-    $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-    switch ($arch) {
+    $arch = ""
+
+    try {
+        $runtimeInfoType = [System.Runtime.InteropServices.RuntimeInformation]
+        if ($runtimeInfoType) {
+            $osArchProperty = $runtimeInfoType.GetProperty("OSArchitecture")
+            if ($osArchProperty) {
+                $runtimeArch = $runtimeInfoType::OSArchitecture
+                if ($runtimeArch) {
+                    $arch = [string]$runtimeArch
+                }
+            }
+        }
+    }
+    catch {
+        $arch = ""
+    }
+
+    if ([string]::IsNullOrWhiteSpace($arch)) {
+        # Fallback for older Windows PowerShell / .NET where RuntimeInformation.OSArchitecture is unavailable.
+        if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+            $arch = [string]$env:PROCESSOR_ARCHITEW6432
+        }
+        else {
+            $arch = [string]$env:PROCESSOR_ARCHITECTURE
+        }
+    }
+
+    switch ($arch.ToUpperInvariant()) {
         "X64" { return "amd64" }
-        "Arm64" { return "arm64" }
+        "AMD64" { return "amd64" }
+        "ARM64" { return "arm64" }
         default { throw "Unsupported architecture: $arch" }
     }
 }

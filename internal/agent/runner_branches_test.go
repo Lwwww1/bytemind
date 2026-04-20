@@ -12,7 +12,6 @@ import (
 	"bytemind/internal/llm"
 	policypkg "bytemind/internal/policy"
 	"bytemind/internal/provider"
-	runtimepkg "bytemind/internal/runtime"
 	"bytemind/internal/session"
 	"bytemind/internal/tools"
 )
@@ -411,7 +410,7 @@ func TestRenderToolFeedbackAdditionalBranches(t *testing.T) {
 }
 
 func TestUtilityHelpersBranches(t *testing.T) {
-	if got := runtimepkg.NormalizeToolArguments("{bad"); got != "{bad" {
+	if got := NormalizeToolArguments("{bad"); got != "{bad" {
 		t.Fatalf("expected raw fallback for invalid json, got %q", got)
 	}
 	if got := emptyDot("   "); got != "." {

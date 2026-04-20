@@ -8,11 +8,11 @@ import (
 	corepkg "bytemind/internal/core"
 )
 
-type AgentMode string
+type AgentMode = corepkg.SessionMode
 
 const (
-	ModeBuild AgentMode = "build"
-	ModePlan  AgentMode = "plan"
+	ModeBuild AgentMode = corepkg.SessionModeBuild
+	ModePlan  AgentMode = corepkg.SessionModePlan
 )
 
 type Phase string
@@ -68,6 +68,8 @@ func NormalizeMode(raw string) AgentMode {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case string(ModePlan):
 		return ModePlan
+	case "default", "acceptedits", "bypasspermissions":
+		return ModeBuild
 	default:
 		return ModeBuild
 	}

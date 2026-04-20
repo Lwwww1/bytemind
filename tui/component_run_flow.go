@@ -55,6 +55,8 @@ func (m model) submitPrompt(value string) (tea.Model, tea.Cmd) {
 	}
 
 	m.input.Reset()
+	m.clearPasteTransaction()
+	m.clearVirtualPasteParts()
 	m.screen = screenChat
 	if m.promptHistoryLoaded {
 		entry := history.PromptEntry{
@@ -89,6 +91,8 @@ func (m model) submitBTW(value string) (tea.Model, tea.Cmd) {
 	}
 
 	m.input.Reset()
+	m.clearPasteTransaction()
+	m.clearVirtualPasteParts()
 	m.screen = screenChat
 	m.appendChat(chatEntry{
 		Kind:   "user",

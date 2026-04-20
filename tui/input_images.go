@@ -599,7 +599,7 @@ func (m *model) buildPromptInput(raw string) (RunPromptInput, string, error) {
 		return RunPromptInput{}, "", fmt.Errorf("prompt is empty")
 	}
 	m.syncInputImageRefs(raw)
-	resolvedRaw, err := m.resolvePastedLineReference(raw)
+	resolvedRaw, err := m.resolvePromptPastedInput(raw)
 	if err != nil {
 		return RunPromptInput{}, "", err
 	}
@@ -795,7 +795,8 @@ func (m *model) findAssetByImageID(imageID int) (llm.AssetID, session.ImageAsset
 func classifyInputMutation(before, after, source string) (inputMutationClass, int, string, int) {
 	prefix, inserted, suffix := insertionDiff(before, after)
 	cleanInserted := strings.ReplaceAll(inserted, ctrlVMarkerRune, "")
-	pasteSignal := isCtrlVKey(source) || strings.Contains(strings.ToLower(source), "paste") || strings.Contains(cleanInserted, "\n") || len(cleanInserted) > 1
+	normalizedSource := strings.ToLower(strings.TrimSpace(source))
+	pasteSignal := isCtrlVKey(source) || strings.Contains(normalizedSource, "paste")
 	if shouldTriggerClipboardImagePaste(before, after, source) {
 		return inputMutationPasteEmpty, prefix, inserted, suffix
 	}
@@ -969,6 +970,106 @@ func imageIDFromPlaceholder(value string) (int, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+type imagePlaceholderSpan struct {
+	Start int
+	End   int
+}
+
+func isImagePlaceholderDeletionSource(source string) bool {
+	key := normalizeKeyName(source)
+	return key == "backspace" || key == "delete" || key == "ctrl+h" || key == "ctrl+d"
+}
+
+func extractImagePlaceholderSpans(value string) []imagePlaceholderSpan {
+	matches := imagePlaceholderPattern.FindAllStringIndex(value, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	spans := make([]imagePlaceholderSpan, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 || match[0] >= match[1] {
+			continue
+		}
+		spans = append(spans, imagePlaceholderSpan{Start: match[0], End: match[1]})
+	}
+	return spans
+}
+
+func overlapsRange(startA, endA, startB, endB int) bool {
+	return startA < endB && startB < endA
+}
+
+func removeImagePlaceholderSpans(value string, spans []imagePlaceholderSpan) string {
+	if len(spans) == 0 {
+		return value
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].Start == spans[j].Start {
+			return spans[i].End < spans[j].End
+		}
+		return spans[i].Start < spans[j].Start
+	})
+
+	var b strings.Builder
+	cursor := 0
+	for _, span := range spans {
+		start := clamp(span.Start, 0, len(value))
+		end := clamp(span.End, start, len(value))
+		if start < cursor {
+			continue
+		}
+		if start > cursor {
+			b.WriteString(value[cursor:start])
+		}
+		cursor = end
+	}
+	if cursor < len(value) {
+		b.WriteString(value[cursor:])
+	}
+	return b.String()
+}
+
+func (m *model) protectImagePlaceholderDeletion(before, after, source string) (string, bool) {
+	if m == nil || !isImagePlaceholderDeletionSource(source) {
+		return after, false
+	}
+	if before == after || len(after) >= len(before) {
+		return after, false
+	}
+	// Restrict atomic deletion protection to single-rune delete/backspace edits.
+	if len(before)-len(after) != 1 {
+		return after, false
+	}
+	if !strings.Contains(before, "[Image #") {
+		return after, false
+	}
+
+	prefix, _, suffix := insertionDiff(before, after)
+	affectedStart := clamp(prefix, 0, len(before))
+	affectedEnd := clamp(len(before)-suffix, affectedStart, len(before))
+	if affectedEnd <= affectedStart {
+		return after, false
+	}
+
+	spans := extractImagePlaceholderSpans(before)
+	if len(spans) == 0 {
+		return after, false
+	}
+
+	toRemove := make([]imagePlaceholderSpan, 0, 1)
+	for _, span := range spans {
+		if overlapsRange(affectedStart, affectedEnd, span.Start, span.End) {
+			toRemove = append(toRemove, span)
+		}
+	}
+	if len(toRemove) == 0 {
+		return after, false
+	}
+
+	locked := removeImagePlaceholderSpans(before, toRemove)
+	return locked, locked != after
 }
 
 type mentionImageSpan struct {

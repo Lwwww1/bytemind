@@ -1,4 +1,4 @@
-# Subagent 架构设计 RFC
+# Subagent 架构设计
 
 ## 背景
 

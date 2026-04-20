@@ -17,15 +17,18 @@ const (
 )
 
 type RegisterOptions struct {
-	Source      RegistrationSource
-	ExtensionID string
+	Source       RegistrationSource
+	ExtensionID  string
+	OriginalName string
 }
 
 type RegistrationMeta struct {
-	ToolKey        string
-	Source         RegistrationSource
-	ExtensionID    string
-	ConflictPolicy string
+	ToolKey          string
+	StableToolKey    string
+	OriginalToolName string
+	Source           RegistrationSource
+	ExtensionID      string
+	ConflictPolicy   string
 }
 
 type RegistryErrorCode string
@@ -40,13 +43,14 @@ const (
 )
 
 type RegistryError struct {
-	Code         RegistryErrorCode
-	Message      string
-	ToolKey      string
-	Source       RegistrationSource
-	ExtensionID  string
-	ConflictWith RegistrationMeta
-	Cause        error
+	Code             RegistryErrorCode
+	Message          string
+	ToolKey          string
+	OriginalToolName string
+	Source           RegistrationSource
+	ExtensionID      string
+	ConflictWith     RegistrationMeta
+	Cause            error
 }
 
 func (e *RegistryError) Error() string {
@@ -88,6 +92,11 @@ func buildRegistration(tool Tool, opts RegisterOptions) (RegistrationMeta, Resol
 	meta.ToolKey = strings.TrimSpace(definition.Function.Name)
 	if meta.ToolKey == "" {
 		return RegistrationMeta{}, ResolvedTool{}, &RegistryError{Code: RegistryErrorInvalidToolKey, Message: "tool key is required", Source: meta.Source, ExtensionID: meta.ExtensionID}
+	}
+	meta.StableToolKey = meta.ToolKey
+	meta.OriginalToolName = strings.TrimSpace(opts.OriginalName)
+	if meta.OriginalToolName == "" {
+		meta.OriginalToolName = meta.ToolKey
 	}
 	definition.Function.Name = meta.ToolKey
 	if provider, ok := tool.(ToolSpecProvider); ok {

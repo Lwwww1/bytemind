@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 
-	extensionspkg "bytemind/internal/extensions"
 	"bytemind/internal/llm"
 	planpkg "bytemind/internal/plan"
 	runtimepkg "bytemind/internal/runtime"
@@ -24,12 +23,14 @@ type ExecutionContext struct {
 	Approval       ApprovalHandler
 	Session        *session.Session
 	TaskManager    runtimepkg.TaskManager
-	Extensions     extensionspkg.Manager
-	Mode           planpkg.AgentMode
-	Stdin          io.Reader
-	Stdout         io.Writer
-	AllowedTools   map[string]struct{}
-	DeniedTools    map[string]struct{}
+	// Extensions is an optional passthrough hook for callers that need extension context.
+	// It stays untyped here to keep tools/extension packages decoupled.
+	Extensions   any
+	Mode         planpkg.AgentMode
+	Stdin        io.Reader
+	Stdout       io.Writer
+	AllowedTools map[string]struct{}
+	DeniedTools  map[string]struct{}
 }
 
 const (
@@ -121,12 +122,24 @@ func (r *Registry) Register(tool Tool, opts RegisterOptions) error {
 	r.ensureMapsLocked()
 	if existingMeta, exists := r.meta[meta.ToolKey]; exists {
 		return &RegistryError{
-			Code:         RegistryErrorDuplicateName,
-			Message:      fmt.Sprintf("tool %q already registered", meta.ToolKey),
-			ToolKey:      meta.ToolKey,
-			Source:       meta.Source,
-			ExtensionID:  meta.ExtensionID,
-			ConflictWith: existingMeta,
+			Code:             RegistryErrorDuplicateName,
+			Message:          fmt.Sprintf("tool %q already registered", meta.ToolKey),
+			ToolKey:          meta.ToolKey,
+			OriginalToolName: meta.OriginalToolName,
+			Source:           meta.Source,
+			ExtensionID:      meta.ExtensionID,
+			ConflictWith:     existingMeta,
+		}
+	}
+	if conflict, exists := r.findConflictByOriginalNameLocked(meta.OriginalToolName, meta.ToolKey); exists {
+		return &RegistryError{
+			Code:             RegistryErrorDuplicateName,
+			Message:          fmt.Sprintf("tool original name %q already registered", meta.OriginalToolName),
+			ToolKey:          meta.ToolKey,
+			OriginalToolName: meta.OriginalToolName,
+			Source:           meta.Source,
+			ExtensionID:      meta.ExtensionID,
+			ConflictWith:     conflict,
 		}
 	}
 	r.tools[meta.ToolKey] = resolved
@@ -174,6 +187,26 @@ func (r *Registry) List() []ResolvedTool {
 	}
 	r.mu.RUnlock()
 	return sortedResolvedTools(snapshot, nil, nil, func(ResolvedTool) bool { return true })
+}
+
+func (r *Registry) FindByOriginalName(name string) []RegistrationMeta {
+	original := strings.TrimSpace(name)
+	if original == "" {
+		return nil
+	}
+	r.mu.RLock()
+	items := make([]RegistrationMeta, 0, len(r.meta))
+	for _, meta := range r.meta {
+		if meta.OriginalToolName != original {
+			continue
+		}
+		items = append(items, cloneRegistrationMeta(meta))
+	}
+	r.mu.RUnlock()
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].ToolKey < items[j].ToolKey
+	})
+	return items
 }
 
 func (r *Registry) Definitions() []llm.ToolDefinition {
@@ -246,6 +279,24 @@ func (r *Registry) ensureMapsLocked() {
 	}
 }
 
+func (r *Registry) findConflictByOriginalNameLocked(originalName, toolKey string) (RegistrationMeta, bool) {
+	originalName = strings.TrimSpace(originalName)
+	toolKey = strings.TrimSpace(toolKey)
+	if originalName == "" {
+		return RegistrationMeta{}, false
+	}
+	for existingKey, existingMeta := range r.meta {
+		if existingKey == toolKey {
+			continue
+		}
+		if existingMeta.OriginalToolName != originalName {
+			continue
+		}
+		return cloneRegistrationMeta(existingMeta), true
+	}
+	return RegistrationMeta{}, false
+}
+
 func sortedResolvedTools(snapshot map[string]ResolvedTool, allowlist, denylist []string, include func(ResolvedTool) bool) []ResolvedTool {
 	allowSet := toNameSet(allowlist)
 	denySet := toNameSet(denylist)
@@ -285,4 +336,15 @@ func toNameSet(items []string) map[string]struct{} {
 		result[item] = struct{}{}
 	}
 	return result
+}
+
+func cloneRegistrationMeta(meta RegistrationMeta) RegistrationMeta {
+	return RegistrationMeta{
+		ToolKey:          meta.ToolKey,
+		StableToolKey:    meta.StableToolKey,
+		OriginalToolName: meta.OriginalToolName,
+		Source:           meta.Source,
+		ExtensionID:      meta.ExtensionID,
+		ConflictPolicy:   meta.ConflictPolicy,
+	}
 }

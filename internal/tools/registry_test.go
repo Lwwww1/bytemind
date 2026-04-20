@@ -276,6 +276,36 @@ func TestRegistryListReturnsSortedSnapshot(t *testing.T) {
 	}
 }
 
+func TestRegistryFindByOriginalName(t *testing.T) {
+	registry := &Registry{}
+	if err := registry.Register(testTool{name: "alpha_tool"}, RegisterOptions{Source: RegistrationSourceBuiltin}); err != nil {
+		t.Fatalf("register alpha_tool failed: %v", err)
+	}
+	if err := registry.Register(testTool{name: "skill:skill_demo:open_doc"}, RegisterOptions{
+		Source:       RegistrationSourceExtension,
+		ExtensionID:  "skill.demo",
+		OriginalName: "open_doc",
+	}); err != nil {
+		t.Fatalf("register bridged tool failed: %v", err)
+	}
+	metas := registry.FindByOriginalName("open_doc")
+	if len(metas) != 1 {
+		t.Fatalf("expected one metadata record, got %d", len(metas))
+	}
+	if metas[0].ToolKey != "skill:skill_demo:open_doc" {
+		t.Fatalf("unexpected tool key: %q", metas[0].ToolKey)
+	}
+	if metas[0].OriginalToolName != "open_doc" {
+		t.Fatalf("unexpected original tool name: %q", metas[0].OriginalToolName)
+	}
+	if metas[0].Source != RegistrationSourceExtension {
+		t.Fatalf("unexpected source: %q", metas[0].Source)
+	}
+	if got := registry.FindByOriginalName("missing"); len(got) != 0 {
+		t.Fatalf("expected no metadata for missing original name, got %#v", got)
+	}
+}
+
 func TestRegistryResolveForModeRejectsUnavailableTool(t *testing.T) {
 	registry := &Registry{}
 	if err := registry.Register(invalidSpecTool{

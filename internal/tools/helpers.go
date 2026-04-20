@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,13 +42,71 @@ func resolvePath(workspace, input string, writableRoots ...string) (string, erro
 	if err != nil {
 		return "", err
 	}
+	canonicalCandidate, err := canonicalPathForAccess(absCandidate)
+	if err != nil {
+		return "", err
+	}
 
 	for _, root := range allowedRoots {
-		if isPathWithinRoot(root, absCandidate) {
+		canonicalRoot, err := canonicalPathForAccess(root)
+		if err != nil {
+			return "", err
+		}
+		if isPathWithinRoot(canonicalRoot, canonicalCandidate) {
 			return absCandidate, nil
 		}
 	}
 	return "", fmt.Errorf("permission denied: path %q escapes workspace and writable_roots", input)
+}
+
+func canonicalPathForAccess(path string) (string, error) {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" {
+		return "", fmt.Errorf("invalid empty path")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return filepath.Clean(resolved), nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	existingAncestor, missingSegments, ancestorErr := splitMissingPathSegments(path)
+	if ancestorErr != nil {
+		return "", ancestorErr
+	}
+	resolvedAncestor, err := filepath.EvalSymlinks(existingAncestor)
+	if err != nil {
+		return "", err
+	}
+	canonical := filepath.Clean(resolvedAncestor)
+	for _, segment := range missingSegments {
+		canonical = filepath.Join(canonical, segment)
+	}
+	return canonical, nil
+}
+
+func splitMissingPathSegments(path string) (existingAncestor string, missingSegments []string, err error) {
+	current := filepath.Clean(path)
+	missing := make([]string, 0, 4)
+	for {
+		_, statErr := os.Lstat(current)
+		if statErr == nil {
+			for i, j := 0, len(missing)-1; i < j; i, j = i+1, j-1 {
+				missing[i], missing[j] = missing[j], missing[i]
+			}
+			return current, missing, nil
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", nil, statErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", nil, statErr
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func resolveAllowedRoots(absWorkspace string, writableRoots []string) ([]string, error) {

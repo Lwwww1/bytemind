@@ -83,6 +83,56 @@ func TestPolicyBrokerDeniesCommandOutsideAllowlist(t *testing.T) {
 	}
 }
 
+func TestPolicyBrokerEscalatesCommandOutsideAllowlistWhenInteractiveApprovalAvailable(t *testing.T) {
+	now := time.Date(2026, 4, 20, 8, 0, 0, 0, time.UTC)
+	roots := sandboxRoots(t)
+	lease, keyring := mustSignedLease(t, now, roots)
+
+	broker := NewPolicyBroker()
+	result, err := broker.Decide(context.Background(), DecisionInput{
+		Lease:   lease,
+		Keyring: keyring,
+		Now:     now.Add(1 * time.Minute),
+		Static:  StaticPolicy{ApprovalPolicy: "on-request"},
+		Mode:    ModeContext{ApprovalMode: "interactive", ApprovalChannelAvailable: true},
+		Request: RuntimeRequest{
+			Command: "rm",
+			Args:    []string{"-rf", "."},
+		},
+	})
+	if err != nil {
+		t.Fatalf("broker decide: %v", err)
+	}
+	if result.Decision != DecisionEscalate || result.ReasonCode != ReasonApprovalRequired {
+		t.Fatalf("expected approval_required escalate, got %#v", result)
+	}
+}
+
+func TestPolicyBrokerDeniesCommandOutsideAllowlistWhenApprovalChannelUnavailable(t *testing.T) {
+	now := time.Date(2026, 4, 20, 8, 0, 0, 0, time.UTC)
+	roots := sandboxRoots(t)
+	lease, keyring := mustSignedLease(t, now, roots)
+
+	broker := NewPolicyBroker()
+	result, err := broker.Decide(context.Background(), DecisionInput{
+		Lease:   lease,
+		Keyring: keyring,
+		Now:     now.Add(1 * time.Minute),
+		Static:  StaticPolicy{ApprovalPolicy: "on-request"},
+		Mode:    ModeContext{ApprovalMode: "interactive", ApprovalChannelAvailable: false},
+		Request: RuntimeRequest{
+			Command: "rm",
+			Args:    []string{"-rf", "."},
+		},
+	})
+	if err != nil {
+		t.Fatalf("broker decide: %v", err)
+	}
+	if result.Decision != DecisionDeny || result.ReasonCode != ReasonApprovalChannelUnavailable {
+		t.Fatalf("expected approval_channel_unavailable deny, got %#v", result)
+	}
+}
+
 func TestPolicyBrokerDeniesNetworkOutsideAllowlist(t *testing.T) {
 	now := time.Date(2026, 4, 20, 8, 0, 0, 0, time.UTC)
 	roots := sandboxRoots(t)

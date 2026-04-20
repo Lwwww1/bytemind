@@ -89,28 +89,31 @@ func (defaultPolicyBroker) Decide(_ context.Context, input DecisionInput) (Decis
 			roots = input.Lease.FSWrite
 		}
 		if !pathWithinAnyRoot(request.FilePath, roots) {
-			return DecisionResult{
-				Decision:   DecisionDeny,
-				ReasonCode: ReasonFSOutOfScope,
-				Message:    "requested file path is outside lease scope",
-			}, nil
+			return boundaryDecision(
+				input,
+				ReasonFSOutOfScope,
+				"requested file path is outside lease scope",
+				true,
+			), nil
 		}
 	}
 
 	if request.Command != "" && !commandAllowedByLease(request.Command, request.Args, input.Lease.ExecAllowlist) {
-		return DecisionResult{
-			Decision:   DecisionDeny,
-			ReasonCode: ReasonExecNotAllowed,
-			Message:    "command is not allowed by lease",
-		}, nil
+		return boundaryDecision(
+			input,
+			ReasonExecNotAllowed,
+			"command is not allowed by lease",
+			true,
+		), nil
 	}
 
 	if hasNetworkTarget(request.Network) && !networkAllowedByLease(request.Network, input.Lease.NetworkAllowlist) {
-		return DecisionResult{
-			Decision:   DecisionDeny,
-			ReasonCode: ReasonNetworkNotAllowed,
-			Message:    "network target is not allowed by lease",
-		}, nil
+		return boundaryDecision(
+			input,
+			ReasonNetworkNotAllowed,
+			"network target is not allowed by lease",
+			true,
+		), nil
 	}
 
 	approvalPolicy := normalizeApprovalPolicy(input.Static.ApprovalPolicy)
@@ -150,6 +153,37 @@ func (defaultPolicyBroker) Decide(_ context.Context, input DecisionInput) (Decis
 		ReasonCode: "",
 		Message:    "operation allowed by lease",
 	}, nil
+}
+
+func boundaryDecision(input DecisionInput, boundaryReasonCode, boundaryMessage string, canEscalate bool) DecisionResult {
+	if strings.TrimSpace(input.Mode.ApprovalMode) == "" {
+		return DecisionResult{
+			Decision:   DecisionDeny,
+			ReasonCode: boundaryReasonCode,
+			Message:    boundaryMessage,
+		}
+	}
+	approvalPolicy := normalizeApprovalPolicy(input.Static.ApprovalPolicy)
+	approvalMode := normalizeApprovalMode(input.Mode.ApprovalMode)
+	if canEscalate && approvalPolicy != "never" && approvalMode == "interactive" {
+		if input.Mode.ApprovalChannelAvailable {
+			return DecisionResult{
+				Decision:   DecisionEscalate,
+				ReasonCode: ReasonApprovalRequired,
+				Message:    "operation is outside lease scope and requires explicit approval",
+			}
+		}
+		return DecisionResult{
+			Decision:   DecisionDeny,
+			ReasonCode: ReasonApprovalChannelUnavailable,
+			Message:    "approval channel is unavailable",
+		}
+	}
+	return DecisionResult{
+		Decision:   DecisionDeny,
+		ReasonCode: boundaryReasonCode,
+		Message:    boundaryMessage,
+	}
 }
 
 func leaseErrorDecision(err error) DecisionResult {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	sandboxpkg "bytemind/internal/sandbox"
@@ -160,6 +161,53 @@ func TestInProcessWorkerDeniesRunShellWhenCommandNotInAllowlist(t *testing.T) {
 	execErr, ok := AsToolExecError(err)
 	if !ok || execErr.Code != ToolErrorPermissionDenied {
 		t.Fatalf("expected permission denied tool error, got %#v", err)
+	}
+}
+
+func TestInProcessWorkerEscalatesRunShellWhenCommandNotInAllowlist(t *testing.T) {
+	registry := &Registry{}
+	called := false
+	approvalCalls := 0
+	registerBuiltinExecutorTool(t, registry, executorTestTool{
+		name: "run_shell",
+		run: func(_ context.Context, _ json.RawMessage, _ *ExecutionContext) (string, error) {
+			called = true
+			return `{"ok":true}`, nil
+		},
+	})
+	resolved, ok := registry.Get("run_shell")
+	if !ok {
+		t.Fatal("expected run_shell tool in registry")
+	}
+	worker := inProcessWorker{}
+	_, err := worker.Run(context.Background(), workerRunRequest{
+		Resolved: resolved,
+		RawArgs:  json.RawMessage(`{"command":"go test ./..."}`),
+		Execution: &ExecutionContext{
+			SandboxEnabled: true,
+			Workspace:      t.TempDir(),
+			ExecAllowlist: []sandboxpkg.ExecRule{
+				{Command: "go run", ArgsPattern: []string{"./cmd/app"}},
+			},
+			ApprovalPolicy: "on-request",
+			ApprovalMode:   "interactive",
+			Approval: func(req ApprovalRequest) (bool, error) {
+				approvalCalls++
+				if !strings.Contains(strings.ToLower(req.Reason), "outside lease scope") {
+					t.Fatalf("expected escalation reason to explain outside lease scope, got %q", req.Reason)
+				}
+				return true, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected escalation approval path to allow run, got %v", err)
+	}
+	if approvalCalls != 1 {
+		t.Fatalf("expected one approval call, got %d", approvalCalls)
+	}
+	if !called {
+		t.Fatal("expected underlying tool to run after approval")
 	}
 }
 

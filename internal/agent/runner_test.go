@@ -948,15 +948,18 @@ func TestRunPromptAwayAutoDenyContinueKeepsRunningAfterPermissionDenied(t *testi
 	}
 	for _, want := range []string{
 		"Task report summary:",
-		"- Pending approval: write_file",
 		"- Skipped due to denied dependency: read_file",
 		"Task report (json):",
-		`"pending_approval":["write_file"]`,
+		`"denied":["write_file"]`,
+		`"skipped_due_to_denied_dependency":["read_file"]`,
 		`"skipped_due_to_dependency":["read_file"]`,
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("expected successful auto_deny_continue output to contain %q, got %q", want, out.String())
 		}
+	}
+	if strings.Contains(out.String(), `"pending_approval"`) {
+		t.Fatalf("expected away-mode task report to avoid pending_approval, got %q", out.String())
 	}
 }
 
@@ -1023,16 +1026,18 @@ func TestRunPromptAwayFailFastStopsAfterPermissionDenied(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Task report summary:",
-		"- Pending approval: write_file",
 		"- Skipped due to denied dependency: read_file",
 		"Task report (json):",
 		`"denied":["write_file"]`,
-		`"pending_approval":["write_file"]`,
+		`"skipped_due_to_denied_dependency":["read_file"]`,
 		`"skipped_due_to_dependency":["read_file"]`,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("expected fail_fast error to include task report item %q, got %v", want, err)
 		}
+	}
+	if strings.Contains(err.Error(), `"pending_approval"`) {
+		t.Fatalf("expected away-mode fail_fast report to avoid pending_approval, got %v", err)
 	}
 	if len(sess.Messages) != 3 {
 		t.Fatalf("expected session to stop after first denied tool call, got %#v", sess.Messages)

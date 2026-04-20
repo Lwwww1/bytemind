@@ -178,14 +178,13 @@ func (e *defaultEngine) processTurn(ctx context.Context, p turnProcessParams) (s
 
 		if p.TaskReport != nil {
 			p.TaskReport.RecordDenied(call.Function.Name)
-			p.TaskReport.RecordPendingApproval(call.Function.Name)
 		}
 
 		remaining := reply.ToolCalls[index+1:]
 		failFast := normalizeAwayPolicy(runner.config.AwayPolicy) == awayPolicyFailFast
 		for _, skippedCall := range remaining {
 			if p.TaskReport != nil {
-				p.TaskReport.RecordSkippedDueToDependency(skippedCall.Function.Name)
+				p.TaskReport.RecordSkippedDueToDeniedDependency(skippedCall.Function.Name)
 			}
 			if failFast {
 				continue

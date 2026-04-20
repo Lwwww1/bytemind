@@ -65,6 +65,7 @@ func TestBuildStopSummaryIncludesTaskReportWhenPresent(t *testing.T) {
 		`"executed":["read_file"]`,
 		`"denied":["write_file"]`,
 		`"pending_approval":["write_file"]`,
+		`"skipped_due_to_denied_dependency":["update_plan"]`,
 		`"skipped_due_to_dependency":["update_plan"]`,
 	} {
 		if !strings.Contains(summary, want) {

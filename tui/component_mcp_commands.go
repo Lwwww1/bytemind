@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	mcpAddUsage = "usage: /mcp-add <id> --cmd <command> [--args a,b] [--env K=V]"
+	mcpAddUsage = "usage: /mcp-add <id> --cmd <command> [options]"
 )
 
 func (m *model) runMCPCommand(input string, fields []string) error {
@@ -19,7 +19,7 @@ func (m *model) runMCPCommand(input string, fields []string) error {
 		return fmt.Errorf("mcp service is unavailable")
 	}
 	if len(fields) < 2 {
-		return fmt.Errorf("usage: /mcp <list|add|remove|enable|disable|test|reload|auth> ...")
+		return fmt.Errorf("usage: /mcp <list|remove|enable|disable|test|reload|auth> ... or %s", mcpAddUsage)
 	}
 	sub := strings.ToLower(strings.TrimSpace(fields[1]))
 
@@ -109,7 +109,7 @@ func (m *model) runMCPCommand(input string, fields []string) error {
 		m.statusNote = "MCP auth guidance shown."
 		return nil
 	default:
-		return fmt.Errorf("usage: /mcp <list|add|remove|enable|disable|test|reload|auth> ...")
+		return fmt.Errorf("usage: /mcp <list|remove|enable|disable|test|reload|auth> ... or %s", mcpAddUsage)
 	}
 }
 

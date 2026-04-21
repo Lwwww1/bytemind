@@ -86,6 +86,18 @@ func TestRunMCPCommandAddRequiresCommand(t *testing.T) {
 	}
 }
 
+func TestRunMCPCommandUsageMentionsMCPAddAlias(t *testing.T) {
+	service := &stubMCPService{}
+	m := model{mcpService: service}
+	err := m.runMCPCommand("/mcp", []string{"/mcp"})
+	if err == nil {
+		t.Fatal("expected missing subcommand usage error")
+	}
+	if !strings.Contains(err.Error(), "/mcp-add") {
+		t.Fatalf("expected usage to mention /mcp-add, got %v", err)
+	}
+}
+
 func TestHandleSlashCommandMCPAddAlias(t *testing.T) {
 	service := &stubMCPService{}
 	m := model{mcpService: service}

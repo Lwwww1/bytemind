@@ -16,7 +16,7 @@ func (m model) helpText() string {
 			"- `/session`: open recent sessions.",
 			"- `/skills`: list discovered skills and diagnostics.",
 			"- `/mcp list`: list configured MCP servers and runtime status.",
-			"- `/mcp-add <id> --cmd <command> [--args a,b]`: add a stdio MCP server.",
+			"- `/mcp-add <id>`: add a stdio MCP server (`--cmd` required).",
 			"- `/mcp enable <id>` / `/mcp disable <id>`: toggle one MCP server.",
 			"- `/mcp test <id>`: run MCP health check (initialize + tools/list).",
 		"- `/mcp reload`: force MCP runtime refresh.",

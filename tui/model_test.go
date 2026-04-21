@@ -3519,6 +3519,19 @@ func TestCommandPaletteListsQuitCommand(t *testing.T) {
 	}
 }
 
+func TestCommandPaletteListsMCPAddAlias(t *testing.T) {
+	found := false
+	for _, item := range commandItems {
+		if item.Name == "/mcp-add" && item.Kind == "command" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected command palette to include /mcp-add")
+	}
+}
+
 func TestCommandPaletteDoesNotListExitAlias(t *testing.T) {
 	for _, item := range commandItems {
 		if item.Name == "/exit" {

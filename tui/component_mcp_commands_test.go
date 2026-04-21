@@ -12,6 +12,7 @@ type stubMCPService struct {
 	listStatuses []mcpctl.ServerStatus
 	lastEnableID string
 	lastEnabled  bool
+	lastAdd      mcpctl.AddRequest
 }
 
 func (s *stubMCPService) List(context.Context) ([]mcpctl.ServerStatus, error) {
@@ -20,8 +21,9 @@ func (s *stubMCPService) List(context.Context) ([]mcpctl.ServerStatus, error) {
 	return out, nil
 }
 
-func (s *stubMCPService) Add(context.Context, mcpctl.AddRequest) (mcpctl.ServerStatus, error) {
-	return mcpctl.ServerStatus{ID: "added", Enabled: true, Status: "ready"}, nil
+func (s *stubMCPService) Add(_ context.Context, req mcpctl.AddRequest) (mcpctl.ServerStatus, error) {
+	s.lastAdd = req
+	return mcpctl.ServerStatus{ID: strings.TrimSpace(req.ID), Enabled: true, Status: "ready"}, nil
 }
 
 func (s *stubMCPService) Remove(context.Context, string) error {
@@ -81,5 +83,29 @@ func TestRunMCPCommandAddRequiresCommand(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "usage: /mcp add") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleSlashCommandMCPAddAlias(t *testing.T) {
+	service := &stubMCPService{}
+	m := model{mcpService: service}
+	err := m.handleSlashCommand("/mcp-add local --cmd npx --args -y,server --env API_KEY=token --auto-start false")
+	if err != nil {
+		t.Fatalf("expected /mcp-add alias to succeed, got %v", err)
+	}
+	if service.lastAdd.ID != "local" {
+		t.Fatalf("expected add id local, got %#v", service.lastAdd)
+	}
+	if service.lastAdd.Command != "npx" {
+		t.Fatalf("expected add command npx, got %#v", service.lastAdd)
+	}
+	if len(service.lastAdd.Args) != 2 || service.lastAdd.Args[0] != "-y" || service.lastAdd.Args[1] != "server" {
+		t.Fatalf("unexpected add args: %#v", service.lastAdd.Args)
+	}
+	if service.lastAdd.Env["API_KEY"] != "token" {
+		t.Fatalf("unexpected add env map: %#v", service.lastAdd.Env)
+	}
+	if service.lastAdd.AutoStart == nil || *service.lastAdd.AutoStart {
+		t.Fatalf("expected auto_start=false, got %#v", service.lastAdd.AutoStart)
 	}
 }

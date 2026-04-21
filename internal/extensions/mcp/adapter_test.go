@@ -36,8 +36,9 @@ func TestFromMCPServerBuildsActiveExtensionAndMapsTools(t *testing.T) {
 	}
 
 	ext, err := FromMCPServer(ServerConfig{
-		ID:   "github",
-		Name: "GitHub MCP",
+		ID:      "github",
+		Name:    "GitHub MCP",
+		Command: "stub",
 	}, WithClient(client))
 	if err != nil {
 		t.Fatalf("FromMCPServer failed: %v", err)
@@ -97,8 +98,9 @@ func TestFromMCPServerHandshakeFailureMarksDegraded(t *testing.T) {
 	}
 
 	ext, err := FromMCPServer(ServerConfig{
-		ID:   "broken",
-		Name: "Broken Server",
+		ID:      "broken",
+		Name:    "Broken Server",
+		Command: "stub",
 	}, WithClient(client))
 	if err != nil {
 		t.Fatalf("FromMCPServer should not fail hard on handshake issue, got %v", err)
@@ -124,8 +126,14 @@ func TestFromMCPServerHandshakeFailureMarksDegraded(t *testing.T) {
 	}
 
 	health, healthErr := ext.Health(context.Background())
+	adapter, ok := ext.(*Adapter)
+	if !ok {
+		t.Fatalf("expected *Adapter type, got %T", ext)
+	}
+	adapter.Invalidate()
+	health, healthErr = ext.Health(context.Background())
 	if healthErr == nil {
-		t.Fatal("expected health check to surface handshake error")
+		t.Fatal("expected health check to surface handshake error after invalidate")
 	}
 	if health.Status != extensionspkg.ExtensionStatusDegraded {
 		t.Fatalf("expected degraded health snapshot, got %q", health.Status)
@@ -137,10 +145,12 @@ type stubClient struct {
 	discoverErr      error
 	callOutput       string
 	callErr          error
+	discoverCount    int
 	callCount        int
 }
 
 func (s *stubClient) Discover(context.Context, ServerConfig) (ServerSnapshot, error) {
+	s.discoverCount++
 	if s.discoverErr != nil {
 		return ServerSnapshot{}, s.discoverErr
 	}

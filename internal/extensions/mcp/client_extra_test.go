@@ -222,14 +222,44 @@ func TestWriteRPCRequestAndReadRPCResponseErrors(t *testing.T) {
 		t.Fatal("expected write error")
 	}
 
-	if _, err := readRPCResponse(bufio.NewReader(strings.NewReader("\n"))); !errors.Is(err, io.EOF) {
-		t.Fatalf("expected EOF for blank line, got %v", err)
+	if _, err := readRPCResponse(bufio.NewReader(strings.NewReader("\n"))); err == nil || !strings.Contains(err.Error(), "content-length") {
+		t.Fatalf("expected missing content-length error for blank frame header, got %v", err)
 	}
 	if _, err := readRPCResponse(bufio.NewReader(strings.NewReader("{\n"))); err == nil {
 		t.Fatal("expected invalid json error")
 	}
 	if _, err := readRPCResponse(bufio.NewReader(alwaysFailReader{err: io.ErrUnexpectedEOF})); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("expected wrapped reader error, got %v", err)
+	}
+
+	responseRoundtrip := &strings.Builder{}
+	responseWriter := bufio.NewWriter(responseRoundtrip)
+	if err := writeRPCResponse(responseWriter, rpcResponse{
+		JSONRPC: "2.0",
+		ID:      2,
+		Result:  json.RawMessage(`{"ok":true}`),
+	}); err != nil {
+		t.Fatalf("writeRPCResponse failed: %v", err)
+	}
+	decodedResponse, err := readRPCResponse(bufio.NewReader(strings.NewReader(responseRoundtrip.String())))
+	if err != nil {
+		t.Fatalf("readRPCResponse for framed response failed: %v", err)
+	}
+	if decodedResponse.ID != 2 {
+		t.Fatalf("unexpected decoded response id: %#v", decodedResponse)
+	}
+
+	requestRoundtrip := &strings.Builder{}
+	requestWriter := bufio.NewWriter(requestRoundtrip)
+	if err := writeRPCRequest(requestWriter, newRPCRequest(9, "tools/list", map[string]any{})); err != nil {
+		t.Fatalf("writeRPCRequest for request roundtrip failed: %v", err)
+	}
+	decodedRequest, err := readRPCRequest(bufio.NewReader(strings.NewReader(requestRoundtrip.String())))
+	if err != nil {
+		t.Fatalf("readRPCRequest failed: %v", err)
+	}
+	if decodedRequest.ID != 9 || decodedRequest.Method != "tools/list" {
+		t.Fatalf("unexpected decoded request: %#v", decodedRequest)
 	}
 }
 
@@ -369,6 +399,19 @@ func TestNormalizeIDAndCloneMapHelpers(t *testing.T) {
 	if sourceEnv["A"] != "1" {
 		t.Fatal("cloneStringMap should not mutate source map")
 	}
+
+	t.Setenv("BYTEMIND_MCP_SECRET", "top-secret")
+	envMap := envListToMap(mergeCommandEnv(nil))
+	if _, ok := envMap["BYTEMIND_MCP_SECRET"]; ok {
+		t.Fatal("mergeCommandEnv should not inherit non-whitelisted variables by default")
+	}
+
+	envMap = envListToMap(mergeCommandEnv(map[string]string{
+		"BYTEMIND_MCP_SECRET": "explicit",
+	}))
+	if envMap["BYTEMIND_MCP_SECRET"] != "explicit" {
+		t.Fatalf("expected explicit env injection, got %#v", envMap["BYTEMIND_MCP_SECRET"])
+	}
 }
 
 func assertClientErrorCode(t *testing.T, err error, code ClientErrorCode) {
@@ -383,6 +426,18 @@ func assertClientErrorCode(t *testing.T, err error, code ClientErrorCode) {
 	if clientErr.Code != code {
 		t.Fatalf("expected code %q, got %q (err=%v)", code, clientErr.Code, err)
 	}
+}
+
+func envListToMap(items []string) map[string]string {
+	out := make(map[string]string, len(items))
+	for _, item := range items {
+		parts := strings.SplitN(item, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		out[parts[0]] = parts[1]
+	}
+	return out
 }
 
 type alwaysFailWriter struct {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -69,9 +70,9 @@ func TestMCPHelperProcess(t *testing.T) {
 		_, _ = os.Stderr.WriteString("helper exited early")
 		os.Exit(0)
 	}
-	scanner := bufio.NewScanner(os.Stdin)
-	encoder := json.NewEncoder(os.Stdout)
-	for scanner.Scan() {
+	reader := bufio.NewReader(os.Stdin)
+	writer := bufio.NewWriter(os.Stdout)
+	for {
 		if scenario == "invalid_json_line" {
 			_, _ = os.Stdout.WriteString("not-json\n")
 			os.Exit(0)
@@ -79,9 +80,12 @@ func TestMCPHelperProcess(t *testing.T) {
 		if scenario == "sleep" {
 			time.Sleep(250 * time.Millisecond)
 		}
-		var request rpcRequest
-		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
-			_ = encoder.Encode(rpcResponse{
+		request, err := readRPCRequest(reader)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			_ = writeRPCResponse(writer, rpcResponse{
 				JSONRPC: "2.0",
 				ID:      0,
 				Error: &rpcError{
@@ -138,7 +142,7 @@ func TestMCPHelperProcess(t *testing.T) {
 				Message: "method not found",
 			}
 		}
-		_ = encoder.Encode(response)
+		_ = writeRPCResponse(writer, response)
 	}
 	os.Exit(0)
 }

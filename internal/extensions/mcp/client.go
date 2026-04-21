@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,6 +19,21 @@ const (
 	defaultStartupTimeout = 5 * time.Second
 	defaultCallTimeout    = 30 * time.Second
 )
+
+var defaultEnvWhitelist = []string{
+	"PATH",
+	"Path",
+	"SYSTEMROOT",
+	"SystemRoot",
+	"WINDIR",
+	"COMSPEC",
+	"ComSpec",
+	"PATHEXT",
+	"TEMP",
+	"TMP",
+	"HOME",
+	"USERPROFILE",
+}
 
 type ServerConfig struct {
 	ID             string
@@ -356,12 +372,15 @@ func withTimeoutIfMissing(ctx context.Context, timeout time.Duration) (context.C
 
 func mergeCommandEnv(extra map[string]string) []string {
 	base := map[string]string{}
-	for _, item := range os.Environ() {
-		parts := strings.SplitN(item, "=", 2)
-		if len(parts) != 2 {
+	for _, key := range defaultEnvWhitelist {
+		if key = strings.TrimSpace(key); key == "" {
 			continue
 		}
-		base[parts[0]] = parts[1]
+		value, ok := os.LookupEnv(key)
+		if !ok {
+			continue
+		}
+		base[key] = value
 	}
 	for key, value := range extra {
 		key = strings.TrimSpace(key)
@@ -430,29 +449,86 @@ func writeRPCRequest(writer *bufio.Writer, request rpcRequest) error {
 	if err != nil {
 		return err
 	}
-	if _, err := writer.Write(data); err != nil {
+	return writeFramedJSON(writer, data)
+}
+
+func readRPCResponse(reader *bufio.Reader) (rpcResponse, error) {
+	payload, err := readFramedJSON(reader)
+	if err != nil {
+		return rpcResponse{}, err
+	}
+	var response rpcResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return rpcResponse{}, err
+	}
+	return response, nil
+}
+
+func writeRPCResponse(writer *bufio.Writer, response rpcResponse) error {
+	data, err := json.Marshal(response)
+	if err != nil {
 		return err
 	}
-	if err := writer.WriteByte('\n'); err != nil {
+	return writeFramedJSON(writer, data)
+}
+
+func readRPCRequest(reader *bufio.Reader) (rpcRequest, error) {
+	payload, err := readFramedJSON(reader)
+	if err != nil {
+		return rpcRequest{}, err
+	}
+	var request rpcRequest
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return rpcRequest{}, err
+	}
+	return request, nil
+}
+
+func writeFramedJSON(writer *bufio.Writer, payload []byte) error {
+	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(payload))
+	if _, err := writer.WriteString(header); err != nil {
+		return err
+	}
+	if _, err := writer.Write(payload); err != nil {
 		return err
 	}
 	return writer.Flush()
 }
 
-func readRPCResponse(reader *bufio.Reader) (rpcResponse, error) {
-	line, err := reader.ReadBytes('\n')
-	if err != nil {
-		return rpcResponse{}, err
+func readFramedJSON(reader *bufio.Reader) ([]byte, error) {
+	contentLength := -1
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid mcp frame header line %q", line)
+		}
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		value := strings.TrimSpace(parts[1])
+		if key != "content-length" {
+			continue
+		}
+		length, err := strconv.Atoi(value)
+		if err != nil || length < 0 {
+			return nil, fmt.Errorf("invalid content-length %q", value)
+		}
+		contentLength = length
 	}
-	line = bytes.TrimSpace(line)
-	if len(line) == 0 {
-		return rpcResponse{}, io.EOF
+	if contentLength < 0 {
+		return nil, errors.New("missing content-length header")
 	}
-	var response rpcResponse
-	if err := json.Unmarshal(line, &response); err != nil {
-		return rpcResponse{}, err
+	payload := make([]byte, contentLength)
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		return nil, err
 	}
-	return response, nil
+	return payload, nil
 }
 
 func mapRPCError(method string, rpcErr *rpcError) error {

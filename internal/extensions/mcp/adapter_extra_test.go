@@ -31,23 +31,27 @@ func TestFromMCPServerInvalidConfigAndDefaultClientPath(t *testing.T) {
 		t.Fatalf("expected invalid source code, got %q", extErr.Code)
 	}
 
-	ext, err := FromMCPServer(ServerConfig{
+	_, err = FromMCPServer(ServerConfig{
 		ID:   "auto-client",
 		Name: "Auto Client",
 	})
-	if err != nil {
-		t.Fatalf("default client construction should not fail hard, got %v", err)
+	if err == nil {
+		t.Fatal("expected invalid config when command is missing in stdio mode")
 	}
-	info := ext.Info()
-	if info.Status != extensionspkg.ExtensionStatusDegraded {
-		t.Fatalf("expected degraded status for missing command with default client, got %q", info.Status)
+	var extErr2 *extensionspkg.ExtensionError
+	if !errors.As(err, &extErr2) {
+		t.Fatalf("expected ExtensionError, got %T", err)
+	}
+	if extErr2.Code != extensionspkg.ErrCodeInvalidSource {
+		t.Fatalf("expected invalid source code, got %q", extErr2.Code)
 	}
 }
 
 func TestFromMCPServerHandlesNilOptionAndNilNowOverride(t *testing.T) {
 	ext, err := FromMCPServer(ServerConfig{
-		ID:   "github",
-		Name: "GitHub",
+		ID:      "github",
+		Name:    "GitHub",
+		Command: "stub",
 	}, nil, WithClient(&stubClient{
 		discoverSnapshot: ServerSnapshot{
 			ID:      "github",
@@ -94,12 +98,18 @@ func TestResolveToolsReturnsContextError(t *testing.T) {
 		discoverErr: context.DeadlineExceeded,
 	}
 	ext, err := FromMCPServer(ServerConfig{
-		ID:   "timeout",
-		Name: "Timeout",
+		ID:      "timeout",
+		Name:    "Timeout",
+		Command: "stub",
 	}, WithClient(client))
 	if err != nil {
 		t.Fatalf("FromMCPServer failed: %v", err)
 	}
+	adapter, ok := ext.(*Adapter)
+	if !ok {
+		t.Fatalf("expected *Adapter type, got %T", ext)
+	}
+	adapter.Invalidate()
 	_, err = ext.ResolveTools(context.Background())
 	if err == nil {
 		t.Fatal("expected context error from ResolveTools")
@@ -121,8 +131,9 @@ func TestAdapterRefreshActiveMessageWithoutSkippedTools(t *testing.T) {
 		},
 	}
 	ext, err := FromMCPServer(ServerConfig{
-		ID:   "server",
-		Name: "Server",
+		ID:      "server",
+		Name:    "Server",
+		Command: "stub",
 	}, WithClient(client), func(opts *adapterOptions) {
 		opts.now = func() time.Time {
 			return time.Date(2026, 4, 21, 1, 2, 3, 0, time.UTC)
@@ -134,6 +145,60 @@ func TestAdapterRefreshActiveMessageWithoutSkippedTools(t *testing.T) {
 	info := ext.Info()
 	if info.Health.Message != "mcp server active" {
 		t.Fatalf("expected active message without skipped tools, got %q", info.Health.Message)
+	}
+}
+
+func TestAdapterResolveToolsUsesTTLCacheAndInvalidate(t *testing.T) {
+	client := &stubClient{
+		discoverSnapshot: ServerSnapshot{
+			ID:      "cache",
+			Name:    "Cache",
+			Version: "1.0.0",
+			Tools: []ToolDescriptor{
+				{Name: "echo"},
+			},
+		},
+	}
+	ext, err := FromMCPServer(ServerConfig{
+		ID:      "cache",
+		Name:    "Cache",
+		Command: "stub",
+	}, WithClient(client), WithRefreshTTL(time.Hour))
+	if err != nil {
+		t.Fatalf("FromMCPServer failed: %v", err)
+	}
+	adapter, ok := ext.(*Adapter)
+	if !ok {
+		t.Fatalf("expected *Adapter type, got %T", ext)
+	}
+	initialDiscoverCount := client.discoverCount
+
+	_, err = ext.ResolveTools(context.Background())
+	if err != nil {
+		t.Fatalf("first ResolveTools failed: %v", err)
+	}
+	_, err = ext.ResolveTools(context.Background())
+	if err != nil {
+		t.Fatalf("second ResolveTools failed: %v", err)
+	}
+	if client.discoverCount != initialDiscoverCount {
+		t.Fatalf("expected cached resolve without extra discover, got %d -> %d", initialDiscoverCount, client.discoverCount)
+	}
+
+	adapter.Invalidate()
+	_, err = ext.ResolveTools(context.Background())
+	if err != nil {
+		t.Fatalf("ResolveTools after invalidate failed: %v", err)
+	}
+	if client.discoverCount != initialDiscoverCount+1 {
+		t.Fatalf("expected one extra discover after invalidate, got %d -> %d", initialDiscoverCount, client.discoverCount)
+	}
+
+	if err := adapter.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+	if client.discoverCount != initialDiscoverCount+2 {
+		t.Fatalf("expected force reload to discover again, got %d -> %d", initialDiscoverCount, client.discoverCount)
 	}
 }
 

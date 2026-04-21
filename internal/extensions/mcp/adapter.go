@@ -16,8 +16,9 @@ import (
 type Option func(*adapterOptions)
 
 type adapterOptions struct {
-	client Client
-	now    func() time.Time
+	client     Client
+	now        func() time.Time
+	refreshTTL time.Duration
 }
 
 func WithClient(client Client) Option {
@@ -29,20 +30,36 @@ func WithClient(client Client) Option {
 	}
 }
 
+func WithRefreshTTL(ttl time.Duration) Option {
+	return func(opts *adapterOptions) {
+		if opts == nil {
+			return
+		}
+		opts.refreshTTL = ttl
+	}
+}
+
+const defaultRefreshTTL = 30 * time.Second
+
 type Adapter struct {
-	mu sync.RWMutex
+	mu        sync.RWMutex
+	refreshMu sync.Mutex
 
-	cfg    ServerConfig
-	client Client
-	now    func() time.Time
+	cfg        ServerConfig
+	client     Client
+	now        func() time.Time
+	refreshTTL time.Duration
 
-	info  extensionspkg.ExtensionInfo
-	tools []ToolDescriptor
+	info        extensionspkg.ExtensionInfo
+	tools       []ToolDescriptor
+	lastRefresh time.Time
+	dirty       bool
 }
 
 func FromMCPServer(cfg ServerConfig, opts ...Option) (extensionspkg.Extension, error) {
 	options := adapterOptions{
-		now: time.Now,
+		now:        time.Now,
+		refreshTTL: defaultRefreshTTL,
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -57,7 +74,10 @@ func FromMCPServer(cfg ServerConfig, opts ...Option) (extensionspkg.Extension, e
 	if options.now == nil {
 		options.now = time.Now
 	}
-	if err := validateServerConfig(cfg, options.client != nil && cfg.Command != ""); err != nil {
+	if options.refreshTTL <= 0 {
+		options.refreshTTL = defaultRefreshTTL
+	}
+	if err := validateServerConfig(cfg, true); err != nil {
 		return nil, toExtensionError(err, extensionspkg.ErrCodeInvalidSource, "invalid mcp server config")
 	}
 	if options.client == nil {
@@ -70,11 +90,15 @@ func FromMCPServer(cfg ServerConfig, opts ...Option) (extensionspkg.Extension, e
 		now:    options.now,
 		info:   baseExtensionInfo(cfg, options.now()),
 		tools:  nil,
+
+		refreshTTL:  options.refreshTTL,
+		lastRefresh: time.Time{},
+		dirty:       true,
 	}
 
 	startupCtx, cancel := withTimeoutIfMissing(context.Background(), cfg.StartupTimeout)
 	defer cancel()
-	_ = adapter.refresh(startupCtx)
+	_ = adapter.maybeRefresh(startupCtx, true)
 	return adapter, nil
 }
 
@@ -91,7 +115,7 @@ func (a *Adapter) ResolveTools(ctx context.Context) ([]extensionspkg.ExtensionTo
 	if a == nil {
 		return nil, newExtensionError(extensionspkg.ErrCodeInvalidExtension, "mcp adapter is nil", nil)
 	}
-	if err := a.refresh(ctx); err != nil && contextError(err) != nil {
+	if err := a.maybeRefresh(ctx, false); err != nil && contextError(err) != nil {
 		return nil, err
 	}
 
@@ -125,24 +149,78 @@ func (a *Adapter) Health(ctx context.Context) (extensionspkg.HealthSnapshot, err
 	if a == nil {
 		return extensionspkg.HealthSnapshot{}, newExtensionError(extensionspkg.ErrCodeInvalidExtension, "mcp adapter is nil", nil)
 	}
-	err := a.refresh(ctx)
+	err := a.maybeRefresh(ctx, false)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.info.Health, err
+}
+
+func (a *Adapter) Reload(ctx context.Context) error {
+	return a.maybeRefresh(ctx, true)
+}
+
+func (a *Adapter) Invalidate() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.dirty = true
+}
+
+func (a *Adapter) maybeRefresh(ctx context.Context, force bool) error {
+	if a == nil {
+		return newExtensionError(extensionspkg.ErrCodeInvalidExtension, "mcp adapter is nil", nil)
+	}
+	if !force {
+		a.mu.RLock()
+		should := a.shouldRefreshLocked(a.now().UTC())
+		a.mu.RUnlock()
+		if !should {
+			return nil
+		}
+	}
+
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+
+	if !force {
+		a.mu.RLock()
+		should := a.shouldRefreshLocked(a.now().UTC())
+		a.mu.RUnlock()
+		if !should {
+			return nil
+		}
+	}
+	return a.refresh(ctx)
+}
+
+func (a *Adapter) shouldRefreshLocked(now time.Time) bool {
+	if a == nil {
+		return false
+	}
+	if a.dirty || a.lastRefresh.IsZero() {
+		return true
+	}
+	if a.refreshTTL <= 0 {
+		return true
+	}
+	return now.Sub(a.lastRefresh) >= a.refreshTTL
 }
 
 func (a *Adapter) refresh(ctx context.Context) error {
 	if a == nil {
 		return newExtensionError(extensionspkg.ErrCodeInvalidExtension, "mcp adapter is nil", nil)
 	}
+	now := a.now().UTC()
 	snapshot, err := a.client.Discover(ctx, a.cfg)
 	if err != nil {
-		a.markDegraded(err)
-		return toExtensionError(err, mapClientErrorToExtensionCode(err), "mcp discovery failed")
+		code := mapClientErrorToExtensionCode(err)
+		a.markDegraded(err, code, now)
+		return toExtensionError(err, code, "mcp discovery failed")
 	}
 
 	validTools, skipped := filterValidToolDescriptors(snapshot.Tools)
-	now := a.now().UTC()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -163,6 +241,8 @@ func (a *Adapter) refresh(ctx context.Context) error {
 	a.info.Health.Status = extensionspkg.ExtensionStatusActive
 	a.info.Health.LastError = ""
 	a.info.Health.CheckedAtUTC = now.Format(time.RFC3339)
+	a.lastRefresh = now
+	a.dirty = false
 	if skipped > 0 {
 		a.info.Health.Message = fmt.Sprintf("mcp server active; skipped %d invalid tool declarations", skipped)
 	} else {
@@ -171,15 +251,16 @@ func (a *Adapter) refresh(ctx context.Context) error {
 	return nil
 }
 
-func (a *Adapter) markDegraded(err error) {
-	now := a.now().UTC()
+func (a *Adapter) markDegraded(err error, code extensionspkg.ErrorCode, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.info.Status = extensionspkg.ExtensionStatusDegraded
 	a.info.Health.Status = extensionspkg.ExtensionStatusDegraded
-	a.info.Health.LastError = mapClientErrorToExtensionCode(err)
+	a.info.Health.LastError = code
 	a.info.Health.Message = strings.TrimSpace(err.Error())
 	a.info.Health.CheckedAtUTC = now.Format(time.RFC3339)
+	a.lastRefresh = now
+	a.dirty = false
 }
 
 func baseExtensionInfo(cfg ServerConfig, now time.Time) extensionspkg.ExtensionInfo {

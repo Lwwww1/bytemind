@@ -17,15 +17,22 @@ const (
 )
 
 type RegisterOptions struct {
-	Source      RegistrationSource
-	ExtensionID string
+	Source       RegistrationSource
+	ExtensionID  string
+	OriginalName string
+	// AllowOriginalNameShadowBuiltin permits extension registrations to reuse an
+	// existing builtin original tool name. This is only intended for bridge
+	// aliases whose tool key is source-aware and unique.
+	AllowOriginalNameShadowBuiltin bool
 }
 
 type RegistrationMeta struct {
-	ToolKey        string
-	Source         RegistrationSource
-	ExtensionID    string
-	ConflictPolicy string
+	ToolKey          string
+	StableToolKey    string
+	OriginalToolName string
+	Source           RegistrationSource
+	ExtensionID      string
+	ConflictPolicy   string
 }
 
 type RegistryErrorCode string
@@ -40,13 +47,14 @@ const (
 )
 
 type RegistryError struct {
-	Code         RegistryErrorCode
-	Message      string
-	ToolKey      string
-	Source       RegistrationSource
-	ExtensionID  string
-	ConflictWith RegistrationMeta
-	Cause        error
+	Code             RegistryErrorCode
+	Message          string
+	ToolKey          string
+	OriginalToolName string
+	Source           RegistrationSource
+	ExtensionID      string
+	ConflictWith     RegistrationMeta
+	Cause            error
 }
 
 func (e *RegistryError) Error() string {
@@ -89,6 +97,11 @@ func buildRegistration(tool Tool, opts RegisterOptions) (RegistrationMeta, Resol
 	if meta.ToolKey == "" {
 		return RegistrationMeta{}, ResolvedTool{}, &RegistryError{Code: RegistryErrorInvalidToolKey, Message: "tool key is required", Source: meta.Source, ExtensionID: meta.ExtensionID}
 	}
+	meta.StableToolKey = meta.ToolKey
+	meta.OriginalToolName = normalizeOriginalToolName(opts.OriginalName)
+	if meta.OriginalToolName == "" {
+		meta.OriginalToolName = normalizeOriginalToolName(meta.ToolKey)
+	}
 	definition.Function.Name = meta.ToolKey
 	if provider, ok := tool.(ToolSpecProvider); ok {
 		spec := NormalizeToolSpec(MergeToolSpec(DefaultToolSpec(definition), provider.Spec()))
@@ -116,6 +129,10 @@ func normalizeRegistrationSource(source RegistrationSource) RegistrationSource {
 	default:
 		return ""
 	}
+}
+
+func normalizeOriginalToolName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func cloneResolvedTool(resolved ResolvedTool) ResolvedTool {

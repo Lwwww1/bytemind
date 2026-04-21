@@ -32,7 +32,13 @@ func (e *defaultEngine) prepareRunPrompt(sess *session.Session, input RunPromptI
 	}
 
 	activeSkill := runner.resolveActiveSkill(sess)
-	allowedTools, deniedTools := resolveSkillToolSets(activeSkill)
+	if err := runner.syncActiveSkillBridges(sess, activeSkill); err != nil {
+		return runPromptSetup{}, err
+	}
+	allowedTools, deniedTools, err := resolveSkillToolSets(activeSkill, runner.registry)
+	if err != nil {
+		return runPromptSetup{}, err
+	}
 	promptHint := policypkg.EvaluatePromptHint(userInput)
 	availableTools := []string(nil)
 	if runner.registry != nil {

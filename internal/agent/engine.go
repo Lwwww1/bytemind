@@ -68,6 +68,7 @@ func (e *defaultEngine) HandleTurn(ctx context.Context, req TurnRequest) (<-chan
 			})
 			return
 		}
+		defer e.runner.clearSessionSkillBridges(req.Session)
 
 		setup, err := e.prepareRunPrompt(req.Session, req.Input, req.Mode)
 		if err != nil {

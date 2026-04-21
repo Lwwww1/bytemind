@@ -317,14 +317,11 @@ func (m *extensionManager) discoverOne(source string) (ExtensionInfo, error) {
 	if !ok {
 		scope = ExtensionScopeRemote
 	}
-	matched, ok, diags := skillspkg.LoadFromDir(skillsScopeForExtension(scope), resolved)
+	skill, ok, diags := skillspkg.LoadFromDir(skillsScopeForExtension(scope), resolved)
 	if !ok {
-		if len(diags) > 0 {
-			return ExtensionInfo{}, wrapError(ErrCodeInvalidManifest, diags[0].Message, nil)
-		}
-		return ExtensionInfo{}, wrapError(ErrCodeInvalidSource, "extension source does not contain a supported extension", nil)
+		return ExtensionInfo{}, discoverOneErrorFromDiagnostics(diags)
 	}
-	item := m.adapter.FromSkill(matched)
+	item := m.adapter.FromSkill(skill)
 	item.Source.Scope = scope
 	item.Source.Ref = resolved
 	item.Manifest.Source.Scope = scope
@@ -390,11 +387,7 @@ func skillsScopeForExtension(scope ExtensionScope) skillspkg.Scope {
 }
 
 func extensionIDForDir(dirName string) string {
-	name := strings.TrimSpace(dirName)
-	if name == "" {
-		return ""
-	}
-	return "skill." + name
+	return SkillExtensionID(dirName)
 }
 
 func fileExists(path string) bool {
@@ -404,4 +397,28 @@ func fileExists(path string) bool {
 
 func sameExtensionSource(left, right string) bool {
 	return filepath.Clean(strings.TrimSpace(left)) == filepath.Clean(strings.TrimSpace(right))
+}
+
+func discoverOneErrorFromDiagnostics(diags []skillspkg.Diagnostic) error {
+	if len(diags) == 0 {
+		return wrapError(ErrCodeInvalidSource, "extension source does not contain skill.json or SKILL.md", nil)
+	}
+
+	for _, diag := range diags {
+		msg := strings.ToLower(strings.TrimSpace(diag.Message))
+		switch {
+		case strings.Contains(msg, "invalid skill.json"), strings.Contains(msg, "failed to read skill.json"):
+			return wrapError(ErrCodeInvalidManifest, strings.TrimSpace(diag.Message), nil)
+		case strings.Contains(msg, "failed to read skill.md"):
+			return wrapError(ErrCodeInvalidManifest, strings.TrimSpace(diag.Message), nil)
+		case strings.Contains(msg, "invalid skill name"):
+			return wrapError(ErrCodeInvalidExtension, strings.TrimSpace(diag.Message), nil)
+		}
+	}
+
+	first := strings.TrimSpace(diags[0].Message)
+	if first == "" {
+		first = "extension source is invalid"
+	}
+	return wrapError(ErrCodeInvalidExtension, first, nil)
 }

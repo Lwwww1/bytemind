@@ -57,7 +57,21 @@ func TestSkillAdapterFromSkillMarksManifestOnlyAsDegraded(t *testing.T) {
 	}
 }
 
-func TestSkillAdapterSyncIsConcurrentSafe(t *testing.T) {
+func TestSkillAdapterFromSkillKeepsPrefixedNameIDCompatibility(t *testing.T) {
+	adapter := newSkillAdapter()
+	item := adapter.FromSkill(skillspkg.Skill{
+		Name:         "skill.review",
+		Title:        "skill.review",
+		Scope:        skillspkg.ScopeProject,
+		SourceDir:    `C:\\repo\\.bytemind\\skills\\skill.review`,
+		DiscoveredAt: time.Now().UTC(),
+	})
+	if item.ID != "skill.skill.review" {
+		t.Fatalf("expected compat id skill.skill.review, got %q", item.ID)
+	}
+}
+
+func TestSkillAdapterSyncConcurrentDoesNotPanic(t *testing.T) {
 	adapter := newSkillAdapter()
 	base := time.Now().UTC()
 	catalogs := []skillspkg.Catalog{

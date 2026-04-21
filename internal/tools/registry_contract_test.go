@@ -142,6 +142,62 @@ func TestRegistryContractDuplicateIncludesConflictContext(t *testing.T) {
 	}
 }
 
+func TestRegistryContractDuplicateOriginalNameIncludesConflictContext(t *testing.T) {
+	registry := &Registry{}
+	if err := registry.Register(contractTestTool{name: "read_file"}, RegisterOptions{Source: RegistrationSourceBuiltin}); err != nil {
+		t.Fatalf("first register failed: %v", err)
+	}
+	err := registry.Register(contractTestTool{name: "skill:skill_demo:read_file"}, RegisterOptions{
+		Source:       RegistrationSourceExtension,
+		ExtensionID:  "skill.demo",
+		OriginalName: "read_file",
+	})
+	if err == nil {
+		t.Fatal("expected duplicate error")
+	}
+	var regErr *RegistryError
+	if !errors.As(err, &regErr) {
+		t.Fatalf("expected RegistryError, got %T", err)
+	}
+	if regErr.Code != RegistryErrorDuplicateName {
+		t.Fatalf("unexpected code: %s", regErr.Code)
+	}
+	if regErr.OriginalToolName != "read_file" {
+		t.Fatalf("unexpected original tool name: %q", regErr.OriginalToolName)
+	}
+	if regErr.ConflictWith.Source != RegistrationSourceBuiltin {
+		t.Fatalf("unexpected conflict source: %+v", regErr.ConflictWith)
+	}
+	if regErr.ConflictWith.OriginalToolName != "read_file" {
+		t.Fatalf("unexpected conflict original tool name: %q", regErr.ConflictWith.OriginalToolName)
+	}
+}
+
+func TestRegistryContractDuplicateOriginalNameIsCaseInsensitive(t *testing.T) {
+	registry := &Registry{}
+	if err := registry.Register(contractTestTool{name: "read_file"}, RegisterOptions{Source: RegistrationSourceBuiltin}); err != nil {
+		t.Fatalf("first register failed: %v", err)
+	}
+	err := registry.Register(contractTestTool{name: "skill:skill_demo:read_file"}, RegisterOptions{
+		Source:       RegistrationSourceExtension,
+		ExtensionID:  "skill.demo",
+		OriginalName: "Read_File",
+	})
+	if err == nil {
+		t.Fatal("expected duplicate error")
+	}
+	var regErr *RegistryError
+	if !errors.As(err, &regErr) {
+		t.Fatalf("expected RegistryError, got %T", err)
+	}
+	if regErr.Code != RegistryErrorDuplicateName {
+		t.Fatalf("unexpected code: %s", regErr.Code)
+	}
+	if regErr.OriginalToolName != "read_file" {
+		t.Fatalf("expected normalized original tool name, got %q", regErr.OriginalToolName)
+	}
+}
+
 func TestRegistryContractInvalidSchemaIncludesCause(t *testing.T) {
 	registry := &Registry{}
 	err := registry.Register(contractInvalidSpecTool{

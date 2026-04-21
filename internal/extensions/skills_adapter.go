@@ -30,35 +30,41 @@ func (a *skillAdapter) Sync(catalog skillspkg.Catalog) []ExtensionInfo {
 	if a == nil {
 		return nil
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
 
-	seen := make(map[string]struct{}, len(catalog.Skills))
+	a.mu.RLock()
+	current := make(map[string]cachedSkillExtension, len(a.cache))
+	for id, entry := range a.cache {
+		current[id] = entry
+	}
+	a.mu.RUnlock()
+
+	nextCache := make(map[string]cachedSkillExtension, len(catalog.Skills))
 	for _, skill := range catalog.Skills {
 		item := a.FromSkill(skill)
-		seen[item.ID] = struct{}{}
-		entry, ok := a.cache[item.ID]
+		entry, ok := current[item.ID]
 		if ok && entry.ref == item.Source.Ref && entry.updatedAt.Equal(skill.DiscoveredAt) {
+			nextCache[item.ID] = entry
 			continue
 		}
-		a.cache[item.ID] = cachedSkillExtension{
+		nextCache[item.ID] = cachedSkillExtension{
 			item:      item,
 			ref:       item.Source.Ref,
 			updatedAt: skill.DiscoveredAt,
 		}
 	}
-	for id := range a.cache {
-		if _, ok := seen[id]; !ok {
-			delete(a.cache, id)
-		}
-	}
-	items := make([]ExtensionInfo, 0, len(a.cache))
-	for _, entry := range a.cache {
-		items = append(items, entry.item)
+
+	items := make([]ExtensionInfo, 0, len(nextCache))
+	for _, entry := range nextCache {
+		items = append(items, cloneExtensionInfo(entry.item))
 	}
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].ID < items[j].ID
 	})
+
+	a.mu.Lock()
+	a.cache = nextCache
+	a.mu.Unlock()
+
 	return items
 }
 
@@ -84,7 +90,7 @@ func (a *skillAdapter) FromSkill(skill skillspkg.Skill) ExtensionInfo {
 		manifestRef = filepath.Join(normalized.SourceDir, "skill.json")
 	}
 	return ExtensionInfo{
-		ID:           "skill." + normalized.Name,
+		ID:           SkillExtensionID(normalized.Name),
 		Name:         normalized.Name,
 		Kind:         ExtensionSkill,
 		Version:      strings.TrimSpace(normalized.Version),

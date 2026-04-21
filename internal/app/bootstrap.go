@@ -133,7 +133,7 @@ func Bootstrap(req BootstrapRequest) (Runtime, error) {
 	taskManager := runtimepkg.NewInMemoryTaskManager(
 		runtimepkg.WithTaskEventStore(taskEventStore),
 	)
-	extensions := extensionspkg.NopManager{}
+	extensions := extensionspkg.NewManager(workspace)
 	runner := agent.NewRunner(agent.Options{
 		Workspace:   workspace,
 		Config:      cfg,

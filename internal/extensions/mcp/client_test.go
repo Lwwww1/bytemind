@@ -65,9 +65,20 @@ func TestMCPHelperProcess(t *testing.T) {
 		return
 	}
 	scenario := strings.TrimSpace(os.Getenv("BYTEMIND_MCP_SCENARIO"))
+	if scenario == "eof_with_stderr" {
+		_, _ = os.Stderr.WriteString("helper exited early")
+		os.Exit(0)
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
 	for scanner.Scan() {
+		if scenario == "invalid_json_line" {
+			_, _ = os.Stdout.WriteString("not-json\n")
+			os.Exit(0)
+		}
+		if scenario == "sleep" {
+			time.Sleep(250 * time.Millisecond)
+		}
 		var request rpcRequest
 		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
 			_ = encoder.Encode(rpcResponse{
@@ -80,9 +91,13 @@ func TestMCPHelperProcess(t *testing.T) {
 			})
 			continue
 		}
+		responseID := request.ID
+		if scenario == "bad_response_id" {
+			responseID++
+		}
 		response := rpcResponse{
 			JSONRPC: "2.0",
-			ID:      request.ID,
+			ID:      responseID,
 		}
 		switch request.Method {
 		case "initialize":
@@ -91,17 +106,29 @@ func TestMCPHelperProcess(t *testing.T) {
 					Code:    -32000,
 					Message: "handshake failed",
 				}
+			} else if scenario == "discover_invalid_initialize_result" {
+				response.Result = json.RawMessage(`"oops"`)
+			} else if scenario == "discover_empty_server_info" {
+				response.Result = json.RawMessage(`{"serverInfo":{"name":"","version":""}}`)
 			} else {
 				response.Result = json.RawMessage(`{"serverInfo":{"name":"helper-mcp","version":"1.2.3"}}`)
 			}
 		case "tools/list":
-			response.Result = json.RawMessage(`{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}}]}`)
+			if scenario == "discover_invalid_tools_result" {
+				response.Result = json.RawMessage(`"oops"`)
+			} else {
+				response.Result = json.RawMessage(`{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}}]}`)
+			}
 		case "tools/call":
 			if scenario == "call_fail" {
 				response.Error = &rpcError{
 					Code:    -32000,
 					Message: "call failed",
 				}
+			} else if scenario == "call_is_error" {
+				response.Result = json.RawMessage(`{"isError":true,"content":[{"type":"text","text":"tool failed"}]}`)
+			} else if scenario == "call_compact_fallback" {
+				response.Result = json.RawMessage(`{"foo":"bar"}`)
 			} else {
 				response.Result = json.RawMessage(`{"content":[{"type":"text","text":"ok-from-helper"}]}`)
 			}

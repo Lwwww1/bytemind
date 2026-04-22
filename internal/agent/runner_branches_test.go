@@ -354,6 +354,20 @@ func TestRenderToolFeedbackBranches(t *testing.T) {
 	}
 }
 
+func TestRenderToolFeedbackRunShellSandboxMetadata(t *testing.T) {
+	runner := NewRunner(Options{})
+	var out bytes.Buffer
+
+	runner.renderToolFeedback(&out, "run_shell", `{"ok":true,"exit_code":0,"stdout":"done","stderr":"","system_sandbox":{"mode":"best_effort","backend":"none","active":false,"fallback":true}}`)
+
+	got := out.String()
+	for _, want := range []string{"exit", "code 0", "sandbox:", "fallback", "mode=best_effort", "backend=none"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, got)
+		}
+	}
+}
+
 func TestRenderToolFeedbackPendingApprovalBranch(t *testing.T) {
 	runner := NewRunner(Options{})
 	var out bytes.Buffer

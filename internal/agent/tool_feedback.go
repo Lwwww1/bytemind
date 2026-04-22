@@ -153,10 +153,16 @@ func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 		}
 	case "run_shell":
 		var result struct {
-			OK       bool   `json:"ok"`
-			ExitCode int    `json:"exit_code"`
-			Stdout   string `json:"stdout"`
-			Stderr   string `json:"stderr"`
+			OK            bool   `json:"ok"`
+			ExitCode      int    `json:"exit_code"`
+			Stdout        string `json:"stdout"`
+			Stderr        string `json:"stderr"`
+			SystemSandbox struct {
+				Mode     string `json:"mode"`
+				Backend  string `json:"backend"`
+				Active   bool   `json:"active"`
+				Fallback bool   `json:"fallback"`
+			} `json:"system_sandbox"`
 		}
 		if err := json.Unmarshal([]byte(payload), &result); err == nil {
 			statusColor := ansiGreen
@@ -164,6 +170,14 @@ func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 				statusColor = ansiYellow
 			}
 			fmt.Fprintf(out, "  %sexit%s code %d\n", statusColor, ansiReset, result.ExitCode)
+			if summary := formatSystemSandboxSummary(
+				result.SystemSandbox.Mode,
+				result.SystemSandbox.Backend,
+				result.SystemSandbox.Active,
+				result.SystemSandbox.Fallback,
+			); summary != "" {
+				fmt.Fprintf(out, "    sandbox: %s\n", summary)
+			}
 			for _, line := range previewOutput("stdout", result.Stdout) {
 				fmt.Fprintf(out, "    %s\n", line)
 			}
@@ -259,6 +273,28 @@ func compactWhitespace(text string, limit int) string {
 		return string(runes[:limit])
 	}
 	return string(runes[:limit-3]) + "..."
+}
+
+func formatSystemSandboxSummary(mode, backend string, active, fallback bool) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	backend = strings.TrimSpace(backend)
+	if mode == "" && backend == "" && !active && !fallback {
+		return ""
+	}
+	if mode == "" {
+		mode = "off"
+	}
+	if backend == "" {
+		backend = "none"
+	}
+
+	state := "inactive"
+	if active {
+		state = "active"
+	} else if fallback {
+		state = "fallback"
+	}
+	return fmt.Sprintf("%s (mode=%s, backend=%s)", state, mode, backend)
 }
 
 func normalizeApprovalErrorMessage(message, reasonCode string) string {

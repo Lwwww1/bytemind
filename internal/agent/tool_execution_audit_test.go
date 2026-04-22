@@ -308,3 +308,91 @@ func TestRunPromptRecordsSystemSandboxMetadataInToolExecuteAudit(t *testing.T) {
 		t.Fatalf("expected sandbox_run_id=%q, got %q", want, got)
 	}
 }
+
+func TestRunPromptRecordsSystemSandboxStartupAudit(t *testing.T) {
+	original := resolveAgentSystemSandboxRuntimeStatus
+	resolveAgentSystemSandboxRuntimeStatus = func(enabled bool, mode string) (tools.SystemSandboxRuntimeStatus, error) {
+		if !enabled {
+			return tools.SystemSandboxRuntimeStatus{}, nil
+		}
+		return tools.SystemSandboxRuntimeStatus{
+			Mode:           mode,
+			BackendEnabled: false,
+			BackendName:    "none",
+			Fallback:       true,
+			Message:        "system sandbox best_effort fallback: test backend unavailable",
+		}, nil
+	}
+	t.Cleanup(func() {
+		resolveAgentSystemSandboxRuntimeStatus = original
+	})
+
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	auditStore := &toolExecutionAuditStore{}
+
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role:    llm.RoleAssistant,
+			Content: "done",
+		},
+	}}
+
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:          config.ProviderConfig{Model: "test-model"},
+			MaxIterations:     2,
+			Stream:            false,
+			SandboxEnabled:    true,
+			SystemSandboxMode: "best_effort",
+		},
+		Client:     client,
+		Store:      store,
+		Registry:   tools.DefaultRegistry(),
+		AuditStore: auditStore,
+		Stdin:      strings.NewReader(""),
+		Stdout:     io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "hello", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+
+	events := auditStore.snapshot()
+	var startupEvent *storagepkg.AuditEvent
+	for i := range events {
+		if events[i].Action == "system_sandbox_startup" {
+			startupEvent = &events[i]
+			break
+		}
+	}
+	if startupEvent == nil {
+		t.Fatalf("expected system_sandbox_startup audit event, got %+v", events)
+	}
+	if got, want := startupEvent.Result, "fallback"; got != want {
+		t.Fatalf("expected startup audit result=%q, got %q", want, got)
+	}
+	for k, want := range map[string]string{
+		"sandbox_enabled":  "true",
+		"sandbox_mode":     "best_effort",
+		"sandbox_backend":  "none",
+		"sandbox_status":   "fallback",
+		"sandbox_fallback": "true",
+	} {
+		if got := startupEvent.Metadata[k]; got != want {
+			t.Fatalf("expected startup audit metadata[%q]=%q, got %q", k, want, got)
+		}
+	}
+	if got := startupEvent.Metadata["sandbox_message"]; got != "system sandbox best_effort fallback: test backend unavailable" {
+		t.Fatalf("expected startup audit sandbox_message to be recorded, got %q", got)
+	}
+}

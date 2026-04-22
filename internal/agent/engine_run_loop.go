@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	contextpkg "bytemind/internal/context"
 	corepkg "bytemind/internal/core"
 	"bytemind/internal/llm"
 	"bytemind/internal/session"
+	storagepkg "bytemind/internal/storage"
 )
 
 func (e *defaultEngine) runPromptTurns(ctx context.Context, sess *session.Session, setup runPromptSetup, out io.Writer) (string, error) {
@@ -23,6 +25,7 @@ func (e *defaultEngine) runPromptTurns(ctx context.Context, sess *session.Sessio
 	executedToolNames := make([]string, 0, 16)
 	taskReport := &TaskReport{}
 	writeSystemSandboxStartupNotice(out, setup, runner.config.SandboxEnabled, runner.config.SystemSandboxMode)
+	appendSystemSandboxStartupAudit(ctx, runner, sess, setup, runner.config.SandboxEnabled, runner.config.SystemSandboxMode)
 	recordSystemSandboxStartupFallback(taskReport, setup, runner.config.SystemSandboxMode)
 	approvalHandler := runner.prepareRunApprovalHandler(setup, out)
 
@@ -211,4 +214,52 @@ func recordSystemSandboxStartupFallback(taskReport *TaskReport, setup runPromptS
 	}
 	note += ")"
 	taskReport.RecordSystemSandboxFallback(note)
+}
+
+func appendSystemSandboxStartupAudit(
+	ctx context.Context,
+	runner *Runner,
+	sess *session.Session,
+	setup runPromptSetup,
+	sandboxEnabled bool,
+	configuredMode string,
+) {
+	if runner == nil || sess == nil {
+		return
+	}
+	mode := strings.TrimSpace(configuredMode)
+	if mode == "" {
+		mode = "off"
+	}
+	backend := strings.TrimSpace(setup.SystemSandboxBackend)
+	if backend == "" {
+		backend = "none"
+	}
+	reason := strings.TrimSpace(setup.SystemSandboxStatus)
+	if !sandboxEnabled && mode == "off" && reason == "" {
+		return
+	}
+	state := "active"
+	if setup.SystemSandboxFallback {
+		state = "fallback"
+	} else if backend == "none" {
+		state = "inactive"
+	}
+	metadata := map[string]string{
+		"sandbox_enabled":  strconv.FormatBool(sandboxEnabled),
+		"sandbox_mode":     mode,
+		"sandbox_backend":  backend,
+		"sandbox_status":   state,
+		"sandbox_fallback": strconv.FormatBool(setup.SystemSandboxFallback),
+	}
+	if reason != "" {
+		metadata["sandbox_message"] = reason
+	}
+	runner.appendAudit(ctx, storagepkg.AuditEvent{
+		SessionID: corepkg.SessionID(sess.ID),
+		Actor:     "agent",
+		Action:    "system_sandbox_startup",
+		Result:    state,
+		Metadata:  metadata,
+	})
 }

@@ -1050,6 +1050,69 @@ func TestRunPromptAwayFailFastStopsAfterPermissionDenied(t *testing.T) {
 	}
 }
 
+func TestRunPromptReportsSystemSandboxStartupFallbackOnSuccess(t *testing.T) {
+	original := resolveAgentSystemSandboxRuntimeStatus
+	resolveAgentSystemSandboxRuntimeStatus = func(enabled bool, mode string) (tools.SystemSandboxRuntimeStatus, error) {
+		if !enabled {
+			return tools.SystemSandboxRuntimeStatus{}, nil
+		}
+		return tools.SystemSandboxRuntimeStatus{
+			Mode:           mode,
+			BackendEnabled: false,
+			Fallback:       true,
+			Message:        "system sandbox best_effort fallback: test backend unavailable",
+			BackendName:    "",
+		}, nil
+	}
+	t.Cleanup(func() {
+		resolveAgentSystemSandboxRuntimeStatus = original
+	})
+
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:          config.ProviderConfig{Model: "test-model"},
+			MaxIterations:     2,
+			Stream:            false,
+			SandboxEnabled:    true,
+			SystemSandboxMode: "best_effort",
+		},
+		Client: &fakeClient{replies: []llm.Message{{
+			Role:    "assistant",
+			Content: "done",
+		}}},
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	var out bytes.Buffer
+	answer, err := runner.RunPrompt(context.Background(), sess, "hello", "build", &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+	for _, want := range []string{
+		"Task report summary:",
+		"- System sandbox fallback: startup (mode=best_effort, backend=none, reason=system sandbox best_effort fallback: test backend unavailable)",
+		"Task report (json):",
+		`"system_sandbox_fallback":["startup (mode=best_effort, backend=none, reason=system sandbox best_effort fallback: test backend unavailable)"]`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected output to contain %q, got %q", want, out.String())
+		}
+	}
+}
+
 func TestRunPromptFallsBackWhenAssistantReplyIsEmpty(t *testing.T) {
 	workspace := t.TempDir()
 	store, err := session.NewStore(t.TempDir())

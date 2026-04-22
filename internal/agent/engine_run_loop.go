@@ -22,6 +22,7 @@ func (e *defaultEngine) runPromptTurns(ctx context.Context, sess *session.Sessio
 	adaptiveState := newAdaptiveTurnState(runner.contextBudgetMaxReactiveRetry())
 	executedToolNames := make([]string, 0, 16)
 	taskReport := &TaskReport{}
+	recordSystemSandboxStartupFallback(taskReport, setup, runner.config.SystemSandboxMode)
 	approvalHandler := runner.prepareRunApprovalHandler(setup, out)
 
 	for step := 0; step < runner.config.MaxIterations; step++ {
@@ -156,4 +157,25 @@ func writeCompletionTaskReport(out io.Writer, taskReport *TaskReport) {
 	_, _ = io.WriteString(out, human+"\n")
 	_, _ = io.WriteString(out, "Task report (json):\n")
 	_, _ = io.WriteString(out, taskReport.JSON()+"\n")
+}
+
+func recordSystemSandboxStartupFallback(taskReport *TaskReport, setup runPromptSetup, configuredMode string) {
+	if taskReport == nil || !setup.SystemSandboxFallback {
+		return
+	}
+	mode := strings.TrimSpace(configuredMode)
+	if mode == "" {
+		mode = "off"
+	}
+	backend := strings.TrimSpace(setup.SystemSandboxBackend)
+	if backend == "" {
+		backend = "none"
+	}
+	reason := strings.TrimSpace(setup.SystemSandboxStatus)
+	note := fmt.Sprintf("startup (mode=%s, backend=%s", mode, backend)
+	if reason != "" {
+		note += fmt.Sprintf(", reason=%s", reason)
+	}
+	note += ")"
+	taskReport.RecordSystemSandboxFallback(note)
 }

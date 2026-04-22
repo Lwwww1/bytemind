@@ -358,10 +358,10 @@ func TestRenderToolFeedbackRunShellSandboxMetadata(t *testing.T) {
 	runner := NewRunner(Options{})
 	var out bytes.Buffer
 
-	runner.renderToolFeedback(&out, "run_shell", `{"ok":true,"exit_code":0,"stdout":"done","stderr":"","system_sandbox":{"mode":"best_effort","backend":"none","active":false,"fallback":true}}`)
+	runner.renderToolFeedback(&out, "run_shell", `{"ok":true,"exit_code":0,"stdout":"done","stderr":"","system_sandbox":{"mode":"best_effort","backend":"none","active":false,"fallback":true,"fallback_reason":"darwin backend \"sandbox-exec\" is unavailable"}}`)
 
 	got := out.String()
-	for _, want := range []string{"exit", "code 0", "sandbox:", "fallback", "mode=best_effort", "backend=none"} {
+	for _, want := range []string{"exit", "code 0", "sandbox:", "fallback", "mode=best_effort", "backend=none", "sandbox reason:", "sandbox-exec"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected output to contain %q, got %q", want, got)
 		}

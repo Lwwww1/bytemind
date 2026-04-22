@@ -162,6 +162,7 @@ func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 				Backend  string `json:"backend"`
 				Active   bool   `json:"active"`
 				Fallback bool   `json:"fallback"`
+				Reason   string `json:"fallback_reason"`
 			} `json:"system_sandbox"`
 		}
 		if err := json.Unmarshal([]byte(payload), &result); err == nil {
@@ -177,6 +178,12 @@ func (r *Runner) renderToolFeedback(out io.Writer, name, payload string) {
 				result.SystemSandbox.Fallback,
 			); summary != "" {
 				fmt.Fprintf(out, "    sandbox: %s\n", summary)
+			}
+			if result.SystemSandbox.Fallback {
+				reason := strings.TrimSpace(result.SystemSandbox.Reason)
+				if reason != "" {
+					fmt.Fprintf(out, "    sandbox reason: %s\n", compactWhitespace(reason, 120))
+				}
 			}
 			for _, line := range previewOutput("stdout", result.Stdout) {
 				fmt.Fprintf(out, "    %s\n", line)

@@ -301,4 +301,10 @@ func TestRunPromptRecordsSystemSandboxMetadataInToolExecuteAudit(t *testing.T) {
 	if got := resultEvent.Metadata["sandbox_fallback_reason"]; got != "linux backend unavailable" {
 		t.Fatalf("expected sandbox_fallback_reason to be recorded, got %q", got)
 	}
+	if got, want := resultEvent.Metadata["sandbox_lease_id"], "session-"+sess.ID; got != want {
+		t.Fatalf("expected sandbox_lease_id=%q, got %q", want, got)
+	}
+	if got, want := resultEvent.Metadata["sandbox_run_id"], "trace-tool-sandbox-audit"; got != want {
+		t.Fatalf("expected sandbox_run_id=%q, got %q", want, got)
+	}
 }

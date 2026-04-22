@@ -83,13 +83,17 @@ func (e *defaultEngine) executeToolCall(
 		ToolName:      call.Function.Name,
 		ToolArguments: call.Function.Arguments,
 	})
+	sandboxLeaseID := fmt.Sprintf("session-%s", sess.ID)
+	sandboxRunID := fmt.Sprintf("trace-%s", traceID)
 	runner.appendAudit(ctx, storagepkg.AuditEvent{
 		SessionID: sessionID,
 		TraceID:   traceID,
 		Actor:     "agent",
 		Action:    "tool_execute_start",
 		Metadata: map[string]string{
-			"tool_name": call.Function.Name,
+			"tool_name":        call.Function.Name,
+			"sandbox_lease_id": sandboxLeaseID,
+			"sandbox_run_id":   sandboxRunID,
 		},
 	})
 	if out != nil {
@@ -115,8 +119,8 @@ func (e *defaultEngine) executeToolCall(
 				AwayPolicy:        runner.config.AwayPolicy,
 				SandboxEnabled:    runner.config.SandboxEnabled,
 				SystemSandboxMode: runner.config.SystemSandboxMode,
-				LeaseID:           fmt.Sprintf("session-%s", sess.ID),
-				RunID:             fmt.Sprintf("trace-%s", traceID),
+				LeaseID:           sandboxLeaseID,
+				RunID:             sandboxRunID,
 				FSRead:            append([]string(nil), sandboxRoots...),
 				FSWrite:           append([]string(nil), sandboxRoots...),
 				ExecAllowlist:     toSandboxExecRules(runner.config.ExecAllowlist),
@@ -192,8 +196,10 @@ func (e *defaultEngine) executeToolCall(
 		auditResult = "error"
 	}
 	metadata := map[string]string{
-		"tool_name": call.Function.Name,
-		"error":     errText,
+		"tool_name":        call.Function.Name,
+		"error":            errText,
+		"sandbox_lease_id": sandboxLeaseID,
+		"sandbox_run_id":   sandboxRunID,
 	}
 	if execution.Result.ErrorCode != "" {
 		metadata["error_code"] = execution.Result.ErrorCode

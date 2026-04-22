@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -196,6 +198,7 @@ func (e *defaultEngine) executeToolCall(
 	if execution.Result.ErrorCode != "" {
 		metadata["error_code"] = execution.Result.ErrorCode
 	}
+	appendSystemSandboxAuditMetadata(metadata, result)
 	runner.appendAudit(ctx, storagepkg.AuditEvent{
 		SessionID: sessionID,
 		TaskID:    execution.TaskID,
@@ -425,4 +428,36 @@ func toSandboxNetworkRules(rules []configpkg.NetworkAllowRule) []sandboxpkg.Netw
 		})
 	}
 	return out
+}
+
+func appendSystemSandboxAuditMetadata(metadata map[string]string, result string) {
+	if len(metadata) == 0 || strings.TrimSpace(result) == "" {
+		return
+	}
+	var payload struct {
+		SystemSandbox *struct {
+			Mode           string `json:"mode"`
+			Backend        string `json:"backend"`
+			Status         string `json:"status"`
+			Fallback       bool   `json:"fallback"`
+			FallbackReason string `json:"fallback_reason"`
+		} `json:"system_sandbox"`
+	}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil || payload.SystemSandbox == nil {
+		return
+	}
+	systemSandbox := payload.SystemSandbox
+	if mode := strings.TrimSpace(systemSandbox.Mode); mode != "" {
+		metadata["sandbox_mode"] = mode
+	}
+	if backend := strings.TrimSpace(systemSandbox.Backend); backend != "" {
+		metadata["sandbox_backend"] = backend
+	}
+	if status := strings.TrimSpace(systemSandbox.Status); status != "" {
+		metadata["sandbox_status"] = status
+	}
+	metadata["sandbox_fallback"] = strconv.FormatBool(systemSandbox.Fallback)
+	if reason := strings.TrimSpace(systemSandbox.FallbackReason); reason != "" {
+		metadata["sandbox_fallback_reason"] = reason
+	}
 }

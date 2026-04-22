@@ -119,21 +119,28 @@ func TestRunPromptRecordsTaskStateChangedAuditWithSessionTaskTrace(t *testing.T)
 }
 
 type stubRuntimeGateway struct {
-	mu    sync.Mutex
-	calls []RuntimeTaskRequest
+	mu     sync.Mutex
+	calls  []RuntimeTaskRequest
+	result runtimepkg.TaskResult
 }
 
 func (g *stubRuntimeGateway) RunSync(_ context.Context, request RuntimeTaskRequest) (RuntimeTaskExecution, error) {
 	g.mu.Lock()
 	g.calls = append(g.calls, request)
 	g.mu.Unlock()
+	result := g.result
+	if result.TaskID == "" {
+		result.TaskID = "runtime-task-1"
+	}
+	if result.Status == "" {
+		result.Status = corepkg.TaskCompleted
+	}
+	if len(result.Output) == 0 {
+		result.Output = []byte(`{"ok":true,"via":"runtime_gateway"}`)
+	}
 	return RuntimeTaskExecution{
-		TaskID: "runtime-task-1",
-		Result: runtimepkg.TaskResult{
-			TaskID: "runtime-task-1",
-			Status: corepkg.TaskCompleted,
-			Output: []byte(`{"ok":true,"via":"runtime_gateway"}`),
-		},
+		TaskID: result.TaskID,
+		Result: result,
 	}, nil
 }
 
@@ -207,5 +214,91 @@ func TestRunPromptExecutesToolThroughRuntimeGatewayBoundary(t *testing.T) {
 	toolResult := sess.Messages[2].Content
 	if !strings.Contains(toolResult, `"via":"runtime_gateway"`) {
 		t.Fatalf("expected tool result from runtime gateway, got %q", toolResult)
+	}
+}
+
+func TestRunPromptRecordsSystemSandboxMetadataInToolExecuteAudit(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	auditStore := &toolExecutionAuditStore{}
+
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				ID:   "tool-sandbox-audit",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name:      "run_shell",
+					Arguments: `{"command":"echo ok"}`,
+				},
+			}},
+		},
+		{
+			Role:    llm.RoleAssistant,
+			Content: "done",
+		},
+	}}
+	gateway := &stubRuntimeGateway{
+		result: runtimepkg.TaskResult{
+			TaskID: "runtime-task-1",
+			Status: corepkg.TaskCompleted,
+			Output: []byte(`{"ok":true,"exit_code":0,"stdout":"ok","stderr":"","system_sandbox":{"mode":"best_effort","backend":"linux_unshare","active":false,"fallback":true,"status":"fallback","fallback_reason":"linux backend unavailable"}}`),
+		},
+	}
+
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:      config.ProviderConfig{Model: "test-model"},
+			MaxIterations: 4,
+			Stream:        false,
+		},
+		Client:     client,
+		Store:      store,
+		Registry:   tools.DefaultRegistry(),
+		Runtime:    gateway,
+		AuditStore: auditStore,
+		Stdin:      strings.NewReader(""),
+		Stdout:     io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "run shell", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+
+	events := auditStore.snapshot()
+	var resultEvent *storagepkg.AuditEvent
+	for i := range events {
+		if events[i].Action == "tool_execute_result" {
+			resultEvent = &events[i]
+			break
+		}
+	}
+	if resultEvent == nil {
+		t.Fatalf("expected tool_execute_result audit event, got %+v", events)
+	}
+	if got := resultEvent.Metadata["sandbox_mode"]; got != "best_effort" {
+		t.Fatalf("expected sandbox_mode=best_effort, got %q", got)
+	}
+	if got := resultEvent.Metadata["sandbox_backend"]; got != "linux_unshare" {
+		t.Fatalf("expected sandbox_backend=linux_unshare, got %q", got)
+	}
+	if got := resultEvent.Metadata["sandbox_status"]; got != "fallback" {
+		t.Fatalf("expected sandbox_status=fallback, got %q", got)
+	}
+	if got := resultEvent.Metadata["sandbox_fallback"]; got != "true" {
+		t.Fatalf("expected sandbox_fallback=true, got %q", got)
+	}
+	if got := resultEvent.Metadata["sandbox_fallback_reason"]; got != "linux backend unavailable" {
+		t.Fatalf("expected sandbox_fallback_reason to be recorded, got %q", got)
 	}
 }

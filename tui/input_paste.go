@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -14,18 +15,23 @@ import (
 )
 
 const (
-	pastedContentMetaKey        = "pasted_contents"
-	maxStoredPastedContents     = 10
-	longPasteLineThreshold      = 10
-	longPasteCharThreshold      = 500
-	pasteQuickCharThreshold     = 80
-	pasteBurstImmediateMinChars = 12
-	flattenedPasteCharThreshold = 180
-	pasteBurstCharThreshold     = 120
-	pasteBurstWindow            = 80 * time.Millisecond
-	pasteContinuationWindow     = 1500 * time.Millisecond
-	maxSinglePastedCharLength   = 200000
-	pasteSoftWrapWidth          = 72
+	pastedContentMetaKey           = "pasted_contents"
+	maxStoredPastedContents        = 10
+	opencodePasteSummaryMinLines   = 3
+	opencodePasteSummaryMinChars   = 150
+	longPasteLineThreshold         = 10
+	longPasteCharThreshold         = 500
+	pasteQuickCharThreshold        = 80
+	pasteBurstImmediateMinChars    = 12
+	flattenedPasteCharThreshold    = 180
+	pasteBurstCharThreshold        = 120
+	pasteBurstWindow               = 80 * time.Millisecond
+	pasteContinuationWindow        = 1500 * time.Millisecond
+	clipboardCaptureArmWindow      = 1200 * time.Millisecond
+	clipboardCaptureRapidRuneGap   = 30 * time.Millisecond
+	clipboardCaptureMinPrefixRunes = 4
+	maxSinglePastedCharLength      = 200000
+	pasteSoftWrapWidth             = 72
 )
 
 var pastedRefPattern = regexp.MustCompile(`\[(?:Paste|Pasted)(?:\s+#(\d+))?(?:\s+~(\d+)\s+lines)?(?:\s+line(\d+)(?:~line(\d+))?)?\]`)
@@ -417,6 +423,24 @@ func (m *model) clearPasteSession() {
 	m.clearPasteBurstCandidate()
 }
 
+func (m *model) readClipboardTextForPaste() (string, bool) {
+	if m == nil || m.clipboardRead == nil {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	text, err := m.clipboardRead.ReadText(ctx)
+	if err != nil {
+		return "", false
+	}
+	normalized := trimTrailingPasteTerminators(text)
+	candidate := strings.ReplaceAll(normalizeNewlines(normalized), ctrlVMarkerRune, "")
+	if strings.TrimSpace(candidate) == "" {
+		return "", false
+	}
+	return normalized, true
+}
+
 func (m *model) syncPasteConfirmPending(value string) {
 	if m == nil {
 		return
@@ -567,6 +591,214 @@ func (m *model) ingestPasteFragment(fragment, source string) tea.Cmd {
 
 func (m model) handlePastePayload(payload string) (tea.Model, tea.Cmd) {
 	return m, m.ingestPasteFragment(trimTrailingPasteTerminators(payload), "paste-payload")
+}
+
+func (m *model) armClipboardPasteCaptureSignal() {
+	if m == nil {
+		return
+	}
+	until := time.Now().Add(clipboardCaptureArmWindow)
+	if until.After(m.clipboardCaptureArmedUntil) {
+		m.clipboardCaptureArmedUntil = until
+	}
+}
+
+func (m *model) isClipboardPasteCaptureArmed() bool {
+	if m == nil || m.clipboardCaptureArmedUntil.IsZero() {
+		return false
+	}
+	return time.Now().Before(m.clipboardCaptureArmedUntil)
+}
+
+func (m *model) shouldArmClipboardCaptureFromImplicitMutation(before, after, source string, gap time.Duration, delta int) bool {
+	if m == nil || isPasteLikeSource(source) {
+		return false
+	}
+	if delta <= 0 || m.inputBurstSize < clipboardCaptureMinPrefixRunes {
+		return false
+	}
+	_, inserted, _ := insertionDiff(before, after)
+	inserted = strings.ReplaceAll(normalizeNewlines(inserted), ctrlVMarkerRune, "")
+	if inserted == "" {
+		return false
+	}
+	if strings.Contains(inserted, "\n") || strings.Contains(inserted, "\t") {
+		return true
+	}
+	insertedRunes := len([]rune(inserted))
+	if insertedRunes >= clipboardCaptureMinPrefixRunes {
+		return true
+	}
+	return insertedRunes == 1 && gap <= clipboardCaptureRapidRuneGap
+}
+
+func (m *model) shouldAttemptClipboardPasteCapture(before, after, source string) bool {
+	if m == nil || isPasteLikeSource(source) || !m.isClipboardPasteCaptureArmed() {
+		return false
+	}
+	if strings.TrimSpace(after) == "" {
+		return false
+	}
+	return len([]rune(after)) > len([]rune(before))
+}
+
+func (m *model) tryStartClipboardPasteCapture(before, after, source string) (string, string, bool) {
+	if m == nil {
+		return after, "", false
+	}
+	if isPasteLikeSource(source) || m.pasteTransaction.Active {
+		return after, "", false
+	}
+	trimmedAfter := strings.TrimSpace(after)
+	if trimmedAfter == "" {
+		return after, "", false
+	}
+
+	clipboardText, ok := m.readClipboardTextForPaste()
+	if !ok || !m.isLongPastedText(clipboardText) {
+		return after, "", false
+	}
+	prefix, inserted, suffix := insertionDiff(before, after)
+	inserted = strings.ReplaceAll(inserted, ctrlVMarkerRune, "")
+	normalizedInserted := normalizeNewlines(inserted)
+
+	normalizedClipboard := normalizeNewlines(clipboardText)
+	if strings.TrimSpace(normalizedClipboard) == "" {
+		return after, "", false
+	}
+	var buildReplacement func(marker string) string
+	consumedRunes := 0
+	insertedRunes := len([]rune(normalizedInserted))
+	if normalizedInserted != "" &&
+		insertedRunes >= clipboardCaptureMinPrefixRunes &&
+		strings.HasPrefix(normalizedClipboard, normalizedInserted) {
+		consumedRunes = insertedRunes
+		buildReplacement = func(marker string) string {
+			return after[:prefix] + marker + after[len(after)-suffix:]
+		}
+	} else {
+		normalizedBefore := normalizeNewlines(strings.ReplaceAll(before, ctrlVMarkerRune, ""))
+		normalizedAfter := normalizeNewlines(strings.ReplaceAll(after, ctrlVMarkerRune, ""))
+		beforeMatched := longestClipboardPrefixSuffixLen(normalizedBefore, normalizedClipboard)
+		afterMatched := longestClipboardPrefixSuffixLen(normalizedAfter, normalizedClipboard)
+		if afterMatched < clipboardCaptureMinPrefixRunes || afterMatched <= beforeMatched {
+			return after, "", false
+		}
+		consumedRunes = afterMatched
+		buildReplacement = func(marker string) string {
+			keep := suffixRunes(after, len([]rune(normalizedAfter))-afterMatched)
+			return marker + keep
+		}
+	}
+
+	marker, content, err := m.compressPastedText(normalizedClipboard)
+	if err != nil {
+		return after, err.Error(), false
+	}
+	m.beginPasteTransaction(normalizedClipboard, "clipboard-capture")
+	m.pasteTransaction.Consumed = consumedRunes
+	updated := buildReplacement(marker)
+	note := fmt.Sprintf("Long pasted text (%d lines) compressed as %s. Use [Paste #%s], [Paste #%s line10], or [Paste #%s line10~line20].",
+		content.Lines, marker, content.ID, content.ID, content.ID)
+	return updated, note, true
+}
+
+func longestClipboardPrefixSuffixLen(value, clipboard string) int {
+	valueRunes := []rune(value)
+	clipRunes := []rune(clipboard)
+	maxLen := min(len(valueRunes), len(clipRunes))
+	for n := maxLen; n >= 1; n-- {
+		if string(valueRunes[len(valueRunes)-n:]) == string(clipRunes[:n]) {
+			return n
+		}
+	}
+	return 0
+}
+
+func suffixRunes(value string, count int) string {
+	if count <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if count >= len(runes) {
+		return value
+	}
+	return string(runes[len(runes)-count:])
+}
+
+func (m *model) upsertVirtualPastePart(pasteID, placeholder string) {
+	if m == nil {
+		return
+	}
+	pasteID = strings.TrimSpace(pasteID)
+	placeholder = strings.TrimSpace(placeholder)
+	if pasteID == "" || placeholder == "" {
+		return
+	}
+	if m.virtualPasteParts == nil {
+		m.virtualPasteParts = make([]virtualPastePart, 0, maxStoredPastedContents)
+	}
+	if m.nextVirtualPastePart <= 0 {
+		m.nextVirtualPastePart = 1
+	}
+	for i := range m.virtualPasteParts {
+		if m.virtualPasteParts[i].PasteID == pasteID {
+			m.virtualPasteParts[i].Placeholder = placeholder
+			return
+		}
+	}
+	part := virtualPastePart{
+		PartID:      strconv.Itoa(m.nextVirtualPastePart),
+		PasteID:     pasteID,
+		Placeholder: placeholder,
+	}
+	m.nextVirtualPastePart++
+	m.virtualPasteParts = append(m.virtualPasteParts, part)
+	if len(m.virtualPasteParts) > maxStoredPastedContents {
+		drop := len(m.virtualPasteParts) - maxStoredPastedContents
+		m.virtualPasteParts = append([]virtualPastePart(nil), m.virtualPasteParts[drop:]...)
+	}
+}
+
+func (m *model) clearVirtualPasteParts() {
+	if m == nil {
+		return
+	}
+	m.virtualPasteParts = m.virtualPasteParts[:0]
+}
+
+func (m *model) expandVirtualPasteParts(input string) (string, int) {
+	if m == nil || strings.TrimSpace(input) == "" || len(m.virtualPasteParts) == 0 {
+		return input, 0
+	}
+	expanded := input
+	applied := 0
+	for _, part := range m.virtualPasteParts {
+		placeholder := strings.TrimSpace(part.Placeholder)
+		if placeholder == "" || !strings.Contains(expanded, placeholder) {
+			continue
+		}
+		content, ok := m.findPastedContent(part.PasteID)
+		if !ok || strings.TrimSpace(content.Content) == "" {
+			continue
+		}
+		block := "```\n" + content.Content + "\n```"
+		expanded = strings.Replace(expanded, placeholder, block, 1)
+		applied++
+	}
+	return expanded, applied
+}
+
+func (m *model) resolvePromptPastedInput(raw string) (string, error) {
+	if m == nil {
+		return raw, nil
+	}
+	expanded, _ := m.expandVirtualPasteParts(raw)
+	resolved, err := m.resolvePastedLineReference(expanded)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
 func (m *model) ensurePastedContentState() {
@@ -854,7 +1086,9 @@ func (m *model) compressPastedText(input string) (string, pastedContent, error) 
 		return "", pastedContent{}, err
 	}
 	m.lastCompressedPasteAt = now
-	return fmt.Sprintf("[Paste #%s ~%d lines]", id, lineCount), content, nil
+	marker := fmt.Sprintf("[Paste #%s ~%d lines]", id, lineCount)
+	m.upsertVirtualPastePart(content.ID, marker)
+	return marker, content, nil
 }
 
 func countPastedDisplayLines(content string) int {
@@ -1016,6 +1250,7 @@ func (m *model) mergeTailIntoLatestMarker(chain, tail string) (string, bool, err
 	m.lastCompressedPasteAt = time.Now().UTC()
 
 	updatedMarker := fmt.Sprintf("[Paste #%s ~%d lines]", content.ID, content.Lines)
+	m.upsertVirtualPastePart(content.ID, updatedMarker)
 	updatedChain := chain[:loc.start] + updatedMarker + chain[loc.end:]
 	return strings.TrimSpace(updatedChain), true, nil
 }

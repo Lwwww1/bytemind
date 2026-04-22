@@ -16,13 +16,13 @@ func (WriteFileTool) Definition() llm.ToolDefinition {
 		Type: "function",
 		Function: llm.FunctionDefinition{
 			Name:        "write_file",
-			Description: "Write or create a file inside the workspace",
+			Description: "Write or create a file inside the workspace or configured writable roots",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Relative file path inside the workspace.",
+						"description": "Relative path from workspace or absolute path inside workspace/writable_roots.",
 					},
 					"content": map[string]any{
 						"type":        "string",
@@ -49,7 +49,7 @@ func (WriteFileTool) Run(_ context.Context, raw json.RawMessage, execCtx *Execut
 		return "", err
 	}
 
-	path, err := resolvePath(execCtx.Workspace, args.Path)
+	path, err := resolvePath(execCtx.Workspace, args.Path, writableRootsFromExecContext(execCtx)...)
 	if err != nil {
 		return "", err
 	}

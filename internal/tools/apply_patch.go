@@ -98,7 +98,7 @@ func (ApplyPatchTool) Run(_ context.Context, raw json.RawMessage, execCtx *Execu
 				contentLines = append(contentLines, strings.TrimPrefix(lines[i], "+"))
 				i++
 			}
-			resolved, err := resolvePath(execCtx.Workspace, path)
+			resolved, err := resolvePath(execCtx.Workspace, path, writableRootsFromExecContext(execCtx)...)
 			if err != nil {
 				return "", err
 			}
@@ -112,7 +112,7 @@ func (ApplyPatchTool) Run(_ context.Context, raw json.RawMessage, execCtx *Execu
 			operations = append(operations, map[string]any{"type": "add", "path": filepath.ToSlash(mustRel(execCtx.Workspace, resolved))})
 		case strings.HasPrefix(line, "*** Delete File: "):
 			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Delete File: "))
-			resolved, err := resolvePath(execCtx.Workspace, path)
+			resolved, err := resolvePath(execCtx.Workspace, path, writableRootsFromExecContext(execCtx)...)
 			if err != nil {
 				return "", err
 			}
@@ -123,14 +123,14 @@ func (ApplyPatchTool) Run(_ context.Context, raw json.RawMessage, execCtx *Execu
 			i++
 		case strings.HasPrefix(line, "*** Update File: "):
 			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Update File: "))
-			oldPath, err := resolvePath(execCtx.Workspace, path)
+			oldPath, err := resolvePath(execCtx.Workspace, path, writableRootsFromExecContext(execCtx)...)
 			if err != nil {
 				return "", err
 			}
 			i++
 			newPath := oldPath
 			if i < len(lines) && strings.HasPrefix(lines[i], "*** Move to: ") {
-				newPath, err = resolvePath(execCtx.Workspace, strings.TrimSpace(strings.TrimPrefix(lines[i], "*** Move to: ")))
+				newPath, err = resolvePath(execCtx.Workspace, strings.TrimSpace(strings.TrimPrefix(lines[i], "*** Move to: ")), writableRootsFromExecContext(execCtx)...)
 				if err != nil {
 					return "", err
 				}

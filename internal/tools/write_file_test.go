@@ -76,3 +76,40 @@ func TestWriteFileToolRejectsEscapedPath(t *testing.T) {
 	}
 }
 
+func TestWriteFileToolAllowsConfiguredWritableRoot(t *testing.T) {
+	workspace := t.TempDir()
+	writableRoot := filepath.Join(t.TempDir(), "external-output")
+	tool := WriteFileTool{}
+	target := filepath.Join(writableRoot, "nested", "file.txt")
+	payload, _ := json.Marshal(map[string]any{
+		"path":        target,
+		"content":     "hello writable root",
+		"create_dirs": true,
+	})
+
+	result, err := tool.Run(context.Background(), payload, &ExecutionContext{
+		Workspace:     workspace,
+		WritableRoots: []string{writableRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello writable root" {
+		t.Fatalf("unexpected content %q", string(data))
+	}
+
+	var parsed struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Path != filepath.ToSlash(target) {
+		t.Fatalf("expected external absolute path %q in result, got %q", filepath.ToSlash(target), parsed.Path)
+	}
+}

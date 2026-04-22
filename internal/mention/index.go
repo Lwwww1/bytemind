@@ -3,6 +3,7 @@ package mention
 import (
 	"bufio"
 	"io/fs"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,6 +19,7 @@ const defaultSearchLimit = 15
 const (
 	mentionTrieRecallMultiplier = 8
 	mentionTrieMinRecall        = 64
+	mentionIgnoreMaxLineBytes   = 4 * 1024 * 1024
 )
 
 var (
@@ -645,8 +647,12 @@ func loadMentionIgnoreMatcher(workspace string) mentionIgnoreMatcher {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), mentionIgnoreMaxLineBytes)
 	for scanner.Scan() {
 		matcher.addRule(scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("mention: failed to parse %s: %v", ignorePath, err)
 	}
 	return matcher
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"bytemind/internal/agent"
@@ -25,6 +26,8 @@ type BootstrapRequest struct {
 	ModelOverride         string
 	SessionID             string
 	StreamOverride        string
+	ApprovalModeOverride  string
+	AwayPolicyOverride    string
 	MaxIterationsOverride int
 	RequireAPIKey         bool
 	Stdin                 io.Reader
@@ -33,6 +36,7 @@ type BootstrapRequest struct {
 
 // Runtime is the assembled runtime bundle consumed by command entrypoints.
 type Runtime struct {
+	Config      config.Config
 	Runner      *agent.Runner
 	Store       *session.Store
 	Session     *session.Session
@@ -51,13 +55,15 @@ func Bootstrap(req BootstrapRequest) (Runtime, error) {
 		ConfigPath:            req.ConfigPath,
 		ModelOverride:         req.ModelOverride,
 		StreamOverride:        req.StreamOverride,
+		ApprovalModeOverride:  req.ApprovalModeOverride,
+		AwayPolicyOverride:    req.AwayPolicyOverride,
 		MaxIterationsOverride: req.MaxIterationsOverride,
 	})
 	if err != nil {
 		return Runtime{}, err
 	}
-	if req.MaxIterationsOverride < 0 {
-		return Runtime{}, errors.New("-max-iterations must be greater than 0")
+	if req.StreamOverride == "" {
+		req.StreamOverride = strings.TrimSpace(strconv.FormatBool(cfg.Stream))
 	}
 
 	apiKey := cfg.Provider.ResolveAPIKey()
@@ -88,7 +94,11 @@ func Bootstrap(req BootstrapRequest) (Runtime, error) {
 	}
 
 	cfg.Provider.APIKey = apiKey
-	client, err := provider.NewClient(cfg.Provider)
+	runtimeCfg := cfg.ProviderRuntime
+	if len(runtimeCfg.Providers) == 0 {
+		runtimeCfg = config.LegacyProviderRuntimeConfig(cfg.Provider)
+	}
+	client, err := provider.NewClientFromRuntime(runtimeCfg, nil)
 	if err != nil {
 		return Runtime{}, err
 	}
@@ -123,7 +133,7 @@ func Bootstrap(req BootstrapRequest) (Runtime, error) {
 	taskManager := runtimepkg.NewInMemoryTaskManager(
 		runtimepkg.WithTaskEventStore(taskEventStore),
 	)
-	extensions := extensionspkg.NopManager{}
+	extensions := extensionspkg.NewManager(workspace)
 	runner := agent.NewRunner(agent.Options{
 		Workspace:   workspace,
 		Config:      cfg,
@@ -139,6 +149,7 @@ func Bootstrap(req BootstrapRequest) (Runtime, error) {
 	})
 
 	return Runtime{
+		Config:      cfg,
 		Runner:      runner,
 		Store:       store,
 		Session:     sess,

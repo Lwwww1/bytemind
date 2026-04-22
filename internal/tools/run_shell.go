@@ -22,18 +22,15 @@ import (
 
 type RunShellTool struct{}
 
-type shellRisk int
+type shellRisk = policypkg.ShellRisk
 
 const (
-	shellRiskSafe shellRisk = iota
-	shellRiskApproval
-	shellRiskBlocked
+	shellRiskSafe     shellRisk = policypkg.ShellRiskSafe
+	shellRiskApproval shellRisk = policypkg.ShellRiskApproval
+	shellRiskBlocked  shellRisk = policypkg.ShellRiskBlocked
 )
 
-type shellAssessment struct {
-	Risk   shellRisk
-	Reason string
-}
+type shellAssessment = policypkg.ShellAssessment
 
 func (RunShellTool) Definition() llm.ToolDefinition {
 	return llm.ToolDefinition{
@@ -116,31 +113,37 @@ func (RunShellTool) Run(ctx context.Context, raw json.RawMessage, execCtx *Execu
 }
 
 func requireApproval(command string, execCtx *ExecutionContext) error {
+	if execCtx != nil && execCtx.SkipShellApproval {
+		return nil
+	}
 	mode := planpkg.ModeBuild
 	approvalPolicy := ""
 	if execCtx != nil {
 		mode = planpkg.NormalizeMode(string(execCtx.Mode))
 		approvalPolicy = strings.TrimSpace(execCtx.ApprovalPolicy)
 	}
-
-	eval := policypkg.Evaluate(policypkg.EvaluateInput{
-		ToolName:       "run_shell",
-		ToolSpec:       policypkg.ToolSpec{Name: "run_shell", Destructive: false},
-		ShellCommand:   command,
-		Mode:           mode,
-		ApprovalPolicy: approvalPolicy,
-	})
-	switch eval.MainDecision {
-	case policypkg.MainDecisionAllow:
-		return nil
-	case policypkg.MainDecisionEscalate:
-		return promptForApproval(command, eval.MainReason, execCtx)
-	default:
-		reason := strings.TrimSpace(eval.MainReason)
-		if reason == "" {
-			reason = "shell command is unavailable by active policy"
+	if mode == planpkg.ModePlan {
+		if !isPlanSafeCommand(command) {
+			return errors.New("shell command is unavailable in plan mode unless it matches the strict read-only allowlist")
 		}
-		return errors.New(reason)
+		return nil
+	}
+
+	assessment := assessShellCommand(command)
+	if assessment.Risk == shellRiskBlocked {
+		return errors.New(assessment.Reason)
+	}
+
+	switch approvalPolicy {
+	case "never":
+		return nil
+	case "always":
+		return promptForApproval(command, assessment.Reason, execCtx)
+	default:
+		if assessment.Risk == shellRiskApproval {
+			return promptForApproval(command, assessment.Reason, execCtx)
+		}
+		return nil
 	}
 }
 
@@ -149,6 +152,12 @@ func isPlanSafeCommand(command string) bool {
 }
 
 func promptForApproval(command, reason string, execCtx *ExecutionContext) error {
+	if execCtx != nil && execCtx.isAwayMode() {
+		return awayModeApprovalDeniedError("shell command", command, execCtx)
+	}
+	if execCtx == nil {
+		return approvalChannelUnavailableError("shell command", command)
+	}
 	if execCtx.Approval != nil {
 		approved, err := execCtx.Approval(ApprovalRequest{
 			Command: command,
@@ -163,7 +172,7 @@ func promptForApproval(command, reason string, execCtx *ExecutionContext) error 
 		return nil
 	}
 	if execCtx.Stdin == nil {
-		return errors.New("shell command requires approval but no stdin is available")
+		return approvalChannelUnavailableError("shell command", command)
 	}
 	if execCtx.Stdout != nil {
 		if strings.TrimSpace(reason) != "" {
@@ -185,15 +194,7 @@ func promptForApproval(command, reason string, execCtx *ExecutionContext) error 
 }
 
 func assessShellCommand(command string) shellAssessment {
-	assessment := policypkg.AssessShellCommand(command)
-	switch assessment.Risk {
-	case policypkg.ShellRiskBlocked:
-		return shellAssessment{Risk: shellRiskBlocked, Reason: assessment.Reason}
-	case policypkg.ShellRiskApproval:
-		return shellAssessment{Risk: shellRiskApproval, Reason: assessment.Reason}
-	default:
-		return shellAssessment{Risk: shellRiskSafe, Reason: assessment.Reason}
-	}
+	return policypkg.AssessShellCommand(command)
 }
 
 func shellCommand(ctx context.Context, command string) *exec.Cmd {

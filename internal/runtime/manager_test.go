@@ -120,25 +120,35 @@ func TestInMemoryTaskManagerGetUnknownTaskReturnsTaskNotFound(t *testing.T) {
 }
 
 func TestInMemoryTaskManagerRetryFromFailedResetsTaskForRetry(t *testing.T) {
-	mgr := NewInMemoryTaskManager()
-	id, err := mgr.Submit(context.Background(), TaskSpec{
-		Name:       "demo",
-		MaxRetries: 3,
-	})
-	if err != nil {
-		t.Fatalf("Submit failed: %v", err)
-	}
+	block := make(chan struct{})
+	mgr := NewInMemoryTaskManager(WithTaskExecutor(func(ctx context.Context, _ Task) ([]byte, error) {
+		select {
+		case <-block:
+			return []byte("done"), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}))
+	defer close(block)
+
+	id := corepkg.TaskID("retry-reset-task")
 
 	startedAt := time.Now().UTC().Add(-2 * time.Second)
 	finishedAt := time.Now().UTC().Add(-1 * time.Second)
 	mgr.mu.Lock()
-	task := mgr.tasks[id]
-	task.Status = corepkg.TaskFailed
-	task.Attempt = 1
-	task.StartedAt = &startedAt
-	task.FinishedAt = &finishedAt
-	task.ErrorCode = ErrorCodeTaskTimeout
-	mgr.tasks[id] = task
+	mgr.tasks[id] = Task{
+		ID: id,
+		Spec: TaskSpec{
+			Name:       "demo",
+			MaxRetries: 3,
+		},
+		Status:     corepkg.TaskFailed,
+		Attempt:    1,
+		CreatedAt:  time.Now().UTC().Add(-3 * time.Second),
+		StartedAt:  &startedAt,
+		FinishedAt: &finishedAt,
+		ErrorCode:  ErrorCodeTaskTimeout,
+	}
 	mgr.mu.Unlock()
 
 	retriedID, err := mgr.Retry(context.Background(), id)
@@ -149,12 +159,14 @@ func TestInMemoryTaskManagerRetryFromFailedResetsTaskForRetry(t *testing.T) {
 		t.Fatalf("expected retried id %q, got %q", id, retriedID)
 	}
 
-	task, err = mgr.Get(context.Background(), id)
+	task, err := mgr.Get(context.Background(), id)
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
-	if task.Status != corepkg.TaskPending {
-		t.Fatalf("expected pending status, got %s", task.Status)
+	// Retry re-queues asynchronously. Depending on scheduler timing,
+	// status can still be pending or already running.
+	if task.Status != corepkg.TaskPending && task.Status != corepkg.TaskRunning {
+		t.Fatalf("expected pending/running status after retry, got %s", task.Status)
 	}
 	if task.Attempt != 2 {
 		t.Fatalf("expected attempt 2, got %d", task.Attempt)
@@ -162,11 +174,23 @@ func TestInMemoryTaskManagerRetryFromFailedResetsTaskForRetry(t *testing.T) {
 	if task.ErrorCode != "" {
 		t.Fatalf("expected cleared error code, got %q", task.ErrorCode)
 	}
-	if task.StartedAt != nil {
-		t.Fatal("expected startedAt to reset on retry")
+	if task.Status == corepkg.TaskPending && task.StartedAt != nil {
+		t.Fatal("expected startedAt to remain nil while retry is pending")
+	}
+	if task.Status == corepkg.TaskRunning {
+		if task.StartedAt == nil {
+			t.Fatal("expected startedAt to be set once retry starts running")
+		}
+		if task.StartedAt.Equal(startedAt) {
+			t.Fatal("expected startedAt to be refreshed for retry attempt")
+		}
 	}
 	if task.FinishedAt != nil {
 		t.Fatal("expected finishedAt to reset on retry")
+	}
+
+	if err := mgr.Cancel(context.Background(), id, "cleanup"); err != nil && !hasErrorCode(err, ErrorCodeInvalidTransition) {
+		t.Fatalf("cleanup cancel failed: %v", err)
 	}
 }
 

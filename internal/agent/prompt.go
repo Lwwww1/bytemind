@@ -47,6 +47,8 @@ type PromptActiveSkill struct {
 type PromptInput struct {
 	Workspace      string
 	ApprovalPolicy string
+	ApprovalMode   string
+	AwayPolicy     string
 	Model          string
 	Mode           string
 	Platform       string
@@ -131,6 +133,14 @@ func renderSystemBlock(input PromptInput) string {
 	if approval == "" {
 		approval = "on-request"
 	}
+	approvalMode := strings.TrimSpace(input.ApprovalMode)
+	if approvalMode == "" {
+		approvalMode = "interactive"
+	}
+	awayPolicy := strings.TrimSpace(input.AwayPolicy)
+	if awayPolicy == "" {
+		awayPolicy = "auto_deny_continue"
+	}
 	gitRepo := "no"
 	if isGitRepository(workspace) {
 		gitRepo = "yes"
@@ -146,6 +156,8 @@ func renderSystemBlock(input PromptInput) string {
 		fmt.Sprintf("model: %s", model),
 		fmt.Sprintf("mode: %s", mode),
 		fmt.Sprintf("approval_policy: %s", approval),
+		fmt.Sprintf("approval_mode: %s", approvalMode),
+		fmt.Sprintf("away_policy: %s", awayPolicy),
 		"",
 		"[Available Skills]",
 		"- Skills are reusable task profiles available in this session. Only the [Active Skill] block, when present, is currently in effect.",

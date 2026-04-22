@@ -16,18 +16,33 @@ type clientAdapter struct {
 
 type RoutedClient struct {
 	router        Router
+	health        HealthChecker
 	allowFallback bool
 }
 
-func NewRoutedClient(router Router) llm.Client {
-	return NewRoutedClientWithPolicy(router, false)
+type routeContextKey struct{}
+
+func WithRouteContext(ctx context.Context, rc RouteContext) context.Context {
+	return context.WithValue(ctx, routeContextKey{}, normalizeRouteContext(rc))
 }
 
-func NewRoutedClientWithPolicy(router Router, allowFallback bool) llm.Client {
+func RouteContextFromContext(ctx context.Context) RouteContext {
+	if ctx == nil {
+		return RouteContext{}
+	}
+	rc, _ := ctx.Value(routeContextKey{}).(RouteContext)
+	return normalizeRouteContext(rc)
+}
+
+func NewRoutedClient(router Router) llm.Client {
+	return NewRoutedClientWithPolicy(router, nil, false)
+}
+
+func NewRoutedClientWithPolicy(router Router, health HealthChecker, allowFallback bool) llm.Client {
 	if router == nil {
 		return nil
 	}
-	return &RoutedClient{router: router, allowFallback: allowFallback}
+	return &RoutedClient{router: router, health: health, allowFallback: allowFallback}
 }
 
 func WrapClient(providerID ProviderID, defaultModel ModelID, client llm.Client) Client {
@@ -57,7 +72,9 @@ func (c *RoutedClient) execute(ctx context.Context, req llm.ChatRequest, stream 
 	if c == nil || c.router == nil {
 		return llm.Message{}, unavailableRouteError("no provider candidates available")
 	}
-	result, err := c.router.Route(ctx, ModelID(strings.TrimSpace(req.Model)), RouteContext{AllowFallback: c.allowFallback})
+	routeContext := RouteContextFromContext(ctx)
+	routeContext.AllowFallback = routeContext.AllowFallback || c.allowFallback
+	result, err := c.router.Route(ctx, ModelID(strings.TrimSpace(req.Model)), routeContext)
 	if err != nil {
 		return llm.Message{}, err
 	}
@@ -84,7 +101,13 @@ func (c *RoutedClient) execute(ctx context.Context, req llm.ChatRequest, stream 
 		callReq.Model = string(target.ModelID)
 		msg, err := executeTarget(ctx, target, callReq, stream, forwardDelta)
 		if err == nil {
+			if c.health != nil {
+				c.health.RecordSuccess(ctx, target.ProviderID)
+			}
 			return msg, nil
+		}
+		if c.health != nil {
+			c.health.RecordFailure(ctx, target.ProviderID, err)
 		}
 		if errors.Is(err, context.Canceled) {
 			return llm.Message{}, err
@@ -283,6 +306,7 @@ func (a *clientAdapter) Stream(ctx context.Context, req Request) (<-chan Event, 
 			})
 			return
 		}
+		message.Normalize()
 		if message.Usage != nil {
 			if !normalizeEvent(ctx, normalizer, stream, Event{
 				Type:       EventUsage,

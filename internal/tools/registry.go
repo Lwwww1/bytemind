@@ -9,25 +9,79 @@ import (
 	"strings"
 	"sync"
 
-	extensionspkg "bytemind/internal/extensions"
 	"bytemind/internal/llm"
 	planpkg "bytemind/internal/plan"
 	runtimepkg "bytemind/internal/runtime"
+	sandboxpkg "bytemind/internal/sandbox"
 	"bytemind/internal/session"
 )
 
 type ExecutionContext struct {
-	Workspace      string
-	ApprovalPolicy string
-	Approval       ApprovalHandler
-	Session        *session.Session
-	TaskManager    runtimepkg.TaskManager
-	Extensions     extensionspkg.Manager
-	Mode           planpkg.AgentMode
-	Stdin          io.Reader
-	Stdout         io.Writer
-	AllowedTools   map[string]struct{}
-	DeniedTools    map[string]struct{}
+	Workspace                 string
+	WritableRoots             []string
+	ApprovalPolicy            string
+	ApprovalMode              string
+	AwayPolicy                string
+	SandboxEnabled            bool
+	SkipShellApproval         bool
+	SandboxEscalationApproved bool
+	LeaseID                   string
+	RunID                     string
+	FSRead                    []string
+	FSWrite                   []string
+	ExecAllowlist             []sandboxpkg.ExecRule
+	NetworkAllowlist          []sandboxpkg.NetworkRule
+	Lease                     *sandboxpkg.Lease
+	LeaseKeyring              map[string][]byte
+
+	Approval    ApprovalHandler
+	Session     *session.Session
+	TaskManager runtimepkg.TaskManager
+	// Extensions is an optional passthrough hook for callers that need extension context.
+	// It stays untyped here to keep tools/extension packages decoupled.
+	Extensions   any
+	Mode         planpkg.AgentMode
+	Stdin        io.Reader
+	Stdout       io.Writer
+	AllowedTools map[string]struct{}
+	DeniedTools  map[string]struct{}
+}
+
+const (
+	approvalModeInteractive = "interactive"
+	approvalModeAway        = "away"
+
+	awayPolicyAutoDenyContinue = "auto_deny_continue"
+	awayPolicyFailFast         = "fail_fast"
+)
+
+func (c *ExecutionContext) isAwayMode() bool {
+	if c == nil {
+		return false
+	}
+	return c.approvalMode() == approvalModeAway
+}
+
+func (c *ExecutionContext) approvalMode() string {
+	if c == nil {
+		return approvalModeInteractive
+	}
+	mode := strings.ToLower(strings.TrimSpace(c.ApprovalMode))
+	if mode == "" {
+		return approvalModeInteractive
+	}
+	return mode
+}
+
+func (c *ExecutionContext) awayPolicy() string {
+	if c == nil {
+		return awayPolicyAutoDenyContinue
+	}
+	policy := strings.ToLower(strings.TrimSpace(c.AwayPolicy))
+	if policy == "" {
+		return awayPolicyAutoDenyContinue
+	}
+	return policy
 }
 
 type Tool interface {
@@ -62,6 +116,13 @@ func DefaultRegistry() *Registry {
 	return r
 }
 
+// Add keeps backward compatibility with tests and call sites that used the old API.
+func (r *Registry) Add(tool Tool) {
+	if err := r.addBuiltin(tool); err != nil {
+		panic(err)
+	}
+}
+
 func (r *Registry) Register(tool Tool, opts RegisterOptions) error {
 	if tool == nil {
 		return &RegistryError{Code: RegistryErrorInvalidTool, Message: "tool is required", Source: opts.Source}
@@ -75,12 +136,33 @@ func (r *Registry) Register(tool Tool, opts RegisterOptions) error {
 	r.ensureMapsLocked()
 	if existingMeta, exists := r.meta[meta.ToolKey]; exists {
 		return &RegistryError{
-			Code:         RegistryErrorDuplicateName,
-			Message:      fmt.Sprintf("tool %q already registered", meta.ToolKey),
-			ToolKey:      meta.ToolKey,
-			Source:       meta.Source,
-			ExtensionID:  meta.ExtensionID,
-			ConflictWith: existingMeta,
+			Code:             RegistryErrorDuplicateName,
+			Message:          fmt.Sprintf("tool %q already registered", meta.ToolKey),
+			ToolKey:          meta.ToolKey,
+			OriginalToolName: meta.OriginalToolName,
+			Source:           meta.Source,
+			ExtensionID:      meta.ExtensionID,
+			ConflictWith:     existingMeta,
+		}
+	}
+	if conflicts := r.findConflictsByOriginalNameLocked(meta.OriginalToolName, meta.ToolKey); len(conflicts) > 0 {
+		blocking := conflicts
+		if meta.Source == RegistrationSourceExtension {
+			blocking = filterBlockingOriginalNameConflicts(meta, conflicts, opts.AllowOriginalNameShadowBuiltin)
+		}
+		if len(blocking) == 0 {
+			r.tools[meta.ToolKey] = resolved
+			r.meta[meta.ToolKey] = meta
+			return nil
+		}
+		return &RegistryError{
+			Code:             RegistryErrorDuplicateName,
+			Message:          fmt.Sprintf("tool original name %q already registered", meta.OriginalToolName),
+			ToolKey:          meta.ToolKey,
+			OriginalToolName: meta.OriginalToolName,
+			Source:           meta.Source,
+			ExtensionID:      meta.ExtensionID,
+			ConflictWith:     blocking[0],
 		}
 	}
 	r.tools[meta.ToolKey] = resolved
@@ -128,6 +210,49 @@ func (r *Registry) List() []ResolvedTool {
 	}
 	r.mu.RUnlock()
 	return sortedResolvedTools(snapshot, nil, nil, func(ResolvedTool) bool { return true })
+}
+
+func (r *Registry) FindByOriginalName(name string) []RegistrationMeta {
+	original := normalizeOriginalToolName(name)
+	if original == "" {
+		return nil
+	}
+	r.mu.RLock()
+	items := make([]RegistrationMeta, 0, len(r.meta))
+	for _, meta := range r.meta {
+		if meta.OriginalToolName != original {
+			continue
+		}
+		items = append(items, cloneRegistrationMeta(meta))
+	}
+	r.mu.RUnlock()
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].ToolKey < items[j].ToolKey
+	})
+	return items
+}
+
+func (r *Registry) FindByExtensionID(extensionID string) []RegistrationMeta {
+	extensionID = strings.TrimSpace(extensionID)
+	if extensionID == "" {
+		return nil
+	}
+	r.mu.RLock()
+	items := make([]RegistrationMeta, 0, len(r.meta))
+	for _, meta := range r.meta {
+		if meta.Source != RegistrationSourceExtension {
+			continue
+		}
+		if meta.ExtensionID != extensionID {
+			continue
+		}
+		items = append(items, cloneRegistrationMeta(meta))
+	}
+	r.mu.RUnlock()
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].ToolKey < items[j].ToolKey
+	})
+	return items
 }
 
 func (r *Registry) Definitions() []llm.ToolDefinition {
@@ -200,6 +325,51 @@ func (r *Registry) ensureMapsLocked() {
 	}
 }
 
+func (r *Registry) findConflictsByOriginalNameLocked(originalName, toolKey string) []RegistrationMeta {
+	originalName = normalizeOriginalToolName(originalName)
+	toolKey = strings.TrimSpace(toolKey)
+	if originalName == "" {
+		return nil
+	}
+	conflicts := make([]RegistrationMeta, 0, len(r.meta))
+	for existingKey, existingMeta := range r.meta {
+		if existingKey == toolKey {
+			continue
+		}
+		if existingMeta.OriginalToolName != originalName {
+			continue
+		}
+		conflicts = append(conflicts, cloneRegistrationMeta(existingMeta))
+	}
+	sort.Slice(conflicts, func(i, j int) bool {
+		return conflicts[i].ToolKey < conflicts[j].ToolKey
+	})
+	return conflicts
+}
+
+func filterBlockingOriginalNameConflicts(meta RegistrationMeta, conflicts []RegistrationMeta, allowShadowBuiltin bool) []RegistrationMeta {
+	if len(conflicts) == 0 {
+		return nil
+	}
+	blocking := make([]RegistrationMeta, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		switch conflict.Source {
+		case RegistrationSourceBuiltin:
+			if allowShadowBuiltin {
+				continue
+			}
+		case RegistrationSourceExtension:
+			// Session-isolated bridges may share original tool names across extensions.
+			// Keep same-extension conflicts rejected to avoid ambiguous aliases.
+			if meta.ExtensionID != "" && conflict.ExtensionID != "" && conflict.ExtensionID != meta.ExtensionID {
+				continue
+			}
+		}
+		blocking = append(blocking, conflict)
+	}
+	return blocking
+}
+
 func sortedResolvedTools(snapshot map[string]ResolvedTool, allowlist, denylist []string, include func(ResolvedTool) bool) []ResolvedTool {
 	allowSet := toNameSet(allowlist)
 	denySet := toNameSet(denylist)
@@ -239,4 +409,15 @@ func toNameSet(items []string) map[string]struct{} {
 		result[item] = struct{}{}
 	}
 	return result
+}
+
+func cloneRegistrationMeta(meta RegistrationMeta) RegistrationMeta {
+	return RegistrationMeta{
+		ToolKey:          meta.ToolKey,
+		StableToolKey:    meta.StableToolKey,
+		OriginalToolName: meta.OriginalToolName,
+		Source:           meta.Source,
+		ExtensionID:      meta.ExtensionID,
+		ConflictPolicy:   meta.ConflictPolicy,
+	}
 }

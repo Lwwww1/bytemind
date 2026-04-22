@@ -19,6 +19,13 @@ func TestExplicitWebLookupInstructionSupportsChineseSignals(t *testing.T) {
 	}
 }
 
+func TestExplicitWebLookupInstructionReturnsEmptyForLocalRepoLanguage(t *testing.T) {
+	got := ExplicitWebLookupInstruction("inspect repo")
+	if got != "" {
+		t.Fatalf("expected empty instruction for local repo wording, got %q", got)
+	}
+}
+
 func TestExplicitWebLookupInstructionReturnsEmptyWhenLocalOnly(t *testing.T) {
 	got := ExplicitWebLookupInstruction("Use search_text in current workspace")
 	if got != "" {

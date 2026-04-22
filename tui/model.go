@@ -172,6 +172,10 @@ type approvalDecision struct {
 	Err      error
 }
 
+type approvalModeUpdater interface {
+	UpdateApprovalMode(mode string)
+}
+
 type agentEventMsg struct {
 	Event Event
 }
@@ -225,6 +229,16 @@ type pasteFinalizeMsg struct {
 	ID int
 }
 
+type pasteTransactionState struct {
+	Active             bool
+	Source             string
+	Payload            string
+	Consumed           int
+	StartedAt          time.Time
+	LastEchoAt         time.Time
+	AwaitTrailingEnter bool
+}
+
 type pasteBurstSettleMsg struct {
 	Generation int
 }
@@ -238,6 +252,12 @@ type pasteSessionState struct {
 	bufferedText string
 	sawMultiline bool
 	finalizeID   int
+}
+
+type virtualPastePart struct {
+	PartID      string
+	PasteID     string
+	Placeholder string
 }
 
 type pasteBurstCandidateState struct {
@@ -279,102 +299,107 @@ type model struct {
 	input    textarea.Model
 	spinner  spinner.Model
 
-	viewportContentCache  string
-	viewportTopCache      viewportTopLookupCache
-	chatItems             []chatEntry
-	toolRuns              []toolRun
-	plan                  planpkg.State
-	sessions              []session.Summary
-	sessionLimit          int
-	sessionCursor         int
-	commandCursor         int
-	mentionCursor         int
-	screen                screenKind
-	mode                  agentMode
-	sessionsOpen          bool
-	skillsOpen            bool
-	helpOpen              bool
-	commandOpen           bool
-	mentionOpen           bool
-	promptSearchOpen      bool
-	busy                  bool
-	runStartedAt          time.Time
-	streamingIndex        int
-	statusNote            string
-	phase                 string
-	llmConnected          bool
-	approval              *approvalPrompt
-	mentionQuery          string
-	mentionToken          mention.Token
-	mentionResults        []mention.Candidate
-	mentionIndex          *mention.WorkspaceFileIndex
-	mentionRecent         map[string]int
-	mentionSeq            int
-	lastPasteAt           time.Time
-	pasteSubmitGuardUntil time.Time
-	lastInputAt           time.Time
-	inputBurstSize        int
-	inputBurstBaseValue   string
-	pasteBurstCandidate   pasteBurstCandidateState
-	chatAutoFollow        bool
-	draggingScrollbar     bool
-	scrollbarDragOffset   int
-	mouseSelecting        bool
-	mouseSelectionMouseX  int
-	mouseSelectionMouseY  int
-	mouseSelectionTickID  int
-	mouseSelectionActive  bool
-	mouseSelectionStart   viewportSelectionPoint
-	mouseSelectionEnd     viewportSelectionPoint
-	inputMouseSelecting   bool
-	inputSelectionActive  bool
-	inputSelectionStart   viewportSelectionPoint
-	inputSelectionEnd     viewportSelectionPoint
-	selectionToast        string
-	selectionToastID      int
-	tokenUsage            tokenUsageComponent
-	tokenUsedTotal        int
-	tokenBudget           int
-	tokenInput            int
-	tokenOutput           int
-	tokenContext          int
-	tokenHasOfficialUsage bool
-	tempEstimatedOutput   int
-	tokenEstimator        *realtimeTokenEstimator
-	promptHistoryLoaded   bool
-	promptHistoryLoading  bool
-	promptHistoryLoadErr  string
-	promptHistoryEntries  []history.PromptEntry
-	promptSearchMode      promptSearchMode
-	promptSearchQuery     string
-	promptSearchMatches   []history.PromptEntry
-	promptSearchCursor    int
-	promptSearchBaseInput string
-	inputImageRefs        map[int]llm.AssetID
-	inputImageMentions    map[string]llm.AssetID
-	orphanedImages        map[llm.AssetID]time.Time
-	nextImageID           int
-	pastedContents        map[string]pastedContent
-	pastedOrder           []string
-	nextPasteID           int
-	pastedStateLoaded     bool
-	lastCompressedPasteAt time.Time
-	pasteSession          pasteSessionState
-	pasteConfirmPending   bool
-	pasteBurstActive      bool
-	pasteBurstLastEventAt time.Time
-	pasteBurstSource      string
-	pasteBurstGeneration  int
-	clipboard             clipboardImageReader
-	clipboardText         clipboardTextWriter
-	runCancel             context.CancelFunc
-	pendingBTW            []string
-	interrupting          bool
-	interruptSafe         bool
-	runSeq                int
-	activeRunID           int
-	startupGuide          StartupGuide
-	mouseYOffset          int
+	viewportContentCache       string
+	viewportTopCache           viewportTopLookupCache
+	chatItems                  []chatEntry
+	toolRuns                   []toolRun
+	plan                       planpkg.State
+	sessions                   []session.Summary
+	sessionLimit               int
+	sessionCursor              int
+	commandCursor              int
+	mentionCursor              int
+	screen                     screenKind
+	mode                       agentMode
+	sessionsOpen               bool
+	skillsOpen                 bool
+	helpOpen                   bool
+	commandOpen                bool
+	mentionOpen                bool
+	promptSearchOpen           bool
+	busy                       bool
+	runStartedAt               time.Time
+	streamingIndex             int
+	statusNote                 string
+	phase                      string
+	llmConnected               bool
+	approval                   *approvalPrompt
+	mentionQuery               string
+	mentionToken               mention.Token
+	mentionResults             []mention.Candidate
+	mentionIndex               *mention.WorkspaceFileIndex
+	mentionRecent              map[string]int
+	mentionSeq                 int
+	lastPasteAt                time.Time
+	pasteSubmitGuardUntil      time.Time
+	lastInputAt                time.Time
+	inputBurstSize             int
+	inputBurstBaseValue        string
+	pasteBurstCandidate        pasteBurstCandidateState
+	clipboardCaptureArmedUntil time.Time
+	chatAutoFollow             bool
+	draggingScrollbar          bool
+	scrollbarDragOffset        int
+	mouseSelecting             bool
+	mouseSelectionMouseX       int
+	mouseSelectionMouseY       int
+	mouseSelectionTickID       int
+	mouseSelectionActive       bool
+	mouseSelectionStart        viewportSelectionPoint
+	mouseSelectionEnd          viewportSelectionPoint
+	inputMouseSelecting        bool
+	inputSelectionActive       bool
+	inputSelectionStart        viewportSelectionPoint
+	inputSelectionEnd          viewportSelectionPoint
+	selectionToast             string
+	selectionToastID           int
+	tokenUsage                 tokenUsageComponent
+	tokenUsedTotal             int
+	tokenBudget                int
+	tokenInput                 int
+	tokenOutput                int
+	tokenContext               int
+	tokenHasOfficialUsage      bool
+	tempEstimatedOutput        int
+	tokenEstimator             *realtimeTokenEstimator
+	promptHistoryLoaded        bool
+	promptHistoryLoading       bool
+	promptHistoryLoadErr       string
+	promptHistoryEntries       []history.PromptEntry
+	promptSearchMode           promptSearchMode
+	promptSearchQuery          string
+	promptSearchMatches        []history.PromptEntry
+	promptSearchCursor         int
+	promptSearchBaseInput      string
+	inputImageRefs             map[int]llm.AssetID
+	inputImageMentions         map[string]llm.AssetID
+	orphanedImages             map[llm.AssetID]time.Time
+	nextImageID                int
+	pastedContents             map[string]pastedContent
+	pastedOrder                []string
+	nextPasteID                int
+	pastedStateLoaded          bool
+	lastCompressedPasteAt      time.Time
+	virtualPasteParts          []virtualPastePart
+	nextVirtualPastePart       int
+	pasteTransaction           pasteTransactionState
+	pasteSession               pasteSessionState
+	pasteConfirmPending        bool
+	pasteBurstActive           bool
+	pasteBurstLastEventAt      time.Time
+	pasteBurstSource           string
+	pasteBurstGeneration       int
+	clipboard                  clipboardImageReader
+	clipboardRead              clipboardTextReader
+	clipboardText              clipboardTextWriter
+	runCancel                  context.CancelFunc
+	pendingBTW                 []string
+	interrupting               bool
+	interruptSafe              bool
+	runSeq                     int
+	activeRunID                int
+	startupGuide               StartupGuide
+	mouseYOffset               int
 }
 
 func newModel(opts Options) model {
@@ -420,45 +445,48 @@ func newModel(opts Options) model {
 	}
 
 	m := model{
-		runner:             opts.Runner,
-		store:              opts.Store,
-		sess:               opts.Session,
-		imageStore:         opts.ImageStore,
-		cfg:                opts.Config,
-		workspace:          opts.Workspace,
-		async:              async,
-		viewport:           vp,
-		copyView:           copyVP,
-		planView:           planVP,
-		input:              input,
-		spinner:            spin,
-		chatItems:          chatItems,
-		toolRuns:           toolRuns,
-		plan:               copyPlanState(opts.Session.Plan),
-		sessions:           nil,
-		sessionLimit:       defaultSessionLimit,
-		screen:             initialScreen(opts.Session),
-		mode:               toAgentMode(opts.Session.Mode),
-		streamingIndex:     -1,
-		statusNote:         "Ready.",
-		phase:              "idle",
-		llmConnected:       true,
-		chatAutoFollow:     true,
-		mentionIndex:       mention.NewWorkspaceFileIndex(opts.Workspace),
-		tokenUsage:         newTokenUsageComponent(),
-		tokenBudget:        max(1, opts.Config.TokenQuota),
-		tokenEstimator:     newRealtimeTokenEstimator(opts.Config.Provider.Model),
-		inputImageRefs:     make(map[int]llm.AssetID, 8),
-		inputImageMentions: make(map[string]llm.AssetID, 8),
-		orphanedImages:     make(map[llm.AssetID]time.Time, 8),
-		nextImageID:        nextSessionImageID(opts.Session),
-		pastedContents:     make(map[string]pastedContent, maxStoredPastedContents),
-		pastedOrder:        make([]string, 0, maxStoredPastedContents),
-		nextPasteID:        1,
-		clipboard:          defaultClipboardImageReader{},
-		clipboardText:      defaultClipboardTextWriter{},
-		startupGuide:       opts.StartupGuide,
-		mouseYOffset:       resolveMouseYOffset(),
+		runner:               opts.Runner,
+		store:                opts.Store,
+		sess:                 opts.Session,
+		imageStore:           opts.ImageStore,
+		cfg:                  opts.Config,
+		workspace:            opts.Workspace,
+		async:                async,
+		viewport:             vp,
+		copyView:             copyVP,
+		planView:             planVP,
+		input:                input,
+		spinner:              spin,
+		chatItems:            chatItems,
+		toolRuns:             toolRuns,
+		plan:                 copyPlanState(opts.Session.Plan),
+		sessions:             nil,
+		sessionLimit:         defaultSessionLimit,
+		screen:               initialScreen(opts.Session),
+		mode:                 toAgentMode(opts.Session.Mode),
+		streamingIndex:       -1,
+		statusNote:           "Ready.",
+		phase:                "idle",
+		llmConnected:         true,
+		chatAutoFollow:       true,
+		mentionIndex:         mention.NewWorkspaceFileIndex(opts.Workspace),
+		tokenUsage:           newTokenUsageComponent(),
+		tokenBudget:          max(1, opts.Config.TokenQuota),
+		tokenEstimator:       newRealtimeTokenEstimator(opts.Config.Provider.Model),
+		inputImageRefs:       make(map[int]llm.AssetID, 8),
+		inputImageMentions:   make(map[string]llm.AssetID, 8),
+		orphanedImages:       make(map[llm.AssetID]time.Time, 8),
+		nextImageID:          nextSessionImageID(opts.Session),
+		pastedContents:       make(map[string]pastedContent, maxStoredPastedContents),
+		pastedOrder:          make([]string, 0, maxStoredPastedContents),
+		nextPasteID:          1,
+		virtualPasteParts:    make([]virtualPastePart, 0, maxStoredPastedContents),
+		nextVirtualPastePart: 1,
+		clipboard:            defaultClipboardImageReader{},
+		clipboardRead:        defaultClipboardTextReader{},
+		clipboardText:        defaultClipboardTextWriter{},
+		startupGuide:         opts.StartupGuide,
+		mouseYOffset:         resolveMouseYOffset(),
 	}
 	if opts.StartupGuide.Active {
 		m.statusNote = opts.StartupGuide.Status
@@ -478,6 +506,19 @@ func newModel(opts Options) model {
 		go m.mentionIndex.Prewarm()
 	}
 	return m
+}
+
+func (m *model) installApprovalBridge() {
+	if m == nil || m.runner == nil {
+		return
+	}
+	async := m.async
+	m.runner.SetApprovalHandler(func(req ApprovalRequest) (bool, error) {
+		reply := make(chan approvalDecision, 1)
+		async <- approvalRequestMsg{Request: req, Reply: reply}
+		decision := <-reply
+		return decision.Approved, decision.Err
+	})
 }
 
 func ensureZoneManager() {
@@ -2270,6 +2311,36 @@ func (m model) currentSkillLabel() string {
 		return "none"
 	}
 	return name
+}
+
+func (m model) awayEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(m.cfg.ApprovalMode), "away")
+}
+
+func (m model) awayStatusLabel() string {
+	if m.awayEnabled() {
+		return "Away:ON"
+	}
+	return "Away:OFF"
+}
+
+func (m *model) toggleAwayMode() {
+	if m == nil {
+		return
+	}
+	nextMode := "away"
+	if m.awayEnabled() {
+		nextMode = "interactive"
+	}
+	m.cfg.ApprovalMode = nextMode
+	if updater, ok := m.runner.(approvalModeUpdater); ok && updater != nil {
+		updater.UpdateApprovalMode(nextMode)
+	}
+	if nextMode == "away" {
+		m.statusNote = "Away mode enabled."
+		return
+	}
+	m.statusNote = "Away mode disabled."
 }
 
 func preparePlanForContinuation(state planpkg.State) (planpkg.State, error) {

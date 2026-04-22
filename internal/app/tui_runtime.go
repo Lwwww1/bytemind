@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"io"
@@ -9,7 +8,6 @@ import (
 
 	"bytemind/internal/assets"
 	"bytemind/internal/config"
-	"bytemind/internal/provider"
 	"bytemind/tui"
 )
 
@@ -40,6 +38,8 @@ func BuildTUIRuntime(req TUIRequest) (TUIRuntime, error) {
 	model := fs.String("model", "", "Override model name")
 	sessionID := fs.String("session", "", "Resume an existing session")
 	streamOverride := fs.String("stream", "", "Override streaming: true or false")
+	approvalMode := fs.String("approval-mode", "", "Override approval mode: interactive or away")
+	awayPolicy := fs.String("away-policy", "", "Override away mode policy: auto_deny_continue or fail_fast")
 	workspaceOverride := fs.String("workspace", "", "Workspace to operate on; defaults to current directory")
 	maxIterations := fs.Int("max-iterations", 0, "Override execution budget for this run")
 
@@ -57,6 +57,8 @@ func BuildTUIRuntime(req TUIRequest) (TUIRuntime, error) {
 		ConfigPath:            *configPath,
 		ModelOverride:         *model,
 		StreamOverride:        *streamOverride,
+		ApprovalModeOverride:  *approvalMode,
+		AwayPolicyOverride:    *awayPolicy,
 		MaxIterationsOverride: *maxIterations,
 	})
 	if err != nil {
@@ -64,26 +66,15 @@ func BuildTUIRuntime(req TUIRequest) (TUIRuntime, error) {
 	}
 
 	interactive := isInteractiveStdin(req.Stdin)
-	check := provider.Availability{Ready: true}
-	if interactive {
-		check = provider.CheckAvailability(context.Background(), cfg.Provider)
-	}
-
-	guide := tui.StartupGuide{}
-	if !check.Ready {
-		guide = BuildStartupGuide(cfg, check, workspace, *configPath)
-	}
-
-	requireAPIKey := true
-	if guide.Active && interactive {
-		requireAPIKey = false
-	}
+	guide, requireAPIKey := resolveTUIStartupPolicy(interactive)
 	runtimeBundle, err := BootstrapEntrypoint(EntrypointRequest{
 		WorkspaceOverride:     *workspaceOverride,
 		ConfigPath:            *configPath,
 		ModelOverride:         *model,
 		SessionID:             *sessionID,
 		StreamOverride:        *streamOverride,
+		ApprovalModeOverride:  *approvalMode,
+		AwayPolicyOverride:    *awayPolicy,
 		MaxIterationsOverride: *maxIterations,
 		RequireAPIKey:         requireAPIKey,
 		Stdin:                 req.Stdin,
@@ -92,6 +83,8 @@ func BuildTUIRuntime(req TUIRequest) (TUIRuntime, error) {
 	if err != nil {
 		return TUIRuntime{}, err
 	}
+
+	maybePrintUpdateReminder(cfg, req.Stderr)
 
 	runner := runtimeBundle.Runner
 	if runner == nil || runtimeBundle.Store == nil || runtimeBundle.Session == nil {
@@ -118,6 +111,12 @@ func BuildTUIRuntime(req TUIRequest) (TUIRuntime, error) {
 		},
 		close: runner.Close,
 	}, nil
+}
+
+func resolveTUIStartupPolicy(interactive bool) (tui.StartupGuide, bool) {
+	// Startup guide at UI entry is disabled by default.
+	// Keep interactive TUI accessible even when API key is not configured yet.
+	return tui.StartupGuide{}, !interactive
 }
 
 func isInteractiveStdin(stdin io.Reader) bool {

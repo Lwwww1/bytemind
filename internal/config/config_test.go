@@ -18,6 +18,8 @@ func TestLoadUsesEnvOverrides(t *testing.T) {
 	t.Setenv("BYTEMIND_PROVIDER_TYPE", "anthropic")
 	t.Setenv("BYTEMIND_PROVIDER_AUTO_DETECT_TYPE", "true")
 	t.Setenv("BYTEMIND_STREAM", "false")
+	t.Setenv("BYTEMIND_APPROVAL_MODE", "away")
+	t.Setenv("BYTEMIND_AWAY_POLICY", "fail_fast")
 
 	cfg, err := Load(workspace, "")
 	if err != nil {
@@ -44,6 +46,12 @@ func TestLoadUsesEnvOverrides(t *testing.T) {
 	if cfg.TokenQuota != 88000 {
 		t.Fatalf("expected token quota from env override, got %d", cfg.TokenQuota)
 	}
+	if cfg.ApprovalMode != "away" {
+		t.Fatalf("expected approval mode from env override, got %q", cfg.ApprovalMode)
+	}
+	if cfg.AwayPolicy != "fail_fast" {
+		t.Fatalf("expected away policy from env override, got %q", cfg.AwayPolicy)
+	}
 }
 
 func TestLoadIgnoresInvalidTokenQuotaEnv(t *testing.T) {
@@ -57,8 +65,39 @@ func TestLoadIgnoresInvalidTokenQuotaEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.TokenQuota != 5000 {
-		t.Fatalf("expected invalid token quota to fall back to default 5000, got %d", cfg.TokenQuota)
+	if cfg.TokenQuota != DefaultTokenQuota {
+		t.Fatalf("expected invalid token quota to fall back to default %d, got %d", DefaultTokenQuota, cfg.TokenQuota)
+	}
+}
+
+func TestLoadDefaultsUpdateCheckEnabled(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv("BYTEMIND_API_KEY", "secret")
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.UpdateCheck.Enabled {
+		t.Fatalf("expected update_check.enabled default true")
+	}
+}
+
+func TestLoadUsesUpdateCheckEnvOverride(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", home)
+	t.Setenv("BYTEMIND_API_KEY", "secret")
+	t.Setenv("BYTEMIND_UPDATE_CHECK", "false")
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UpdateCheck.Enabled {
+		t.Fatalf("expected BYTEMIND_UPDATE_CHECK=false to disable update checks")
 	}
 }
 
@@ -201,6 +240,8 @@ func TestLoadMergesUserAndProjectConfigWithProjectPrecedence(t *testing.T) {
 			"api_key":  "user-key",
 		},
 		"approval_policy": "always",
+		"approval_mode":   "interactive",
+		"away_policy":     "auto_deny_continue",
 		"max_iterations":  40,
 		"stream":          true,
 	}); err != nil {
@@ -215,6 +256,8 @@ func TestLoadMergesUserAndProjectConfigWithProjectPrecedence(t *testing.T) {
 			"api_key":  "project-key",
 		},
 		"approval_policy": "never",
+		"approval_mode":   "away",
+		"away_policy":     "fail_fast",
 		"max_iterations":  16,
 		"stream":          false,
 	}); err != nil {
@@ -233,6 +276,12 @@ func TestLoadMergesUserAndProjectConfigWithProjectPrecedence(t *testing.T) {
 	}
 	if cfg.ApprovalPolicy != "never" {
 		t.Fatalf("expected project approval policy precedence, got %q", cfg.ApprovalPolicy)
+	}
+	if cfg.ApprovalMode != "away" {
+		t.Fatalf("expected project approval mode precedence, got %q", cfg.ApprovalMode)
+	}
+	if cfg.AwayPolicy != "fail_fast" {
+		t.Fatalf("expected project away policy precedence, got %q", cfg.AwayPolicy)
 	}
 	if cfg.MaxIterations != 16 {
 		t.Fatalf("expected project max iterations precedence, got %d", cfg.MaxIterations)
@@ -384,6 +433,62 @@ func TestLoadRejectsInvalidApprovalPolicy(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidApprovalMode(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	path := projectConfigPath(workspace)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{
+  "provider": {
+    "type": "openai-compatible",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-5.4-mini",
+    "api_key": "test-key"
+  },
+  "approval_mode": "nightly"
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(workspace, "")
+	if err == nil {
+		t.Fatal("expected invalid approval mode error")
+	}
+	if !strings.Contains(err.Error(), "approval_mode must be one of") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidAwayPolicy(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	path := projectConfigPath(workspace)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{
+  "provider": {
+    "type": "openai-compatible",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-5.4-mini",
+    "api_key": "test-key"
+  },
+  "away_policy": "retry_later"
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(workspace, "")
+	if err == nil {
+		t.Fatal("expected invalid away policy error")
+	}
+	if !strings.Contains(err.Error(), "away_policy must be one of") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLoadRejectsMalformedConfigJSON(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("BYTEMIND_HOME", t.TempDir())
@@ -437,8 +542,17 @@ func TestEnsureHomeLayoutCreatesStandardDirectories(t *testing.T) {
 	if strings.TrimSpace(cfg.Provider.Model) == "" {
 		t.Fatalf("expected default provider model to be present")
 	}
+	if cfg.ApprovalMode != "interactive" {
+		t.Fatalf("expected default approval_mode=interactive, got %q", cfg.ApprovalMode)
+	}
+	if cfg.AwayPolicy != "auto_deny_continue" {
+		t.Fatalf("expected default away_policy=auto_deny_continue, got %q", cfg.AwayPolicy)
+	}
 	if cfg.TokenUsage.StorageType == "" || cfg.TokenUsage.BackupInterval == "" {
 		t.Fatalf("expected default token_usage config to be present, got %#v", cfg.TokenUsage)
+	}
+	if !cfg.UpdateCheck.Enabled {
+		t.Fatalf("expected default update_check.enabled=true in generated config")
 	}
 }
 
@@ -581,6 +695,221 @@ func TestUpsertProviderFieldRejectsUnsupportedField(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported provider field") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadNormalizesWritableRootsFromConfig(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	external := filepath.Join(t.TempDir(), "external-root")
+	if err := writeConfig(projectConfigPath(workspace), map[string]any{
+		"provider":       minimalProviderConfigDoc("gpt-5.4-mini", "test-key"),
+		"writable_roots": []any{"sandbox-output", external, "sandbox-output", "  "},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.WritableRoots) != 2 {
+		t.Fatalf("expected two normalized writable roots, got %#v", cfg.WritableRoots)
+	}
+
+	expectedA := filepath.Clean(filepath.Join(workspace, "sandbox-output"))
+	expectedB := filepath.Clean(external)
+	got := map[string]struct{}{}
+	for _, root := range cfg.WritableRoots {
+		got[normalizePathKey(root)] = struct{}{}
+	}
+	if _, ok := got[normalizePathKey(expectedA)]; !ok {
+		t.Fatalf("expected relative writable root %q to be normalized into config, got %#v", expectedA, cfg.WritableRoots)
+	}
+	if _, ok := got[normalizePathKey(expectedB)]; !ok {
+		t.Fatalf("expected absolute writable root %q to be preserved, got %#v", expectedB, cfg.WritableRoots)
+	}
+}
+
+func TestLoadParsesWritableRootsFromEnv(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	t.Setenv("BYTEMIND_API_KEY", "env-key")
+	external := filepath.Join(t.TempDir(), "env-external")
+	t.Setenv("BYTEMIND_WRITABLE_ROOTS", "env-out"+string(os.PathListSeparator)+external)
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.WritableRoots) != 2 {
+		t.Fatalf("expected two writable roots from env, got %#v", cfg.WritableRoots)
+	}
+
+	expectedA := filepath.Clean(filepath.Join(workspace, "env-out"))
+	expectedB := filepath.Clean(external)
+	got := map[string]struct{}{}
+	for _, root := range cfg.WritableRoots {
+		got[normalizePathKey(root)] = struct{}{}
+	}
+	if _, ok := got[normalizePathKey(expectedA)]; !ok {
+		t.Fatalf("expected env relative writable root %q, got %#v", expectedA, cfg.WritableRoots)
+	}
+	if _, ok := got[normalizePathKey(expectedB)]; !ok {
+		t.Fatalf("expected env absolute writable root %q, got %#v", expectedB, cfg.WritableRoots)
+	}
+}
+
+func TestDefaultIncludesSandboxPolicyFields(t *testing.T) {
+	cfg := Default(t.TempDir())
+	if cfg.SandboxEnabled {
+		t.Fatal("expected sandbox_enabled to default to false")
+	}
+	if cfg.ExecAllowlist == nil || len(cfg.ExecAllowlist) != 0 {
+		t.Fatalf("expected empty exec_allowlist default, got %#v", cfg.ExecAllowlist)
+	}
+	if cfg.NetworkAllowlist == nil || len(cfg.NetworkAllowlist) != 0 {
+		t.Fatalf("expected empty network_allowlist default, got %#v", cfg.NetworkAllowlist)
+	}
+}
+
+func TestLoadNormalizesSandboxAllowlistsFromConfig(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	if err := writeConfig(projectConfigPath(workspace), map[string]any{
+		"provider":        minimalProviderConfigDoc("gpt-5.4-mini", "test-key"),
+		"sandbox_enabled": true,
+		"exec_allowlist": []any{
+			map[string]any{"command": "  go test  ", "args_pattern": []any{"./...", "  ", "./..."}},
+			map[string]any{"command": "go test", "args_pattern": []any{"./..."}},
+			map[string]any{"command": "python", "args_pattern": []any{"pytest", "-m"}},
+		},
+		"network_allowlist": []any{
+			map[string]any{"host": " Example.COM ", "port": 443, "scheme": " HTTPS "},
+			map[string]any{"host": "example.com", "port": 443, "scheme": "https"},
+			map[string]any{"host": "api.openai.com", "port": 443, "scheme": "https"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SandboxEnabled {
+		t.Fatal("expected sandbox_enabled=true from config")
+	}
+	if len(cfg.ExecAllowlist) != 3 {
+		t.Fatalf("expected normalized exec_allowlist with order-preserved args, got %#v", cfg.ExecAllowlist)
+	}
+	if cfg.ExecAllowlist[0].Command != "go" {
+		t.Fatalf("expected first exec rule command to be normalized as go, got %#v", cfg.ExecAllowlist)
+	}
+	if got := strings.Join(cfg.ExecAllowlist[0].ArgsPattern, ","); got != "test,./..." {
+		t.Fatalf("expected first go args pattern to preserve order, got %q", got)
+	}
+	if cfg.ExecAllowlist[1].Command != "go" {
+		t.Fatalf("expected second exec rule command go, got %#v", cfg.ExecAllowlist)
+	}
+	if got := strings.Join(cfg.ExecAllowlist[1].ArgsPattern, ","); got != "test,./...,./..." {
+		t.Fatalf("expected second go args pattern to preserve duplicates, got %q", got)
+	}
+	if cfg.ExecAllowlist[2].Command != "python" {
+		t.Fatalf("expected third exec rule command python, got %#v", cfg.ExecAllowlist)
+	}
+	if got := strings.Join(cfg.ExecAllowlist[2].ArgsPattern, ","); got != "pytest,-m" {
+		t.Fatalf("expected python args order to be preserved, got %q", got)
+	}
+
+	if len(cfg.NetworkAllowlist) != 2 {
+		t.Fatalf("expected deduplicated network_allowlist, got %#v", cfg.NetworkAllowlist)
+	}
+	if cfg.NetworkAllowlist[0].Host != "api.openai.com" || cfg.NetworkAllowlist[0].Port != 443 || cfg.NetworkAllowlist[0].Scheme != "https" {
+		t.Fatalf("unexpected first normalized network rule: %#v", cfg.NetworkAllowlist[0])
+	}
+	if cfg.NetworkAllowlist[1].Host != "example.com" || cfg.NetworkAllowlist[1].Port != 443 || cfg.NetworkAllowlist[1].Scheme != "https" {
+		t.Fatalf("unexpected second normalized network rule: %#v", cfg.NetworkAllowlist[1])
+	}
+}
+
+func TestLoadRejectsInvalidExecAllowlistRule(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	if err := writeConfig(projectConfigPath(workspace), map[string]any{
+		"provider": minimalProviderConfigDoc("gpt-5.4-mini", "test-key"),
+		"exec_allowlist": []any{
+			map[string]any{"command": "   ", "args_pattern": []any{"./..."}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(workspace, "")
+	if err == nil {
+		t.Fatal("expected invalid exec_allowlist error")
+	}
+	if !strings.Contains(err.Error(), "exec_allowlist.command cannot be empty") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidNetworkAllowlistRule(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	if err := writeConfig(projectConfigPath(workspace), map[string]any{
+		"provider": minimalProviderConfigDoc("gpt-5.4-mini", "test-key"),
+		"network_allowlist": []any{
+			map[string]any{"host": "example.com", "port": 70000, "scheme": "https"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(workspace, "")
+	if err == nil {
+		t.Fatal("expected invalid network_allowlist error")
+	}
+	if !strings.Contains(err.Error(), "network_allowlist.port must be between 1 and 65535") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadParsesSandboxEnabledFromEnv(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	t.Setenv("BYTEMIND_API_KEY", "env-key")
+	t.Setenv("BYTEMIND_SANDBOX_ENABLED", "true")
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SandboxEnabled {
+		t.Fatalf("expected sandbox_enabled=true from env override")
+	}
+}
+
+func TestLoadSortsNetworkAllowlistByPortWhenHostMatches(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	if err := writeConfig(projectConfigPath(workspace), map[string]any{
+		"provider": minimalProviderConfigDoc("gpt-5.4-mini", "test-key"),
+		"network_allowlist": []any{
+			map[string]any{"host": "example.com", "port": 8443, "scheme": "https"},
+			map[string]any{"host": "example.com", "port": 443, "scheme": "https"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.NetworkAllowlist) != 2 {
+		t.Fatalf("expected two network rules, got %#v", cfg.NetworkAllowlist)
+	}
+	if cfg.NetworkAllowlist[0].Port != 443 || cfg.NetworkAllowlist[1].Port != 8443 {
+		t.Fatalf("expected network allowlist sorted by port for same host, got %#v", cfg.NetworkAllowlist)
 	}
 }
 

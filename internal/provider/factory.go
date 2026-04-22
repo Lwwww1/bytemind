@@ -9,6 +9,14 @@ import (
 )
 
 func NewClient(cfg config.ProviderConfig) (llm.Client, error) {
+	return newBaseClient(cfg)
+}
+
+func NewClientFromRuntime(cfg config.ProviderRuntimeConfig, health HealthChecker) (llm.Client, error) {
+	return NewRouterClient(cfg, health)
+}
+
+func newBaseClient(cfg config.ProviderConfig) (llm.Client, error) {
 	typ := strings.ToLower(strings.TrimSpace(cfg.Type))
 	clientCfg := Config{
 		Type:             typ,
@@ -47,7 +55,7 @@ func NewDomainClient(cfg config.ProviderConfig) (Client, error) {
 }
 
 func NewDomainClientWithID(providerID ProviderID, cfg config.ProviderConfig) (Client, error) {
-	baseClient, err := NewClient(cfg)
+	baseClient, err := newBaseClient(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -63,8 +71,11 @@ func NewRouterClient(cfg config.ProviderRuntimeConfig, health HealthChecker) (ll
 	if err != nil {
 		return nil, err
 	}
+	if health == nil {
+		health = NewHealthChecker(HealthConfigFromRuntime(cfg.Health), nil)
+	}
 	return NewRoutedClientWithPolicy(NewRouter(reg, health, RouterConfig{
 		DefaultProvider: ProviderID(cfg.DefaultProvider),
 		DefaultModel:    ModelID(cfg.DefaultModel),
-	}), cfg.AllowFallback), nil
+	}), health, cfg.AllowFallback), nil
 }

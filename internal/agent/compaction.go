@@ -80,6 +80,14 @@ func (r *Runner) contextBudgetRatios() (float64, float64) {
 	return warning, critical
 }
 
+func (r *Runner) contextBudgetMaxReactiveRetry() int {
+	maxRetry := r.config.ContextBudget.MaxReactiveRetry
+	if maxRetry <= 0 {
+		maxRetry = config.DefaultContextBudgetMaxReactiveRetry
+	}
+	return maxRetry
+}
+
 func (r *Runner) maybeAutoCompactSession(ctx context.Context, sess *session.Session, promptTokens, requestTokens int) (bool, error) {
 	quota := r.contextBudgetQuota()
 	warningRatio, criticalRatio := r.contextBudgetRatios()
@@ -229,7 +237,7 @@ func (r *Runner) requestCompactionSummary(ctx context.Context, history []llm.Mes
 	}, "\n"))
 
 	request := llm.ChatRequest{
-		Model:       r.config.Provider.Model,
+		Model:       r.modelID(),
 		Temperature: 0,
 		Messages: []llm.Message{
 			llm.NewTextMessage(llm.RoleSystem, compactionSystemPrompt),

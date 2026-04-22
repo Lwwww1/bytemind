@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
+	"sync"
 
 	"bytemind/internal/config"
 	extensionspkg "bytemind/internal/extensions"
 	"bytemind/internal/llm"
+	"bytemind/internal/provider"
 	runtimepkg "bytemind/internal/runtime"
 	"bytemind/internal/session"
 	"bytemind/internal/skills"
@@ -83,9 +86,19 @@ type Runner struct {
 	approval      tools.ApprovalHandler
 	stdin         io.Reader
 	stdout        io.Writer
+
+	bridgeMu            sync.Mutex
+	bridgeSessions      map[string]bridgeSessionState
+	bridgeSessionTurns  map[string]int
+	bridgeToolRefCounts map[string]int
 }
 
 func NewRunner(opts Options) *Runner {
+	cfg := opts.Config
+	if model := strings.TrimSpace(cfg.ProviderRuntime.DefaultModel); model != "" {
+		cfg.Provider.Model = model
+	}
+
 	manager := opts.SkillManager
 	if manager == nil {
 		manager = skills.NewManager(opts.Workspace)
@@ -124,10 +137,14 @@ func NewRunner(opts Options) *Runner {
 	if extensions == nil {
 		extensions = extensionspkg.NopManager{}
 	}
+	client := opts.Client
+	if client != nil {
+		client = routeAwareClient{base: client}
+	}
 	runner := &Runner{
 		workspace:     opts.Workspace,
-		config:        opts.Config,
-		client:        opts.Client,
+		config:        cfg,
+		client:        client,
 		store:         opts.Store,
 		registry:      registry,
 		executor:      executor,
@@ -152,6 +169,51 @@ func NewRunner(opts Options) *Runner {
 	runner.engine = engine
 
 	return runner
+}
+
+func (r *Runner) GetClient() llm.Client {
+	if r == nil {
+		return nil
+	}
+	if wrapped, ok := r.client.(routeAwareClient); ok {
+		return wrapped.base
+	}
+	return r.client
+}
+
+func (r *Runner) GetConfig() config.Config {
+	if r == nil {
+		return config.Config{}
+	}
+	return r.config
+}
+
+func (r *Runner) modelID() string {
+	if r == nil {
+		return ""
+	}
+	if model := strings.TrimSpace(r.config.ProviderRuntime.DefaultModel); model != "" {
+		return model
+	}
+	return strings.TrimSpace(r.config.Provider.Model)
+}
+
+type routeAwareClient struct {
+	base llm.Client
+}
+
+func (c routeAwareClient) CreateMessage(ctx context.Context, request llm.ChatRequest) (llm.Message, error) {
+	return c.base.CreateMessage(mergeAllowFallbackRouteContext(ctx), request)
+}
+
+func (c routeAwareClient) StreamMessage(ctx context.Context, request llm.ChatRequest, onDelta func(string)) (llm.Message, error) {
+	return c.base.StreamMessage(mergeAllowFallbackRouteContext(ctx), request, onDelta)
+}
+
+func mergeAllowFallbackRouteContext(ctx context.Context) context.Context {
+	rc := provider.RouteContextFromContext(ctx)
+	rc.AllowFallback = true
+	return provider.WithRouteContext(ctx, rc)
 }
 
 func (r *Runner) RunPrompt(ctx context.Context, sess *session.Session, userInput, mode string, out io.Writer) (string, error) {

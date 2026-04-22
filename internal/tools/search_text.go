@@ -48,7 +48,7 @@ func (SearchTextTool) Definition() llm.ToolDefinition {
 		Type: "function",
 		Function: llm.FunctionDefinition{
 			Name:        "search_text",
-			Description: "Search text across workspace files",
+			Description: "Search text across files under workspace or configured writable roots",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -58,7 +58,7 @@ func (SearchTextTool) Definition() llm.ToolDefinition {
 					},
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Optional directory or file to limit the search. Use this on large workspaces.",
+						"description": "Optional directory or file path (workspace/writable_roots) to limit the search.",
 					},
 					"limit": map[string]any{
 						"type":        "integer",
@@ -89,7 +89,7 @@ func (SearchTextTool) Run(ctx context.Context, raw json.RawMessage, execCtx *Exe
 	if args.Limit > 200 {
 		args.Limit = 200
 	}
-	root, err := resolvePath(execCtx.Workspace, args.Path)
+	root, err := resolvePath(execCtx.Workspace, args.Path, writableRootsFromExecContext(execCtx)...)
 	if err != nil {
 		return "", err
 	}

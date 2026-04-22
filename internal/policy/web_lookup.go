@@ -11,22 +11,22 @@ func ExplicitWebLookupInstruction(userInput string) string {
 		return ""
 	}
 
-	webSignals := []string{
+	directSignals := []string{
 		"github", "gitlab", "bitbucket",
 		"联网", "上网", "互联网", "网上",
-		"源码", "源代码", "repo", "repository",
+		"源码", "源代码",
 		"official website", "官网",
 	}
-	matched := false
-	for _, signal := range webSignals {
+	for _, signal := range directSignals {
 		if strings.Contains(text, signal) {
-			matched = true
-			break
+			return "The user explicitly requested online or GitHub-source lookup. Use web_search/web_fetch first. Do not substitute local-workspace tools (list_files/read_file/search_text) for this request unless the user explicitly asks to inspect the current workspace repository."
 		}
 	}
-	if !matched {
-		return ""
-	}
 
-	return "The user explicitly requested online or GitHub-source lookup. Use web_search/web_fetch first. Do not substitute local-workspace tools (list_files/read_file/search_text) for this request unless the user explicitly asks to inspect the current workspace repository."
+	hasRepoWord := strings.Contains(text, "repo") || strings.Contains(text, "repository")
+	hasRemoteQualifier := strings.Contains(text, "github") || strings.Contains(text, "gitlab") || strings.Contains(text, "bitbucket") || strings.Contains(text, "online") || strings.Contains(text, "remote")
+	if hasRepoWord && hasRemoteQualifier {
+		return "The user explicitly requested online or GitHub-source lookup. Use web_search/web_fetch first. Do not substitute local-workspace tools (list_files/read_file/search_text) for this request unless the user explicitly asks to inspect the current workspace repository."
+	}
+	return ""
 }

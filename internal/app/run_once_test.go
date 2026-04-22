@@ -35,12 +35,25 @@ func TestRunOneShotAcceptsTrailingPromptText(t *testing.T) {
 	server := newOpenAICompletionServer("Task complete.")
 	defer server.Close()
 
-	writeRunOneShotTestConfig(t, workspace, map[string]any{
+	configPath := writeRunOneShotTestConfig(t, workspace, map[string]any{
 		"provider": map[string]any{
 			"type":     "openai-compatible",
 			"base_url": server.URL,
 			"model":    "gpt-5.4-mini",
 			"api_key":  "test-key",
+		},
+		"provider_runtime": map[string]any{
+			"default_provider": "openai",
+			"default_model":    "gpt-5.4-mini",
+			"allow_fallback":   true,
+			"providers": map[string]any{
+				"openai": map[string]any{
+					"type":     "openai-compatible",
+					"base_url": server.URL,
+					"model":    "gpt-5.4-mini",
+					"api_key":  "test-key",
+				},
+			},
 		},
 		"stream": false,
 	})
@@ -48,7 +61,7 @@ func TestRunOneShotAcceptsTrailingPromptText(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	err := RunOneShot(RunOneShotRequest{
-		Args:   []string{"inspect", "repo"},
+		Args:   []string{"-config", configPath, "-stream", "false", "inspect", "repo"},
 		Stdin:  strings.NewReader(""),
 		Stdout: &stdout,
 		Stderr: &stderr,
@@ -75,8 +88,20 @@ func TestRunOneShotCompletesToolLoopSmoke(t *testing.T) {
 			return
 		}
 		requestCount++
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if stream, _ := payload["stream"].(bool); stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			switch requestCount {
+			case 1:
+				_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\".\\\",\\\"limit\\\":5}\"}}]}}]}\n\n"))
+			default:
+				_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Workspace inspected after tool call.\"}}]}\n\n"))
+			}
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-
 		switch requestCount {
 		case 1:
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -107,12 +132,25 @@ func TestRunOneShotCompletesToolLoopSmoke(t *testing.T) {
 	}))
 	defer server.Close()
 
-	writeRunOneShotTestConfig(t, workspace, map[string]any{
+	configPath := writeRunOneShotTestConfig(t, workspace, map[string]any{
 		"provider": map[string]any{
 			"type":     "openai-compatible",
 			"base_url": server.URL,
 			"model":    "gpt-5.4-mini",
 			"api_key":  "test-key",
+		},
+		"provider_runtime": map[string]any{
+			"default_provider": "openai",
+			"default_model":    "gpt-5.4-mini",
+			"allow_fallback":   true,
+			"providers": map[string]any{
+				"openai": map[string]any{
+					"type":     "openai-compatible",
+					"base_url": server.URL,
+					"model":    "gpt-5.4-mini",
+					"api_key":  "test-key",
+				},
+			},
 		},
 		"stream": false,
 	})
@@ -120,7 +158,7 @@ func TestRunOneShotCompletesToolLoopSmoke(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	err := RunOneShot(RunOneShotRequest{
-		Args:   []string{"-prompt", "inspect repo"},
+		Args:   []string{"-config", configPath, "-prompt", "inspect repo"},
 		Stdin:  strings.NewReader(""),
 		Stdout: &stdout,
 		Stderr: &stderr,
@@ -140,7 +178,8 @@ func TestRunOneShotCompletesToolLoopSmoke(t *testing.T) {
 	}
 }
 
-func writeRunOneShotTestConfig(t *testing.T, workspace string, cfg map[string]any) {
+func writeRunOneShotTestConfig(t *testing.T, workspace string, cfg map[string]any) string {
+
 	t.Helper()
 	t.Setenv("BYTEMIND_HOME", filepath.Join(workspace, ".bytemind-home"))
 	data, err := json.Marshal(cfg)
@@ -151,9 +190,11 @@ func writeRunOneShotTestConfig(t *testing.T, workspace string, cfg map[string]an
 	if err := os.MkdirAll(projectConfigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(projectConfigDir, "config.json"), data, 0o644); err != nil {
+	configPath := filepath.Join(projectConfigDir, "config.json")
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return configPath
 }
 
 func TestRunOneShotPolicyBlocksDangerousShellCommandInToolLoop(t *testing.T) {
@@ -167,8 +208,20 @@ func TestRunOneShotPolicyBlocksDangerousShellCommandInToolLoop(t *testing.T) {
 			return
 		}
 		requestCount++
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if stream, _ := payload["stream"].(bool); stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			switch requestCount {
+			case 1:
+				_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"run_shell\",\"arguments\":\"{\\\"command\\\":\\\"rm -rf .\\\"}\"}}]}}]}\n\n"))
+			default:
+				_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Dangerous command blocked as expected.\"}}]}\n\n"))
+			}
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-
 		switch requestCount {
 		case 1:
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -199,12 +252,25 @@ func TestRunOneShotPolicyBlocksDangerousShellCommandInToolLoop(t *testing.T) {
 	}))
 	defer server.Close()
 
-	writeRunOneShotTestConfig(t, workspace, map[string]any{
+	configPath := writeRunOneShotTestConfig(t, workspace, map[string]any{
 		"provider": map[string]any{
 			"type":     "openai-compatible",
 			"base_url": server.URL,
 			"model":    "gpt-5.4-mini",
 			"api_key":  "test-key",
+		},
+		"provider_runtime": map[string]any{
+			"default_provider": "openai",
+			"default_model":    "gpt-5.4-mini",
+			"allow_fallback":   true,
+			"providers": map[string]any{
+				"openai": map[string]any{
+					"type":     "openai-compatible",
+					"base_url": server.URL,
+					"model":    "gpt-5.4-mini",
+					"api_key":  "test-key",
+				},
+			},
 		},
 		"stream": false,
 	})
@@ -212,7 +278,7 @@ func TestRunOneShotPolicyBlocksDangerousShellCommandInToolLoop(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	err := RunOneShot(RunOneShotRequest{
-		Args:   []string{"-prompt", "clean this repository"},
+		Args:   []string{"-config", configPath, "-prompt", "clean this repository"},
 		Stdin:  strings.NewReader(""),
 		Stdout: &stdout,
 		Stderr: &stderr,
@@ -242,6 +308,14 @@ func newOpenAICompletionServer(content string) *httptest.Server {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if stream, _ := payload["stream"].(bool); stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"" + content + "\"}}]}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{
 				"message": map[string]any{

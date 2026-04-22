@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,6 +81,29 @@ func TestBootstrapCreatesSessionInWorkspace(t *testing.T) {
 	}
 	if strings.TrimSpace(sess.ID) == "" {
 		t.Fatal("expected session id to be created")
+	}
+}
+
+func TestBootstrapEntrypointRejectsBroadWorkspaceWithoutOverride(t *testing.T) {
+	workspace := t.TempDir()
+	for i := 0; i < DefaultBroadWorkspaceEntryThreshold; i++ {
+		path := filepath.Join(workspace, fmt.Sprintf("entry-%03d.tmp", i))
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed broad workspace entries: %v", err)
+		}
+	}
+	t.Chdir(workspace)
+
+	_, err := BootstrapEntrypoint(EntrypointRequest{
+		RequireAPIKey: false,
+		Stdin:         strings.NewReader(""),
+		Stdout:        &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected broad workspace error")
+	}
+	if !strings.Contains(err.Error(), "too broad for default workspace") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

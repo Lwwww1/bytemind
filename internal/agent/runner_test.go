@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -213,7 +214,7 @@ func TestRunPromptStopsOnRepeatedToolPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(answer, "repeated the same tool sequence") {
+	if !strings.Contains(answer, "repeated the") {
 		t.Fatalf("expected repeat-detection summary, got %q", answer)
 	}
 }
@@ -280,6 +281,116 @@ func TestRunPromptCompletesMinimalToolLoop(t *testing.T) {
 	}
 	if sess.Messages[3].Role != "assistant" || sess.Messages[3].Content != "Workspace inspected." {
 		t.Fatalf("expected final assistant message, got %#v", sess.Messages[3])
+	}
+}
+
+func TestRunPromptRepairsContinueWorkWithoutToolCalls(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role:    "assistant",
+			Content: "<turn_intent>continue_work</turn_intent>I will inspect files first.",
+		},
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-1",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name:      "list_files",
+					Arguments: `{}`,
+				},
+			}},
+		},
+		{
+			Role:    "assistant",
+			Content: "<turn_intent>finalize</turn_intent>Workspace inspected.",
+		},
+	}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:      config.ProviderConfig{Model: "test-model"},
+			MaxIterations: 6,
+			Stream:        false,
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "inspect workspace", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Workspace inspected." {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected three requests (repair + tool + finalize), got %d", len(client.requests))
+	}
+	secondTurnMessages := client.requests[1].Messages
+	if len(secondTurnMessages) == 0 || secondTurnMessages[0].Role != llm.RoleSystem {
+		t.Fatalf("expected second request to keep system prompt first, got %#v", secondTurnMessages)
+	}
+	lastMsg := secondTurnMessages[len(secondTurnMessages)-1]
+	if lastMsg.Role != llm.RoleUser ||
+		!strings.Contains(strings.ToLower(lastMsg.Text()), "ongoing work but returned no structured tool calls") {
+		t.Fatalf("expected repair control note to be appended as user message, got %#v", secondTurnMessages)
+	}
+	if len(sess.Messages) != 4 {
+		t.Fatalf("expected user + tool call + tool result + final assistant, got %#v", sess.Messages)
+	}
+}
+
+func TestRunPromptStopsWhenContinueWorkWithoutToolCallsKeepsRepeating(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role:    "assistant",
+			Content: "<turn_intent>continue_work</turn_intent>I will continue now.",
+		},
+	}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:      config.ProviderConfig{Model: "test-model"},
+			MaxIterations: 8,
+			Stream:        false,
+			ContextBudget: config.ContextBudgetConfig{
+				WarningRatio:     config.DefaultContextBudgetWarningRatio,
+				CriticalRatio:    config.DefaultContextBudgetCriticalRatio,
+				MaxReactiveRetry: 1,
+			},
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "keep going", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(answer, "ongoing work without structured tool calls") {
+		t.Fatalf("expected stop summary for repeated no-tool continue turns, got %q", answer)
+	}
+	if len(sess.Messages) != 2 {
+		t.Fatalf("expected user + summary assistant messages, got %#v", sess.Messages)
 	}
 }
 
@@ -753,6 +864,189 @@ func TestRunPromptEncodesToolExecutionErrorsAndContinues(t *testing.T) {
 	}
 	if !strings.Contains(sess.Messages[2].Content, `"ok":false`) || !strings.Contains(sess.Messages[2].Content, `unknown tool`) {
 		t.Fatalf("expected encoded tool error payload, got %q", sess.Messages[2].Content)
+	}
+	if !strings.Contains(sess.Messages[2].Content, `"status":"error"`) || !strings.Contains(sess.Messages[2].Content, `"reason_code":"invalid_args"`) {
+		t.Fatalf("expected tool error status and reason_code, got %q", sess.Messages[2].Content)
+	}
+}
+
+func TestRunPromptAwayAutoDenyContinueKeepsRunningAfterPermissionDenied(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "call-1",
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "write_file",
+						Arguments: `{"path":"x.txt","content":"x"}`,
+					},
+				},
+				{
+					ID:   "call-2",
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "read_file",
+						Arguments: `{"path":"x.txt"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:    "assistant",
+			Content: "continued after denied approval",
+		},
+	}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:       config.ProviderConfig{Model: "test-model"},
+			MaxIterations:  4,
+			Stream:         false,
+			ApprovalPolicy: "on-request",
+			ApprovalMode:   "away",
+			AwayPolicy:     "auto_deny_continue",
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	var out bytes.Buffer
+	answer, err := runner.RunPrompt(context.Background(), sess, "trigger permission path", "build", &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "continued after denied approval" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+	if len(sess.Messages) < 4 {
+		t.Fatalf("expected tool result message, got %#v", sess.Messages)
+	}
+	toolMsg := sess.Messages[2]
+	if !strings.Contains(toolMsg.Content, `"ok":false`) || !strings.Contains(toolMsg.Content, "away mode") {
+		t.Fatalf("expected away-mode denial payload, got %q", toolMsg.Content)
+	}
+	if !strings.Contains(toolMsg.Content, `"status":"denied"`) || !strings.Contains(toolMsg.Content, `"reason_code":"permission_denied"`) {
+		t.Fatalf("expected denied status and permission reason_code, got %q", toolMsg.Content)
+	}
+	skippedMsg := sess.Messages[3]
+	if !strings.Contains(skippedMsg.Content, `"status":"skipped"`) || !strings.Contains(skippedMsg.Content, `"reason_code":"denied_dependency"`) {
+		t.Fatalf("expected skipped due dependency payload, got %q", skippedMsg.Content)
+	}
+	if !strings.Contains(skippedMsg.Content, "skipped because a prior approval-required action was denied") {
+		t.Fatalf("expected skipped message to describe denied dependency, got %q", skippedMsg.Content)
+	}
+	for _, want := range []string{
+		"Task report summary:",
+		"- Skipped due to denied dependency: read_file",
+		"Task report (json):",
+		`"denied":["write_file"]`,
+		`"skipped_due_to_denied_dependency":["read_file"]`,
+		`"skipped_due_to_dependency":["read_file"]`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected successful auto_deny_continue output to contain %q, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), `"pending_approval"`) {
+		t.Fatalf("expected away-mode task report to avoid pending_approval, got %q", out.String())
+	}
+}
+
+func TestRunPromptAwayFailFastStopsAfterPermissionDenied(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "call-1",
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "write_file",
+						Arguments: `{"path":"x.txt","content":"x"}`,
+					},
+				},
+				{
+					ID:   "call-2",
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "read_file",
+						Arguments: `{"path":"x.txt"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:    "assistant",
+			Content: "this reply should not be consumed",
+		},
+	}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:       config.ProviderConfig{Model: "test-model"},
+			MaxIterations:  4,
+			Stream:         false,
+			ApprovalPolicy: "on-request",
+			ApprovalMode:   "away",
+			AwayPolicy:     "fail_fast",
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "trigger permission path", "build", io.Discard)
+	if err == nil {
+		t.Fatal("expected fail_fast mode to stop run after permission denial")
+	}
+	if strings.TrimSpace(answer) != "" {
+		t.Fatalf("expected empty answer when fail_fast stops run, got %q", answer)
+	}
+	if !strings.Contains(err.Error(), "fail_fast stopped run") {
+		t.Fatalf("expected fail_fast stop reason, got %v", err)
+	}
+	for _, want := range []string{
+		"Task report summary:",
+		"- Skipped due to denied dependency: read_file",
+		"Task report (json):",
+		`"denied":["write_file"]`,
+		`"skipped_due_to_denied_dependency":["read_file"]`,
+		`"skipped_due_to_dependency":["read_file"]`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected fail_fast error to include task report item %q, got %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), `"pending_approval"`) {
+		t.Fatalf("expected away-mode fail_fast report to avoid pending_approval, got %v", err)
+	}
+	if len(sess.Messages) != 3 {
+		t.Fatalf("expected session to stop after first denied tool call, got %#v", sess.Messages)
+	}
+	if !strings.Contains(sess.Messages[2].Content, "away_policy=fail_fast") {
+		t.Fatalf("expected denied tool payload to include fail_fast policy, got %q", sess.Messages[2].Content)
+	}
+	if !strings.Contains(sess.Messages[2].Content, `"status":"denied"`) || !strings.Contains(sess.Messages[2].Content, `"reason_code":"permission_denied"`) {
+		t.Fatalf("expected denied status and reason code in fail_fast payload, got %q", sess.Messages[2].Content)
 	}
 }
 

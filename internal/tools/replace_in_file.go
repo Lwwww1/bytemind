@@ -24,7 +24,7 @@ func (ReplaceInFileTool) Definition() llm.ToolDefinition {
 				"properties": map[string]any{
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Relative file path inside the workspace.",
+						"description": "Relative path from workspace or absolute path inside workspace/writable_roots.",
 					},
 					"old": map[string]any{
 						"type":        "string",
@@ -56,7 +56,7 @@ func (ReplaceInFileTool) Run(_ context.Context, raw json.RawMessage, execCtx *Ex
 		return "", err
 	}
 
-	path, err := resolvePath(execCtx.Workspace, args.Path)
+	path, err := resolvePath(execCtx.Workspace, args.Path, writableRootsFromExecContext(execCtx)...)
 	if err != nil {
 		return "", err
 	}

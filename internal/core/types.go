@@ -55,10 +55,13 @@ const (
 type SessionMode string
 
 const (
-	SessionModeDefault           SessionMode = "default"
-	SessionModeAcceptEdits       SessionMode = "acceptEdits"
-	SessionModeBypassPermissions SessionMode = "bypassPermissions"
-	SessionModePlan              SessionMode = "plan"
+	SessionModeBuild SessionMode = "build"
+	SessionModePlan  SessionMode = "plan"
+
+	// Legacy mode labels are treated as build mode for backward compatibility.
+	SessionModeDefault           SessionMode = SessionModeBuild
+	SessionModeAcceptEdits       SessionMode = SessionModeBuild
+	SessionModeBypassPermissions SessionMode = SessionModeBuild
 )
 
 // EventMeta carries cross-module event identity metadata.

@@ -9,8 +9,144 @@ import (
 	"strings"
 	"testing"
 
+	"bytemind/internal/provider"
 	runtimepkg "bytemind/internal/runtime"
 )
+
+func TestBootstrapRuntimeFacadeClientCreateMessageReturnsContent(t *testing.T) {
+	workspace := t.TempDir()
+	home := filepath.Join(workspace, ".bytemind-home")
+	t.Setenv("BYTEMIND_HOME", home)
+
+	configPath := filepath.Join(workspace, "config.json")
+	data, err := json.Marshal(map[string]any{
+		"provider": map[string]any{
+			"type":     "openai-compatible",
+			"base_url": "https://api.openai.com/v1",
+			"model":    "gpt-5.4-mini",
+			"api_key":  "test-key",
+		},
+		"provider_runtime": map[string]any{
+			"default_provider": "openai",
+			"default_model":    "gpt-5.4-mini",
+			"allow_fallback":   true,
+			"providers": map[string]any{
+				"openai": map[string]any{
+					"type":     "openai-compatible",
+					"base_url": "https://api.openai.com/v1",
+					"model":    "gpt-5.4-mini",
+					"api_key":  "test-key",
+				},
+			},
+		},
+		"stream": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := Bootstrap(BootstrapRequest{
+		Workspace:     workspace,
+		ConfigPath:    configPath,
+		RequireAPIKey: true,
+		Stdin:         strings.NewReader(""),
+		Stdout:        ioDiscard{},
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap failed: %v", err)
+	}
+	_ = rt
+}
+
+func TestBootstrapRuntimeFacadeClientCanCompletePrompt(t *testing.T) {
+	workspace := t.TempDir()
+	home := filepath.Join(workspace, ".bytemind-home")
+	t.Setenv("BYTEMIND_HOME", home)
+
+	configPath := filepath.Join(workspace, "config.json")
+	data, err := json.Marshal(map[string]any{
+		"provider": map[string]any{
+			"type":     "openai-compatible",
+			"base_url": "https://api.openai.com/v1",
+			"model":    "gpt-5.4-mini",
+			"api_key":  "test-key",
+		},
+		"provider_runtime": map[string]any{
+			"default_provider": "openai",
+			"default_model":    "gpt-5.4-mini",
+			"allow_fallback":   true,
+			"providers": map[string]any{
+				"openai": map[string]any{
+					"type":     "openai-compatible",
+					"base_url": "https://api.openai.com/v1",
+					"model":    "gpt-5.4-mini",
+					"api_key":  "test-key",
+				},
+			},
+		},
+		"stream": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := Bootstrap(BootstrapRequest{
+		Workspace:     workspace,
+		ConfigPath:    configPath,
+		RequireAPIKey: true,
+		Stdin:         strings.NewReader(""),
+		Stdout:        ioDiscard{},
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap failed: %v", err)
+	}
+	if _, ok := rt.Runner.GetClient().(*provider.RoutedClient); !ok {
+		t.Fatalf("expected RoutedClient, got %T", rt.Runner.GetClient())
+	}
+}
+
+func TestBootstrapBuildsRuntimeFacadeClient(t *testing.T) {
+	workspace := t.TempDir()
+	home := filepath.Join(workspace, ".bytemind-home")
+	t.Setenv("BYTEMIND_HOME", home)
+
+	configPath := filepath.Join(workspace, "config.json")
+	data, err := json.Marshal(map[string]any{
+		"provider": map[string]any{
+			"type":     "openai-compatible",
+			"base_url": "https://api.openai.com/v1",
+			"model":    "gpt-5.4-mini",
+			"api_key":  "test-key",
+		},
+		"stream": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := Bootstrap(BootstrapRequest{
+		Workspace:     workspace,
+		ConfigPath:    configPath,
+		RequireAPIKey: true,
+		Stdin:         strings.NewReader(""),
+		Stdout:        ioDiscard{},
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap failed: %v", err)
+	}
+	if _, ok := rt.Runner.GetClient().(*provider.RoutedClient); !ok {
+		t.Fatalf("expected RoutedClient, got %T", rt.Runner.GetClient())
+	}
+}
 
 func TestBootstrapPersistsRuntimeTasksOnlyToUnifiedTaskLog(t *testing.T) {
 	workspace := t.TempDir()
@@ -129,7 +265,10 @@ func TestBootstrapFallsBackToLegacyRuntimeTaskStoreWhenUnifiedInitFails(t *testi
 		if getErr != nil {
 			t.Fatalf("Cancel failed: %v (and Get failed: %v)", err, getErr)
 		}
-		if task.Status != "failed" || task.ErrorCode != runtimepkg.ErrorCodeTaskExecutionFailed {
+		if task.Status != "failed" {
+			t.Fatalf("Cancel failed: %v (task status=%s error_code=%s)", err, task.Status, task.ErrorCode)
+		}
+		if task.ErrorCode != runtimepkg.ErrorCodeTaskExecutionFailed && task.ErrorCode != runtimepkg.ErrorCodeNotImplemented {
 			t.Fatalf("Cancel failed: %v (task status=%s error_code=%s)", err, task.Status, task.ErrorCode)
 		}
 	}

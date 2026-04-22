@@ -16,13 +16,13 @@ func (ListFilesTool) Definition() llm.ToolDefinition {
 		Type: "function",
 		Function: llm.FunctionDefinition{
 			Name:        "list_files",
-			Description: "List files and directories inside the workspace",
+			Description: "List files and directories inside the workspace or configured writable roots",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Relative path to inspect. Defaults to workspace root.",
+						"description": "Relative path from workspace or absolute path inside workspace/writable_roots. Defaults to workspace root.",
 					},
 					"depth": map[string]any{
 						"type":        "integer",
@@ -65,7 +65,7 @@ func (ListFilesTool) Run(ctx context.Context, raw json.RawMessage, execCtx *Exec
 		args.Limit = 1000
 	}
 
-	root, err := resolvePath(execCtx.Workspace, args.Path)
+	root, err := resolvePath(execCtx.Workspace, args.Path, writableRootsFromExecContext(execCtx)...)
 	if err != nil {
 		return "", err
 	}

@@ -20,13 +20,13 @@ func (ReadFileTool) Definition() llm.ToolDefinition {
 		Type: "function",
 		Function: llm.FunctionDefinition{
 			Name:        "read_file",
-			Description: "Read a text file from the workspace",
+			Description: "Read a text file from the workspace or configured writable roots",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Relative file path inside the workspace.",
+						"description": "Relative path from workspace or absolute path inside workspace/writable_roots.",
 					},
 					"start_line": map[string]any{
 						"type":        "integer",
@@ -53,7 +53,7 @@ func (ReadFileTool) Run(_ context.Context, raw json.RawMessage, execCtx *Executi
 		return "", err
 	}
 
-	path, err := resolvePath(execCtx.Workspace, args.Path)
+	path, err := resolvePath(execCtx.Workspace, args.Path, writableRootsFromExecContext(execCtx)...)
 	if err != nil {
 		return "", err
 	}

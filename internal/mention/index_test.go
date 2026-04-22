@@ -3,6 +3,7 @@ package mention
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -250,6 +251,17 @@ func TestWorkspaceFileIndexSupportsConfigurableIgnoreRules(t *testing.T) {
 		if containsString(paths, unwanted) {
 			t.Fatalf("did not expect ignored path %q in results %v", unwanted, paths)
 		}
+	}
+}
+
+func TestLoadMentionIgnoreMatcherSupportsLongRuleLines(t *testing.T) {
+	workspace := t.TempDir()
+	longRule := strings.Repeat("a", 70*1024) // exceed bufio.Scanner default 64KB token limit
+	mustWriteMentionFile(t, filepath.Join(workspace, ".bytemindignore"), longRule+"\nlogs/*\n")
+
+	matcher := loadMentionIgnoreMatcher(workspace)
+	if !matcher.SkipFile("debug.log", "logs/debug.log") {
+		t.Fatalf("expected matcher to keep parsing rules after long line")
 	}
 }
 

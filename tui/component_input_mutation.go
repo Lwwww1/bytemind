@@ -7,6 +7,7 @@ import (
 
 func (m *model) noteInputMutation(before, after, source string) {
 	now := time.Now()
+	previousInputAt := m.lastInputAt
 	gap := time.Duration(0)
 	if !m.lastInputAt.IsZero() {
 		gap = now.Sub(m.lastInputAt)

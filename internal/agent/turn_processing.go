@@ -73,6 +73,40 @@ func (e *defaultEngine) processTurn(ctx context.Context, p turnProcessParams) (s
 		if intent == turnIntentUnknown {
 			intent = inferAssistantTurnIntent(reply.Content)
 		}
+		if shouldRepairPlanDecisionTurn(p.RunMode, p.Session.Plan, intent, reply) {
+			attempt := 0
+			maxAttempts := 0
+			if p.AdaptiveState != nil {
+				p.AdaptiveState.recordNoProgressTurn()
+				attempt = p.AdaptiveState.recordSemanticRepairAttempt()
+				maxAttempts = p.AdaptiveState.maxSemanticRepairs
+			}
+			if p.TaskReport != nil {
+				p.TaskReport.RecordNoProgressTurn()
+				p.TaskReport.RecordRetry("plan_state_not_updated_after_user_decision")
+				p.TaskReport.RecordStrategyAdjustment("assistant acknowledged a plan decision without update_plan; injected correction prompt")
+			}
+			if p.AdaptiveState != nil {
+				if p.AdaptiveState.exceededSemanticRepairLimit() || p.AdaptiveState.exceededNoProgressLimit() {
+					if p.TaskReport != nil {
+						p.TaskReport.RecordEscalation("plan-state repair retries exceeded while waiting for update_plan")
+					}
+					summary := BuildStopSummary(StopSummaryInput{
+						SessionID:     corepkg.SessionID(p.Session.ID),
+						Reason:        fmt.Sprintf("I paused because the assistant kept acknowledging plan decisions without updating the structured plan state first (attempts=%d, explicit_intent=%t).", attempt, explicitIntent),
+						ExecutedTools: *p.ExecutedTools,
+						TaskReport:    p.TaskReport,
+					})
+					answer, summaryErr := e.finishWithSummary(p.Session, summary, p.Out, streamedText)
+					return answer, true, summaryErr
+				}
+				p.AdaptiveState.schedulePendingControlNote(buildPlanDecisionRepairInstruction(p.Session.Plan, reply, attempt, maxAttempts))
+			}
+			if p.Out != nil {
+				fmt.Fprintf(p.Out, "%sassistant acknowledged a plan decision without update_plan; retrying with a correction prompt%s\n", ansiDim, ansiReset)
+			}
+			return "", false, nil
+		}
 		switch intent {
 		case turnIntentContinueWork:
 			attempt := 0

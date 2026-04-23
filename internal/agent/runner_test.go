@@ -17,6 +17,7 @@ import (
 	"bytemind/internal/config"
 	contextpkg "bytemind/internal/context"
 	"bytemind/internal/llm"
+	planpkg "bytemind/internal/plan"
 	"bytemind/internal/session"
 	"bytemind/internal/tokenusage"
 	"bytemind/internal/tools"
@@ -347,6 +348,98 @@ func TestRunPromptRepairsContinueWorkWithoutToolCalls(t *testing.T) {
 	}
 	if len(sess.Messages) != 4 {
 		t.Fatalf("expected user + tool call + tool result + final assistant, got %#v", sess.Messages)
+	}
+}
+
+func TestRunPromptRepairsPlanDecisionAcknowledgementWithoutUpdatePlan(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	sess.Mode = planpkg.ModePlan
+	sess.Plan = planpkg.State{
+		Goal:         "Implement the first RAG demo",
+		Summary:      "Need to lock the frontend choice before convergence.",
+		Phase:        planpkg.PhaseClarify,
+		DecisionGaps: []string{"Choose the first frontend stack."},
+		Steps: []planpkg.Step{
+			{Title: "Freeze the frontend stack", Status: planpkg.StepPending},
+			{Title: "Implement the minimal flow", Status: planpkg.StepPending},
+		},
+	}
+
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role:    "assistant",
+			Content: "<turn_intent>finalize</turn_intent>已收到，采用 B: Streamlit + LangChain。\n你回复 start execution 我就切到 Build 模式。",
+		},
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-1",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name: "update_plan",
+					Arguments: `{
+						"summary":"Frontend choice is locked and the plan is ready for execution review.",
+						"implementation_brief":"Objective: deliver the first local RAG demo in demos/ with Streamlit + LangChain.\nTechnical direction: keep the existing local Python stack, use Streamlit for UI, LangChain for orchestration, and a local vector store path.\nDeliverables: a runnable demo app, document ingestion flow, retrieval + answer generation flow, and basic local verification.\nAcceptance: another coding model should be able to implement directly from this brief.",
+						"phase":"converge_ready",
+						"decision_log":[{"decision":"Adopt Streamlit + LangChain for the first frontend stack","reason":"User selected option B for faster UI delivery."}],
+						"decision_gaps":[],
+						"scope_defined":true,
+						"risk_and_rollback_defined":true,
+						"verification_defined":true,
+						"risks":["Frontend stack change may require adapter refactors."],
+						"verification":["Run the local Streamlit app and validate one ingest + one query flow."],
+						"next_action":"Present the full handoff-ready plan and ask whether to start execution.",
+						"plan":[
+							{"step":"Freeze the frontend stack", "status":"pending"},
+							{"step":"Implement the minimal flow", "status":"pending"}
+						]
+					}`,
+				},
+			}},
+		},
+		{
+			Role:    "assistant",
+			Content: "<turn_intent>finalize</turn_intent>已记录，采用 B: Streamlit + LangChain。\n可选下一步：\n- Start execution\n- Adjust plan",
+		},
+	}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:      config.ProviderConfig{Model: "test-model"},
+			MaxIterations: 6,
+			Stream:        false,
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "b", "plan", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected three requests (repair + update_plan + finalize), got %d", len(client.requests))
+	}
+	secondTurnMessages := client.requests[1].Messages
+	lastMsg := secondTurnMessages[len(secondTurnMessages)-1]
+	if lastMsg.Role != llm.RoleUser || !strings.Contains(strings.ToLower(lastMsg.Text()), "without calling update_plan first") {
+		t.Fatalf("expected plan-state repair note to be appended as user message, got %#v", secondTurnMessages)
+	}
+	if sess.Plan.Phase != planpkg.PhaseConvergeReady {
+		t.Fatalf("expected session plan to converge after repair, got %#v", sess.Plan)
+	}
+	for _, want := range []string{"<proposed_plan>", "Implementation Brief", "Start execution"} {
+		if !strings.Contains(answer, want) {
+			t.Fatalf("expected repaired answer to include %q, got %q", want, answer)
+		}
 	}
 }
 

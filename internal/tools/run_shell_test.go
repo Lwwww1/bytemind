@@ -491,6 +491,44 @@ func TestBuildSystemSandboxExecutionMetadataMarksRequiredCapabilityWhenBackendSu
 	}
 }
 
+func TestBuildSystemSandboxExecutionMetadataWindowsRequiredMarksCapability(t *testing.T) {
+	meta := buildSystemSandboxExecutionMetadata(systemSandboxModeRequired, systemSandboxRuntimeBackend{
+		Enabled: true,
+		Name:    "windows_job_object",
+		Shell: systemSandboxLaunchSpec{
+			Policy: systemSandboxPolicy{
+				FileIsolation:    false,
+				ProcessIsolation: true,
+			},
+		},
+		Worker: systemSandboxLaunchSpec{
+			Policy: systemSandboxPolicy{
+				FileIsolation:    false,
+				ProcessIsolation: true,
+			},
+		},
+	})
+	if got := meta["required_capable"]; got != true {
+		t.Fatalf("expected windows required mode to mark required_capable=true, got %#v", meta)
+	}
+}
+
+func TestValidateRequiredWindowsShellCommandAllowsReadOnly(t *testing.T) {
+	if err := validateRequiredWindowsShellCommand("git status"); err != nil {
+		t.Fatalf("expected read-only command to be allowed, got %v", err)
+	}
+}
+
+func TestValidateRequiredWindowsShellCommandRejectsNonReadOnly(t *testing.T) {
+	err := validateRequiredWindowsShellCommand("go test ./...")
+	if err == nil {
+		t.Fatal("expected non-read-only command to be rejected")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "required on windows") {
+		t.Fatalf("expected required windows guard message, got %v", err)
+	}
+}
+
 func TestRunShellToolRequiredModeBackendUnavailableReturnsPermissionDenied(t *testing.T) {
 	originalLookPath := runShellLookPath
 	runShellLookPath = func(string) (string, error) {

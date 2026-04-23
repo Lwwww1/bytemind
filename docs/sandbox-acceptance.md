@@ -41,7 +41,7 @@ This document defines the minimum acceptance checks for the current sandbox impl
 | Linux + `system_sandbox_mode=required` + shell command writes outside writable roots | Write fails from read-only filesystem enforcement. |
 | macOS + `system_sandbox_mode=best_effort` + `sandbox-exec` available | Uses `sandbox-exec` profile-based launch with writable roots and explicit fallback reason when probe fails. |
 | Windows + `system_sandbox_mode=best_effort` | Uses Job Object process isolation backend (no startup fallback). |
-| Windows + `system_sandbox_mode=required` | Fails closed at startup (backend lacks required file/process isolation capability parity). |
+| Windows + `system_sandbox_mode=required` | Uses Job Object backend with startup active state; `run_shell` enforces read-only-only commands (non-read-only commands are denied). |
 
 ## Automated Checks
 

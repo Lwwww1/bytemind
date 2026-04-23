@@ -73,7 +73,7 @@ func resolveSystemSandboxRuntimeStatusWith(
 	if backend.Enabled {
 		status.BackendEnabled = true
 		status.BackendName = strings.TrimSpace(backend.Name)
-		status.RequiredCapable = requiredSystemSandboxCapabilitiesSatisfied(backend)
+		status.RequiredCapable = backend.RequiredCapable
 		status.Message = fmt.Sprintf("system sandbox backend %q is active", status.BackendName)
 		return status, nil
 	}

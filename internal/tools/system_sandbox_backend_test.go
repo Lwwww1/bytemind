@@ -59,17 +59,19 @@ func TestResolveSystemSandboxRuntimeBackendWindowsBackendActive(t *testing.T) {
 	}
 }
 
-func TestResolveSystemSandboxRuntimeBackendWindowsRequiredFailsCapabilityGate(t *testing.T) {
-	_, err := resolveSystemSandboxRuntimeBackend(systemSandboxModeRequired, "windows", func(string) (string, error) {
+func TestResolveSystemSandboxRuntimeBackendWindowsRequiredPassesWithReadonlyGuardCapabilities(t *testing.T) {
+	backend, err := resolveSystemSandboxRuntimeBackend(systemSandboxModeRequired, "windows", func(string) (string, error) {
 		t.Fatal("lookPath should not be called for windows job-object backend")
 		return "", nil
 	})
-	if err == nil {
-		t.Fatal("expected windows required mode to fail capability gate")
+	if err != nil {
+		t.Fatalf("expected windows required mode to pass capability gate, got %v", err)
 	}
-	lower := strings.ToLower(err.Error())
-	if !strings.Contains(lower, "required") || !strings.Contains(lower, "file/process isolation") {
-		t.Fatalf("unexpected error: %v", err)
+	if !backend.RequiredCapable {
+		t.Fatalf("expected windows required mode backend to be required-capable, got %#v", backend)
+	}
+	if !backend.Enabled || backend.Name != "windows_job_object" {
+		t.Fatalf("unexpected windows backend: %#v", backend)
 	}
 }
 

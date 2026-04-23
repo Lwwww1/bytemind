@@ -37,17 +37,13 @@ func TestValidateSystemSandboxRuntimeWithFailsClosedForRequiredModeWithoutBacken
 	}
 }
 
-func TestValidateSystemSandboxRuntimeWithFailsClosedForRequiredModeWithoutCapabilities(t *testing.T) {
+func TestValidateSystemSandboxRuntimeWithWindowsRequiredPassesWithReadonlyGuardCapabilities(t *testing.T) {
 	err := validateSystemSandboxRuntimeWith(true, "required", "windows", func(string) (string, error) {
 		t.Fatal("lookPath should not be called for windows job-object backend")
 		return "", nil
 	})
-	if err == nil {
-		t.Fatal("expected required mode to fail closed when backend lacks capabilities")
-	}
-	lower := strings.ToLower(err.Error())
-	if !strings.Contains(lower, "required") || !strings.Contains(lower, "file/process isolation") {
-		t.Fatalf("unexpected error: %v", err)
+	if err != nil {
+		t.Fatalf("expected windows required mode to pass runtime validation, got %v", err)
 	}
 }
 
@@ -116,6 +112,28 @@ func TestResolveSystemSandboxRuntimeStatusWithWindowsBackendActive(t *testing.T)
 	}
 	if status.RequiredCapable {
 		t.Fatalf("expected required_capable=false for windows best_effort backend, got %#v", status)
+	}
+}
+
+func TestResolveSystemSandboxRuntimeStatusWithWindowsRequiredBackendActive(t *testing.T) {
+	status, err := resolveSystemSandboxRuntimeStatusWith(true, "required", "windows", func(string) (string, error) {
+		t.Fatal("lookPath should not be called for windows job-object backend")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("resolve status: %v", err)
+	}
+	if !status.BackendEnabled {
+		t.Fatalf("expected windows backend enabled, got %#v", status)
+	}
+	if status.BackendName != "windows_job_object" {
+		t.Fatalf("expected windows_job_object backend, got %#v", status)
+	}
+	if status.Fallback {
+		t.Fatalf("expected fallback=false for windows required backend, got %#v", status)
+	}
+	if !status.RequiredCapable {
+		t.Fatalf("expected required_capable=true for windows required backend, got %#v", status)
 	}
 }
 

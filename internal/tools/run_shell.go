@@ -145,11 +145,12 @@ func buildSystemSandboxExecutionMetadata(mode string, backend systemSandboxRunti
 	} else if fallback {
 		status = "fallback"
 	}
+	requiredCapable := systemSandboxRequiredCapable(mode, backend)
 	payload := map[string]any{
 		"mode":             mode,
 		"backend":          backendName,
 		"active":           active,
-		"required_capable": requiredSystemSandboxCapabilitiesSatisfied(backend),
+		"required_capable": requiredCapable,
 		"fallback":         fallback,
 		"status":           status,
 	}
@@ -157,6 +158,17 @@ func buildSystemSandboxExecutionMetadata(mode string, backend systemSandboxRunti
 		payload["fallback_reason"] = reason
 	}
 	return payload
+}
+
+func systemSandboxRequiredCapable(mode string, backend systemSandboxRuntimeBackend) bool {
+	if backend.RequiredCapable {
+		return true
+	}
+	if requiredSystemSandboxCapabilitiesSatisfied(backend) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(mode), systemSandboxModeRequired) &&
+		requiredWindowsRequiredCapabilitiesSatisfied(backend)
 }
 
 func requireApproval(command string, execCtx *ExecutionContext) error {
@@ -244,6 +256,22 @@ func assessShellCommand(command string) shellAssessment {
 	return policypkg.AssessShellCommand(command)
 }
 
+func validateRequiredWindowsShellCommand(command string) error {
+	assessment := assessShellCommand(command)
+	switch assessment.Risk {
+	case shellRiskSafe:
+		return nil
+	case shellRiskBlocked:
+		return errors.New(assessment.Reason)
+	default:
+		reason := strings.TrimSpace(assessment.Reason)
+		if reason == "" {
+			reason = "command is not read-only"
+		}
+		return errors.New("system sandbox mode required on windows only permits read-only shell commands: " + reason)
+	}
+}
+
 func shellCommand(ctx context.Context, command string, execCtx *ExecutionContext) (*exec.Cmd, systemSandboxRuntimeBackend, string, error) {
 	mode := normalizeSystemSandboxMode(execCtx)
 	backend, err := resolveSystemSandboxRuntimeBackend(mode, runtime.GOOS, runShellLookPath)
@@ -262,6 +290,11 @@ func shellCommand(ctx context.Context, command string, execCtx *ExecutionContext
 			}
 			cmd = exec.CommandContext(ctx, backend.Runner, buildDarwinSandboxShellArgs(profile, execCommand)...)
 		case "windows_job_object":
+			if mode == systemSandboxModeRequired {
+				if err := validateRequiredWindowsShellCommand(execCommand); err != nil {
+					return nil, backend, mode, err
+				}
+			}
 			executable := resolveWindowsShellExecutable(exec.LookPath, os.Stat, os.Getenv)
 			cmd = exec.CommandContext(ctx, executable, "-NoProfile", "-Command", command)
 		default:

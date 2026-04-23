@@ -70,6 +70,7 @@ type systemSandboxRuntimeBackend struct {
 	Runner            string
 	Shell             systemSandboxLaunchSpec
 	Worker            systemSandboxLaunchSpec
+	RequiredCapable   bool
 	UnavailableReason string
 }
 
@@ -117,7 +118,13 @@ func resolveSystemSandboxRuntimeBackend(mode, goos string, lookPath func(string)
 		Shell:   backend.ShellLaunchSpec(),
 		Worker:  backend.WorkerLaunchSpec(),
 	}
-	if mode == systemSandboxModeRequired && !requiredSystemSandboxCapabilitiesSatisfied(resolved) {
+	resolved.RequiredCapable = requiredSystemSandboxCapabilitiesSatisfied(resolved)
+	if mode == systemSandboxModeRequired &&
+		!resolved.RequiredCapable &&
+		strings.EqualFold(strings.TrimSpace(goos), "windows") {
+		resolved.RequiredCapable = requiredWindowsRequiredCapabilitiesSatisfied(resolved)
+	}
+	if mode == systemSandboxModeRequired && !resolved.RequiredCapable {
 		return systemSandboxRuntimeBackend{}, fmt.Errorf("system sandbox mode required but backend %q lacks required file/process isolation capabilities", resolved.Name)
 	}
 	return resolved, nil
@@ -134,6 +141,18 @@ func requiredSystemSandboxCapabilitiesSatisfied(backend systemSandboxRuntimeBack
 		return false
 	}
 	return true
+}
+
+func requiredWindowsRequiredCapabilitiesSatisfied(backend systemSandboxRuntimeBackend) bool {
+	if !backend.Enabled {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(backend.Name), "windows_job_object") {
+		return false
+	}
+	// Windows required mode relies on Job Object process isolation and a strict
+	// read-only shell command guard in run_shell.
+	return backend.Shell.Policy.ProcessIsolation && backend.Worker.Policy.ProcessIsolation
 }
 
 func systemSandboxBackendForOS(goos string) systemSandboxPlatformBackend {

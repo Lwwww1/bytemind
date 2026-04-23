@@ -518,7 +518,7 @@ func TestResolveLaunchWindowsBestEffortKeepsDirectExecutableAndTracksBackend(t *
 	}
 }
 
-func TestResolveLaunchWindowsRequiredFailsCapabilityGate(t *testing.T) {
+func TestResolveLaunchWindowsRequiredUsesJobObjectBackend(t *testing.T) {
 	invoker := osExecWorkerInvoker{
 		executablePath: `C:\bytemind.exe`,
 		goos:           "windows",
@@ -527,18 +527,26 @@ func TestResolveLaunchWindowsRequiredFailsCapabilityGate(t *testing.T) {
 			return "", nil
 		},
 	}
-	_, err := invoker.resolveLaunch(workerRPCRequest{
+	launch, err := invoker.resolveLaunch(workerRPCRequest{
 		Execution: workerRPCExecutionContext{
 			Workspace:         `C:\workspace`,
 			SystemSandboxMode: "required",
 		},
 	})
-	if err == nil {
-		t.Fatal("expected windows required mode to fail capability gate")
+	if err != nil {
+		t.Fatalf("resolve launch: %v", err)
 	}
-	lower := strings.ToLower(err.Error())
-	if !strings.Contains(lower, "required") || !strings.Contains(lower, "file/process isolation") {
-		t.Fatalf("unexpected error: %v", err)
+	if launch.Path != `C:\bytemind.exe` {
+		t.Fatalf("expected direct executable path for windows backend, got %q", launch.Path)
+	}
+	if len(launch.Args) != 3 || launch.Args[0] != `C:\bytemind.exe` || launch.Args[1] != sandboxWorkerSubcommand || launch.Args[2] != sandboxWorkerStdioFlag {
+		t.Fatalf("unexpected windows launch args: %#v", launch.Args)
+	}
+	if launch.SystemSandboxBackendName != "windows_job_object" {
+		t.Fatalf("expected windows_job_object backend marker, got %#v", launch)
+	}
+	if launch.SystemSandboxMode != "required" {
+		t.Fatalf("expected required mode marker, got %#v", launch)
 	}
 }
 

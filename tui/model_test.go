@@ -3576,11 +3576,17 @@ func TestRenderConversationIncludesToolEntries(t *testing.T) {
 	}
 
 	got := m.renderConversation()
-	if !strings.Contains(got, "READ") || !strings.Contains(got, "read_file") {
+	if !strings.Contains(got, "READ") {
 		t.Fatalf("expected conversation to show tool entry, got %q", got)
 	}
-	if !strings.Contains(got, "Read model.go") || !strings.Contains(got, "range: 1-20") {
+	if strings.Contains(got, "read_file") {
+		t.Fatalf("expected conversation to hide raw tool name in header, got %q", got)
+	}
+	if !strings.Contains(got, "Read model.go") {
 		t.Fatalf("expected conversation to show tool summary, got %q", got)
+	}
+	if strings.Contains(got, "range: 1-20") || strings.Contains(got, "path: tui/model.go") {
+		t.Fatalf("expected conversation to collapse tool body to one summary line, got %q", got)
 	}
 }
 
@@ -3901,8 +3907,11 @@ func TestRenderChatSectionToolHeaderOmitsStatusWords(t *testing.T) {
 	if !strings.Contains(got, "running") {
 		t.Fatalf("expected tool header to show status badge text, got %q", got)
 	}
-	if !strings.Contains(got, "LIST") || !strings.Contains(got, "list_files") {
-		t.Fatalf("expected tool header to show structured label and tool name, got %q", got)
+	if !strings.Contains(got, "LIST") {
+		t.Fatalf("expected tool header to show structured label, got %q", got)
+	}
+	if strings.Contains(got, "list_files") {
+		t.Fatalf("expected tool header to hide raw tool name, got %q", got)
 	}
 	if strings.Contains(got, "params:") || strings.Contains(got, "{\"") {
 		t.Fatalf("expected tool section to hide params content, got %q", got)
@@ -3922,11 +3931,8 @@ func TestFormatChatBodyHighlightsSearchToolSummaryAndMatches(t *testing.T) {
 	if !strings.Contains(got, toolSearchSummaryStyle.Render("12 matches for \"func main() {\"")) {
 		t.Fatalf("expected search summary line to be highlighted, got %q", got)
 	}
-	if !strings.Contains(got, toolSearchMatchStyle.Render("bytemind/opencode-go/main.go:14 func main() {")) {
-		t.Fatalf("expected first search match line to be highlighted, got %q", got)
-	}
-	if !strings.Contains(got, toolSearchMatchStyle.Render("cmd/bytemind/main.go:11 func main() {")) {
-		t.Fatalf("expected second search match line to be highlighted, got %q", got)
+	if strings.Contains(got, "bytemind/opencode-go/main.go:14") || strings.Contains(got, "cmd/bytemind/main.go:11") {
+		t.Fatalf("expected tool body to render only summary line, got %q", got)
 	}
 }
 
@@ -4453,8 +4459,17 @@ func TestRenderChatCardToolUsesVisualSeparator(t *testing.T) {
 	if !strings.Contains(got, "\u2502") && !strings.Contains(got, "|") {
 		t.Fatalf("expected tool card to include a left border separator, got %q", got)
 	}
-	if !strings.Contains(got, "READ") || !strings.Contains(got, "read_file") {
+	if !strings.Contains(got, "READ") {
 		t.Fatalf("expected tool card title to render, got %q", got)
+	}
+	if strings.Contains(got, "read_file") {
+		t.Fatalf("expected tool card to hide raw tool name, got %q", got)
+	}
+	if !strings.Contains(got, "✓") {
+		t.Fatalf("expected done status to render as checkmark, got %q", got)
+	}
+	if strings.Contains(got, "range: 1-20") || strings.Contains(got, "path: tui/model.go") {
+		t.Fatalf("expected tool card body to collapse to one summary line, got %q", got)
 	}
 }
 

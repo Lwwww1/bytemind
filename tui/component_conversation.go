@@ -224,21 +224,25 @@ func renderChatSection(item chatEntry, width int) string {
 	}
 	headContent := title.Render(displayTitle)
 	if item.Kind == "tool" {
-		label, name := toolDisplayParts(displayTitle)
+		label, _ := toolDisplayParts(displayTitle)
 		headContent = renderPillBadge(label, "info")
-		if strings.TrimSpace(name) != "" {
-			headContent = lipgloss.JoinHorizontal(lipgloss.Left, headContent, " ", toolNameStyle.Render(name))
-		}
 	}
 	if item.Kind == "user" && strings.TrimSpace(item.Meta) != "" {
 		headContent = chatHeaderMetaStyle.Render(item.Meta)
 	}
 	if status != "" {
+		statusBadgeText := status
+		if item.Kind == "tool" {
+			switch strings.TrimSpace(strings.ToLower(status)) {
+			case "done", "success":
+				statusBadgeText = "✓"
+			}
+		}
 		headContent = lipgloss.JoinHorizontal(
 			lipgloss.Left,
 			headContent,
 			"  ",
-			renderPillBadge(status, status),
+			renderPillBadge(statusBadgeText, status),
 		)
 	}
 	if item.Kind == "assistant" {

@@ -39,7 +39,8 @@ This document defines the minimum acceptance checks for the current sandbox impl
 | Any run with `sandbox_enabled=true` and `system_sandbox_mode!=off` | Run output includes a startup status line with mode/backend/state. |
 | Any run with sandbox context | Audit stream includes `system_sandbox_startup` event plus sandbox metadata on permission/start/result/task_state audit events. |
 | Linux + `system_sandbox_mode=required` + shell command writes outside writable roots | Write fails from read-only filesystem enforcement. |
-| macOS + `system_sandbox_mode=best_effort` + `sandbox-exec` available | Uses `sandbox-exec` profile-based launch with writable roots and explicit fallback reason when probe fails. |
+| macOS + `system_sandbox_mode=best_effort` + `sandbox-exec` available | Uses `sandbox-exec` profile-based launch with writable roots; worker profile allows network for web tools, with explicit fallback reason when probe fails. |
+| macOS + `system_sandbox_mode=required` + `sandbox-exec` available | Uses `sandbox-exec` profile-based launch with writable roots and network denied in worker/shell profiles. |
 | Windows + `system_sandbox_mode=best_effort` | Uses Job Object process isolation backend (no startup fallback). |
 | Windows + `system_sandbox_mode=required` | Uses Job Object backend with startup active state; `run_shell` enforces strict single-segment read-only allowlist (commands outside plan-safe allowlist are denied). |
 

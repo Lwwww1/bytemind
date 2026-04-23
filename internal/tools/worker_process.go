@@ -226,10 +226,11 @@ func (i osExecWorkerInvoker) resolveLaunch(req workerRPCRequest) (workerProcessL
 			// by runCommandWithSystemSandbox when launching this process.
 		case "darwin_sandbox_exec":
 			path = backend.Runner
+			allowNetwork := !strings.EqualFold(mode, systemSandboxModeRequired)
 			profile, profileErr := buildDarwinSandboxProfile(&ExecutionContext{
 				Workspace:     req.Execution.Workspace,
 				WritableRoots: append([]string(nil), req.Execution.WritableRoots...),
-			}, false)
+			}, allowNetwork)
 			if profileErr != nil {
 				return workerProcessLaunch{}, profileErr
 			}

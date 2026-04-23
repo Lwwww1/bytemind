@@ -680,8 +680,43 @@ func TestResolveLaunchDarwinUsesSandboxExecProfile(t *testing.T) {
 	if !strings.Contains(launch.Args[2], "(deny default)") {
 		t.Fatalf("expected sandbox profile payload, got %q", launch.Args[2])
 	}
+	if !strings.Contains(launch.Args[2], "(allow network*)") {
+		t.Fatalf("expected best_effort darwin worker profile to allow network, got %q", launch.Args[2])
+	}
 	if launch.Args[3] != "/tmp/bytemind" || launch.Args[4] != sandboxWorkerSubcommand || launch.Args[5] != sandboxWorkerStdioFlag {
 		t.Fatalf("unexpected worker command args: %#v", launch.Args)
+	}
+}
+
+func TestResolveLaunchDarwinRequiredDisablesNetworkInProfile(t *testing.T) {
+	invoker := osExecWorkerInvoker{
+		executablePath: "/tmp/bytemind",
+		goos:           "darwin",
+		lookPath: func(name string) (string, error) {
+			if name != "sandbox-exec" {
+				t.Fatalf("unexpected binary lookup: %q", name)
+			}
+			return "/usr/bin/sandbox-exec", nil
+		},
+	}
+	launch, err := invoker.resolveLaunch(workerRPCRequest{
+		Execution: workerRPCExecutionContext{
+			Workspace:         "/tmp/workspace",
+			WritableRoots:     []string{"/tmp/workspace/out"},
+			SystemSandboxMode: "required",
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolve launch: %v", err)
+	}
+	if launch.Path != "/usr/bin/sandbox-exec" {
+		t.Fatalf("expected sandbox-exec backend, got %q", launch.Path)
+	}
+	if len(launch.Args) != 6 {
+		t.Fatalf("unexpected launch args: %#v", launch.Args)
+	}
+	if strings.Contains(launch.Args[2], "(allow network*)") {
+		t.Fatalf("expected required darwin worker profile to deny network, got %q", launch.Args[2])
 	}
 }
 

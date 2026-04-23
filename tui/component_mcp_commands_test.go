@@ -536,6 +536,154 @@ func TestMCPSetupBlocksOtherSlashCommandsUntilCanceled(t *testing.T) {
 	}
 }
 
+func TestParseMCPSetupRequestFromSlashGithubPresetDefaults(t *testing.T) {
+	req, err := parseMCPSetupRequestFromSlash([]string{"/mcp", "setup", "github"})
+	if err != nil {
+		t.Fatalf("expected github preset parse to succeed, got %v", err)
+	}
+	if req.ID != "github" {
+		t.Fatalf("expected github id, got %q", req.ID)
+	}
+	if req.Name != "GitHub MCP" {
+		t.Fatalf("expected github preset name, got %q", req.Name)
+	}
+	if req.Command != "npx" {
+		t.Fatalf("expected github preset command npx, got %q", req.Command)
+	}
+	if len(req.Args) != 2 || req.Args[1] != "@modelcontextprotocol/server-github" {
+		t.Fatalf("expected github preset args, got %#v", req.Args)
+	}
+}
+
+func TestParseMCPSetupRequestFromSlashParsesExtendedOptions(t *testing.T) {
+	req, err := parseMCPSetupRequestFromSlash([]string{
+		"/mcp", "setup", "docs",
+		"--name", "docs-mcp",
+		"--cmd", "npx",
+		"--args", "-y,@modelcontextprotocol/server-filesystem",
+		"--env", "API_KEY=abc,MODE=prod",
+		"--cwd", "/tmp/docs",
+		"--auto-start", "false",
+		"--startup-timeout-s", "45",
+		"--call-timeout-s", "70",
+		"--max-concurrency", "9",
+		"--protocol-version", "2025-03-26",
+		"--protocol-versions", "2025-03-26,2024-11-05",
+	})
+	if err != nil {
+		t.Fatalf("expected parse to succeed, got %v", err)
+	}
+	if req.ID != "docs" || req.Name != "docs-mcp" {
+		t.Fatalf("expected docs id/name, got id=%q name=%q", req.ID, req.Name)
+	}
+	if req.Command != "npx" {
+		t.Fatalf("expected command npx, got %q", req.Command)
+	}
+	if len(req.Args) != 2 || req.Args[1] != "@modelcontextprotocol/server-filesystem" {
+		t.Fatalf("expected parsed args, got %#v", req.Args)
+	}
+	if req.Env["API_KEY"] != "abc" || req.Env["MODE"] != "prod" {
+		t.Fatalf("expected parsed env map, got %#v", req.Env)
+	}
+	if req.CWD != "/tmp/docs" {
+		t.Fatalf("expected cwd /tmp/docs, got %q", req.CWD)
+	}
+	if req.AutoStart == nil || *req.AutoStart {
+		t.Fatalf("expected auto_start=false, got %#v", req.AutoStart)
+	}
+	if req.StartupTimeoutS != 45 || req.CallTimeoutS != 70 || req.MaxConcurrency != 9 {
+		t.Fatalf("expected parsed numeric options, got startup=%d call=%d concurrency=%d", req.StartupTimeoutS, req.CallTimeoutS, req.MaxConcurrency)
+	}
+	if req.ProtocolVersion != "2025-03-26" {
+		t.Fatalf("expected protocol version set, got %q", req.ProtocolVersion)
+	}
+	if len(req.ProtocolVersions) != 2 || req.ProtocolVersions[1] != "2024-11-05" {
+		t.Fatalf("expected protocol versions parsed, got %#v", req.ProtocolVersions)
+	}
+}
+
+func TestParseMCPSetupRequestFromSlashRejectsInvalidOptions(t *testing.T) {
+	testCases := []struct {
+		name   string
+		fields []string
+		want   string
+	}{
+		{
+			name:   "unknown option",
+			fields: []string{"/mcp", "setup", "docs", "--cmd", "npx", "--unknown", "x"},
+			want:   "unknown option",
+		},
+		{
+			name:   "missing value",
+			fields: []string{"/mcp", "setup", "docs", "--cmd"},
+			want:   "missing value",
+		},
+		{
+			name:   "invalid auto-start",
+			fields: []string{"/mcp", "setup", "docs", "--cmd", "npx", "--auto-start", "maybe"},
+			want:   "invalid --auto-start value",
+		},
+		{
+			name:   "invalid startup timeout",
+			fields: []string{"/mcp", "setup", "docs", "--cmd", "npx", "--startup-timeout-s", "0"},
+			want:   "invalid --startup-timeout-s value",
+		},
+		{
+			name:   "invalid call timeout",
+			fields: []string{"/mcp", "setup", "docs", "--cmd", "npx", "--call-timeout-s", "x"},
+			want:   "invalid --call-timeout-s value",
+		},
+		{
+			name:   "invalid max concurrency",
+			fields: []string{"/mcp", "setup", "docs", "--cmd", "npx", "--max-concurrency", "-1"},
+			want:   "invalid --max-concurrency value",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseMCPSetupRequestFromSlash(tc.fields)
+			if err == nil {
+				t.Fatalf("expected parse error for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error to contain %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestRunMCPSetupSlashCommandNilModel(t *testing.T) {
+	var m *model
+	err := m.runMCPSetupSlashCommand("/mcp setup github", []string{"/mcp", "setup", "github"})
+	if err == nil {
+		t.Fatal("expected nil model error")
+	}
+	if !strings.Contains(err.Error(), "model is unavailable") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestStartMCPSetupApplyWithInputUsesFallbackCommandInput(t *testing.T) {
+	service := &stubMCPService{}
+	m := newMCPSetupTestModel(service)
+	req := mcpctl.AddRequest{
+		ID:      "docs",
+		Name:    "docs",
+		Command: "npx",
+		Args:    []string{"-y", "@modelcontextprotocol/server-filesystem"},
+	}
+	_ = m.startMCPSetupApplyWithInput(req, "   ")
+	if len(m.chatItems) < 2 {
+		t.Fatalf("expected command exchange entries, got %#v", m.chatItems)
+	}
+	user := m.chatItems[len(m.chatItems)-2]
+	if user.Kind != "user" || strings.TrimSpace(user.Body) != "/mcp setup docs" {
+		t.Fatalf("expected fallback user command '/mcp setup docs', got %#v", user)
+	}
+}
+
 func newMCPSetupTestModel(service *stubMCPService) model {
 	input := textarea.New()
 	input.Focus()

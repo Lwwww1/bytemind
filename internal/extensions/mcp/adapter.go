@@ -17,9 +17,10 @@ import (
 type Option func(*adapterOptions)
 
 type adapterOptions struct {
-	client     Client
-	now        func() time.Time
-	refreshTTL time.Duration
+	client        Client
+	now           func() time.Time
+	refreshTTL    time.Duration
+	eagerDiscover bool
 }
 
 func WithClient(client Client) Option {
@@ -37,6 +38,15 @@ func WithRefreshTTL(ttl time.Duration) Option {
 			return
 		}
 		opts.refreshTTL = ttl
+	}
+}
+
+func WithEagerDiscover(enabled bool) Option {
+	return func(opts *adapterOptions) {
+		if opts == nil {
+			return
+		}
+		opts.eagerDiscover = enabled
 	}
 }
 
@@ -60,8 +70,9 @@ type Adapter struct {
 
 func FromMCPServer(cfg ServerConfig, opts ...Option) (extensionspkg.Extension, error) {
 	options := adapterOptions{
-		now:        time.Now,
-		refreshTTL: defaultRefreshTTL,
+		now:           time.Now,
+		refreshTTL:    defaultRefreshTTL,
+		eagerDiscover: true,
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -101,9 +112,11 @@ func FromMCPServer(cfg ServerConfig, opts ...Option) (extensionspkg.Extension, e
 		adapter.limiter = make(chan struct{}, cfg.MaxConcurrency)
 	}
 
-	startupCtx, cancel := withTimeoutIfMissing(context.Background(), cfg.StartupTimeout)
-	defer cancel()
-	_ = adapter.maybeRefresh(startupCtx, true)
+	if options.eagerDiscover {
+		startupCtx, cancel := withTimeoutIfMissing(context.Background(), cfg.StartupTimeout)
+		defer cancel()
+		_ = adapter.maybeRefresh(startupCtx, true)
+	}
 	return adapter, nil
 }
 

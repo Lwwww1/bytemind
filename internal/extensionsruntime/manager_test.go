@@ -66,6 +66,46 @@ func TestManagerListIncludesConfiguredMCPServer(t *testing.T) {
 	}
 }
 
+func TestManagerAutoStartDoesNotEagerDiscoverOnInit(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	writeRuntimeConfig(t, workspace, map[string]any{
+		"provider": map[string]any{
+			"type":     "openai-compatible",
+			"base_url": "https://api.openai.com/v1",
+			"model":    "gpt-5.4-mini",
+			"api_key":  "test-key",
+		},
+		"mcp": map[string]any{
+			"enabled": true,
+			"servers": []map[string]any{
+				{
+					"id": "lazy-start",
+					"transport": map[string]any{
+						"type":    "stdio",
+						"command": "bytemind-command-that-does-not-exist-for-startup-check",
+					},
+				},
+			},
+		},
+	})
+
+	manager := NewManager(workspace, "", extensionspkg.NopManager{}, loadRuntimeConfig(t, workspace))
+	items, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one mcp extension, got %d", len(items))
+	}
+	if items[0].ID != "mcp.lazy-start" {
+		t.Fatalf("unexpected extension id: %q", items[0].ID)
+	}
+	if items[0].Status != extensionspkg.ExtensionStatusReady {
+		t.Fatalf("expected ready status before first discovery, got %q", items[0].Status)
+	}
+}
+
 func TestManagerUnloadAndLoadMCPServerToggleVisibility(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("BYTEMIND_HOME", t.TempDir())

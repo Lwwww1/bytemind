@@ -202,6 +202,42 @@ func TestAdapterResolveToolsUsesTTLCacheAndInvalidate(t *testing.T) {
 	}
 }
 
+func TestFromMCPServerWithEagerDiscoverDisabledDefersInitialDiscover(t *testing.T) {
+	client := &stubClient{
+		discoverSnapshot: ServerSnapshot{
+			ID:      "lazy",
+			Name:    "Lazy",
+			Version: "1.0.0",
+			Tools: []ToolDescriptor{
+				{Name: "echo"},
+			},
+		},
+	}
+	ext, err := FromMCPServer(
+		ServerConfig{
+			ID:      "lazy",
+			Name:    "Lazy",
+			Command: "stub",
+		},
+		WithClient(client),
+		WithEagerDiscover(false),
+	)
+	if err != nil {
+		t.Fatalf("FromMCPServer failed: %v", err)
+	}
+	if client.discoverCount != 0 {
+		t.Fatalf("expected no discover during construction, got %d", client.discoverCount)
+	}
+
+	_, err = ext.ResolveTools(context.Background())
+	if err != nil {
+		t.Fatalf("ResolveTools failed: %v", err)
+	}
+	if client.discoverCount != 1 {
+		t.Fatalf("expected discover to happen on first tool resolve, got %d", client.discoverCount)
+	}
+}
+
 func TestMCPToolDefinitionSpecAndRunBranches(t *testing.T) {
 	tool := mcpTool{
 		descriptor: ToolDescriptor{},

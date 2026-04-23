@@ -46,7 +46,7 @@ func NewManager(workspace, configPath string, base extensionspkg.Manager, cfg co
 		disabledMCP: map[string]struct{}{},
 		entries:     map[string]*mcpEntry{},
 	}
-	manager.applyConfig(cfg.MCP, false)
+	manager.applyConfig(cfg.MCP)
 	return manager
 }
 
@@ -293,7 +293,7 @@ func (m *Manager) refresh(ctx context.Context, force bool) error {
 	if err != nil {
 		return err
 	}
-	m.applyConfig(cfg.MCP, force)
+	m.applyConfig(cfg.MCP)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -319,7 +319,7 @@ func (m *Manager) refresh(ctx context.Context, force bool) error {
 	return firstErr
 }
 
-func (m *Manager) applyConfig(cfg configpkg.MCPConfig, force bool) {
+func (m *Manager) applyConfig(cfg configpkg.MCPConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -362,7 +362,11 @@ func (m *Manager) applyConfig(cfg configpkg.MCPConfig, force bool) {
 			continue
 		}
 
-		ext, err := mcppkg.FromMCPServer(clientCfg, mcppkg.WithRefreshTTL(refreshTTL))
+		ext, err := mcppkg.FromMCPServer(
+			clientCfg,
+			mcppkg.WithRefreshTTL(refreshTTL),
+			mcppkg.WithEagerDiscover(false),
+		)
 		if err != nil {
 			nextEntries[extensionID] = &mcpEntry{
 				server:      server,
@@ -376,12 +380,6 @@ func (m *Manager) applyConfig(cfg configpkg.MCPConfig, force bool) {
 		}
 
 		info := normalizeMCPInfo(ext.Info(), server, now)
-		if force {
-			if reloader, ok := ext.(interface{ Reload(context.Context) error }); ok {
-				_ = reloader.Reload(context.Background())
-				info = normalizeMCPInfo(ext.Info(), server, now)
-			}
-		}
 		nextEntries[extensionID] = &mcpEntry{
 			server:      server,
 			clientCfg:   clientCfg,

@@ -33,6 +33,7 @@ func TestRunMCPAddAndList(t *testing.T) {
 		"add", "local",
 		"--cmd", "cmd",
 		"--args", "/c,echo,ok",
+		"--auto-start=false",
 		"--workspace", workspace,
 	}, strings.NewReader(""), &stdout, &stderr); err != nil {
 		t.Fatalf("RunMCP add failed: %v", err)

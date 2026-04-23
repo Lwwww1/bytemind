@@ -5509,6 +5509,39 @@ func TestFormatChatBodyRendersMarkdownHeadingWithoutHashes(t *testing.T) {
 	}
 }
 
+func TestFormatChatBodyHidesProposedPlanTagsAndKeepsDocumentSections(t *testing.T) {
+	item := chatEntry{
+		Kind: "assistant",
+		Body: strings.Join([]string{
+			"<proposed_plan>",
+			"",
+			"## Goal",
+			"",
+			"- Ship the converged plan cleanly.",
+			"",
+			"## Implementation Brief",
+			"",
+			"### Objective",
+			"Deliver a runnable handoff document.",
+			"",
+			"## Execution Readiness",
+			"",
+			"- [x] Scope defined",
+			"</proposed_plan>",
+		}, "\n"),
+	}
+
+	got := formatChatBody(item, 80)
+	if strings.Contains(got, "<proposed_plan>") || strings.Contains(got, "</proposed_plan>") {
+		t.Fatalf("expected structural tags to be hidden from display, got %q", got)
+	}
+	for _, want := range []string{"Goal", "Ship the converged plan cleanly.", "Objective", "Scope defined"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected rendered plan body to keep %q, got %q", want, got)
+		}
+	}
+}
+
 func TestFormatChatBodyHelpMarkdownAppliesVisualStyles(t *testing.T) {
 	item := chatEntry{
 		Kind: "assistant",

@@ -19,7 +19,7 @@ func RenderStructuredPlanBlock(state State) string {
 		lines = appendSection(lines, "Summary", []string{"- " + summary})
 	}
 	if brief := strings.TrimSpace(state.ImplementationBrief); brief != "" {
-		lines = appendSection(lines, "Implementation Brief", splitDocumentLines(brief))
+		lines = appendSection(lines, "Implementation Brief", renderImplementationBriefLines(brief))
 	}
 	if phase := NormalizePhase(string(state.Phase)); phase != PhaseNone {
 		lines = appendSection(lines, "Phase", []string{"- " + string(phase)})
@@ -68,9 +68,9 @@ func RenderStructuredPlanBlock(state State) string {
 		lines = appendSection(lines, "Verification", items)
 	}
 	readiness := []string{
-		"- Scope defined: " + yesNo(state.ScopeDefined),
-		"- Risks and rollback defined: " + yesNo(state.RiskRollbackDefined),
-		"- Verification path defined: " + yesNo(state.VerificationDefined),
+		checklistLine(state.ScopeDefined, "Scope defined"),
+		checklistLine(state.RiskRollbackDefined, "Risks and rollback defined"),
+		checklistLine(state.VerificationDefined, "Verification path defined"),
 	}
 	lines = appendSection(lines, "Execution Readiness", readiness)
 	if next := strings.TrimSpace(state.NextAction); next != "" {
@@ -78,6 +78,9 @@ func RenderStructuredPlanBlock(state State) string {
 	}
 	if reason := strings.TrimSpace(state.BlockReason); reason != "" {
 		lines = appendSection(lines, "Blocked Reason", []string{"- " + reason})
+	}
+	if len(lines) > 0 && lines[len(lines)-1] != "" {
+		lines = append(lines, "")
 	}
 	lines = append(lines, "</proposed_plan>")
 	return strings.Join(lines, "\n")
@@ -193,7 +196,11 @@ func appendSection(lines []string, title string, items []string) []string {
 	if len(items) == 0 {
 		return lines
 	}
-	lines = append(lines, title)
+	if len(lines) > 0 && lines[len(lines)-1] != "" {
+		lines = append(lines, "")
+	}
+	lines = append(lines, "## "+title)
+	lines = append(lines, "")
 	lines = append(lines, items...)
 	return lines
 }
@@ -216,4 +223,76 @@ func splitDocumentLines(text string) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+func renderImplementationBriefLines(text string) []string {
+	rawLines := splitDocumentLines(text)
+	lines := make([]string, 0, len(rawLines)*2)
+	for _, raw := range rawLines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if label, rest, ok := splitDocumentLabel(line); ok {
+			if len(lines) > 0 && lines[len(lines)-1] != "" {
+				lines = append(lines, "")
+			}
+			lines = append(lines, "### "+label)
+			if rest != "" {
+				lines = append(lines, rest)
+			}
+			continue
+		}
+		if len(lines) == 0 {
+			lines = append(lines, line)
+			continue
+		}
+		last := lines[len(lines)-1]
+		switch {
+		case last == "":
+			lines = append(lines, line)
+		case strings.HasPrefix(last, "### "), strings.HasPrefix(last, "## "), strings.HasPrefix(last, "- "), isOrderedMarkdownLine(last):
+			lines = append(lines, line)
+		default:
+			lines[len(lines)-1] = strings.TrimSpace(last + " " + line)
+		}
+	}
+	return lines
+}
+
+func splitDocumentLabel(line string) (label string, rest string, ok bool) {
+	separator := ":"
+	index := strings.Index(line, separator)
+	if index < 0 {
+		separator = "："
+		index = strings.Index(line, separator)
+	}
+	if index <= 0 {
+		return "", "", false
+	}
+	label = strings.TrimSpace(line[:index])
+	rest = strings.TrimSpace(line[index+len(separator):])
+	if label == "" || len([]rune(label)) > 32 {
+		return "", "", false
+	}
+	return label, rest, true
+}
+
+func checklistLine(done bool, label string) string {
+	if done {
+		return "- [x] " + label
+	}
+	return "- [ ] " + label
+}
+
+func isOrderedMarkdownLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if len(line) < 3 {
+		return false
+	}
+	index := 0
+	for index < len(line) && line[index] >= '0' && line[index] <= '9' {
+		index++
+	}
+	return index > 0 && len(line) > index+1 && line[index] == '.' && line[index+1] == ' '
 }

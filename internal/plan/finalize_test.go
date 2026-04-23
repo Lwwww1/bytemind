@@ -40,10 +40,12 @@ func TestFinalizeAssistantAnswerPlanModeWithoutDecisionGapAppendsCanonicalBlock(
 	for _, want := range []string{
 		"plan answer",
 		"<proposed_plan>",
-		"Implementation Brief",
-		"Objective: ship the plan loop.",
-		"Goal",
+		"## Implementation Brief",
+		"### Objective",
+		"ship the plan loop.",
+		"## Goal",
 		"1. [pending] step1",
+		"- [x] Scope defined",
 		"</proposed_plan>",
 	} {
 		if !strings.Contains(got, want) {

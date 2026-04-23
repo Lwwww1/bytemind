@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	planpkg "bytemind/internal/plan"
 )
 
 func TestSystemPromptRendersMainModeSystemAndInstruction(t *testing.T) {
@@ -100,6 +102,32 @@ func TestSystemPromptOmitsOptionalBlocksWhenEmpty(t *testing.T) {
 		t.Fatalf("did not expect active skill block in prompt: %q", prompt)
 	}
 	assertNoTemplateMarkers(t, prompt)
+}
+
+func TestSystemPromptIncludesCurrentPlanStateWhenPresent(t *testing.T) {
+	prompt := systemPrompt(PromptInput{
+		Workspace:      "/tmp/workspace",
+		ApprovalPolicy: "never",
+		Model:          "deepseek-chat",
+		Mode:           "build",
+		Platform:       "darwin/arm64",
+		Now:            time.Date(2026, 4, 3, 0, 0, 0, 0, time.UTC),
+		Plan: planpkg.State{
+			Goal:                "Harden plan mode",
+			Phase:               planpkg.PhaseConvergeReady,
+			Steps:               []planpkg.Step{{Title: "Rewrite plan prompt", Status: planpkg.StepPending}},
+			DecisionGaps:        []string{"Pick the execution trigger copy"},
+			ScopeDefined:        true,
+			RiskRollbackDefined: true,
+		},
+	})
+
+	assertContains(t, prompt, "[Current Plan State]")
+	assertContains(t, prompt, "phase: converge_ready")
+	assertContains(t, prompt, "goal: Harden plan mode")
+	assertContains(t, prompt, "decision_gaps: Pick the execution trigger copy")
+	assertContains(t, prompt, "steps:")
+	assertContains(t, prompt, "execution_readiness: scope=yes, risks_rollback=yes, verification=no")
 }
 
 func TestModePromptDefaultsToBuild(t *testing.T) {

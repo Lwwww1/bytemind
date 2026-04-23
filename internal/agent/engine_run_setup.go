@@ -102,6 +102,7 @@ func (e *defaultEngine) buildTurnMessages(sess *session.Session, setup runPrompt
 			Mode:           setup.Mode,
 			Skills:         setup.AvailableSkills,
 			Tools:          setup.AvailableTools,
+			Plan:           sess.Plan,
 			ActiveSkill:    promptActiveSkill(setup.ActiveSkill),
 			Instruction:    setup.InstructionText,
 		}),

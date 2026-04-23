@@ -1,6 +1,9 @@
 package plan
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFinalizeAssistantAnswerBuildModeUnchanged(t *testing.T) {
 	answer := "normal build answer"
@@ -10,13 +13,42 @@ func TestFinalizeAssistantAnswerBuildModeUnchanged(t *testing.T) {
 	}
 }
 
-func TestFinalizeAssistantAnswerPlanModeWithStructuredPlanUnchanged(t *testing.T) {
+func TestFinalizeAssistantAnswerPlanModeWithOpenDecisionGapKeepsQuestionOnly(t *testing.T) {
 	answer := "plan answer"
 	got := FinalizeAssistantAnswer(ModePlan, State{
-		Steps: []Step{{Title: "step1", Status: StepPending}},
+		Goal:         "Ship plan loop",
+		Phase:        PhaseClarify,
+		Steps:        []Step{{Title: "step1", Status: StepPending}},
+		DecisionGaps: []string{"Choose the execution trigger wording"},
 	}, answer)
 	if got != answer {
-		t.Fatalf("expected unchanged answer, got %q", got)
+		t.Fatalf("expected clarify answer to stay question-only, got %q", got)
+	}
+}
+
+func TestFinalizeAssistantAnswerPlanModeWithoutDecisionGapAppendsCanonicalBlock(t *testing.T) {
+	answer := "plan answer"
+	got := FinalizeAssistantAnswer(ModePlan, State{
+		Goal:                "Ship plan loop",
+		ImplementationBrief: "Objective: ship the plan loop.\nDeliverable: prompt + finalize behavior.",
+		Phase:               PhaseConvergeReady,
+		Steps:               []Step{{Title: "step1", Status: StepPending}},
+		ScopeDefined:        true,
+		RiskRollbackDefined: true,
+		VerificationDefined: true,
+	}, answer)
+	for _, want := range []string{
+		"plan answer",
+		"<proposed_plan>",
+		"Implementation Brief",
+		"Objective: ship the plan loop.",
+		"Goal",
+		"1. [pending] step1",
+		"</proposed_plan>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected finalized answer to include %q, got %q", want, got)
+		}
 	}
 }
 

@@ -1653,10 +1653,50 @@ func TestContinueExecutionInputPreparesPlanAndSubmitsPrompt(t *testing.T) {
 }
 
 func TestIsContinueExecutionInputSupportsPlanAlias(t *testing.T) {
-	for _, input := range []string{"continue plan", "\u7ee7\u7eed"} {
+	for _, input := range []string{"continue plan", "start execution", "\u7ee7\u7eed", "\u5f00\u59cb\u6267\u884c"} {
 		if !isContinueExecutionInput(input) {
 			t.Fatalf("expected %q to be treated as continue input", input)
 		}
+	}
+}
+
+func TestContinueExecutionInputRequiresConvergedPlan(t *testing.T) {
+	input := textarea.New()
+	input.Focus()
+	input.SetWidth(40)
+	input.SetHeight(3)
+	input.SetValue("\u5f00\u59cb\u6267\u884c")
+	input.CursorEnd()
+	m := model{
+		screen:    screenChat,
+		width:     100,
+		height:    24,
+		input:     input,
+		viewport:  viewport.New(0, 0),
+		planView:  viewport.New(0, 0),
+		mode:      modePlan,
+		sess:      session.New("E:\\bytemind"),
+		workspace: "E:\\bytemind",
+		plan: planpkg.State{
+			Goal:       "Finish plan mode",
+			Phase:      planpkg.PhaseDraft,
+			NextAction: "Close the remaining decision gap",
+			Steps: []planpkg.Step{
+				{Title: "Implement continuation", Status: planpkg.StepPending},
+			},
+		},
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := got.(model)
+	if updated.mode != modePlan {
+		t.Fatalf("expected unconverged plan to stay in plan mode, got %q", updated.mode)
+	}
+	if len(updated.chatItems) != 0 {
+		t.Fatalf("expected unconverged plan not to submit a prompt, got %d items", len(updated.chatItems))
+	}
+	if !strings.Contains(updated.statusNote, "plan is not converged yet") {
+		t.Fatalf("expected convergence guidance, got %q", updated.statusNote)
 	}
 }
 
@@ -2277,6 +2317,7 @@ func TestHelpTextOnlyMentionsSupportedEntryPoints(t *testing.T) {
 		"/quit",
 		"/new",
 		"Ctrl+G",
+		"start execution",
 		"continue execution",
 	} {
 		if !strings.Contains(text, wanted) {

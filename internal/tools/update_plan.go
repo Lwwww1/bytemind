@@ -23,11 +23,51 @@ func (UpdatePlanTool) Definition() llm.ToolDefinition {
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"goal": map[string]any{"type": "string"},
+					"goal":    map[string]any{"type": "string"},
 					"summary": map[string]any{"type": "string"},
-					"phase": map[string]any{"type": "string", "enum": []string{"none", "drafting", "ready", "approved", "executing", "blocked", "completed"}},
-					"next_action": map[string]any{"type": "string"},
-					"block_reason": map[string]any{"type": "string"},
+					"phase": map[string]any{"type": "string", "enum": []string{
+						"none",
+						"explore",
+						"clarify",
+						"draft",
+						"converge_ready",
+						"approved_to_build",
+						"drafting",
+						"ready",
+						"approved",
+						"executing",
+						"blocked",
+						"completed",
+					}},
+					"implementation_brief": map[string]any{"type": "string"},
+					"risks": map[string]any{
+						"type":  "array",
+						"items": map[string]any{"type": "string"},
+					},
+					"verification": map[string]any{
+						"type":  "array",
+						"items": map[string]any{"type": "string"},
+					},
+					"decision_log": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"decision": map[string]any{"type": "string"},
+								"reason":   map[string]any{"type": "string"},
+							},
+							"required": []string{"decision"},
+						},
+					},
+					"decision_gaps": map[string]any{
+						"type":  "array",
+						"items": map[string]any{"type": "string"},
+					},
+					"scope_defined":             map[string]any{"type": "boolean"},
+					"risk_and_rollback_defined": map[string]any{"type": "boolean"},
+					"verification_defined":      map[string]any{"type": "boolean"},
+					"next_action":               map[string]any{"type": "string"},
+					"block_reason":              map[string]any{"type": "string"},
 					"explanation": map[string]any{
 						"type":        "string",
 						"description": "Optional short explanation of why the plan changed.",
@@ -68,13 +108,24 @@ func (UpdatePlanTool) Run(_ context.Context, raw json.RawMessage, execCtx *Execu
 	}
 
 	var args struct {
-		Goal        string `json:"goal"`
-		Summary     string `json:"summary"`
-		Phase       string `json:"phase"`
-		NextAction  string `json:"next_action"`
-		BlockReason string `json:"block_reason"`
-		Explanation string `json:"explanation"`
-		Plan        []struct {
+		Goal                string   `json:"goal"`
+		Summary             string   `json:"summary"`
+		ImplementationBrief string   `json:"implementation_brief"`
+		Phase               string   `json:"phase"`
+		Risks               []string `json:"risks"`
+		Verification        []string `json:"verification"`
+		DecisionLog         []struct {
+			Decision string `json:"decision"`
+			Reason   string `json:"reason"`
+		} `json:"decision_log"`
+		DecisionGaps           []string `json:"decision_gaps"`
+		ScopeDefined           *bool    `json:"scope_defined"`
+		RiskAndRollbackDefined *bool    `json:"risk_and_rollback_defined"`
+		VerificationDefined    *bool    `json:"verification_defined"`
+		NextAction             string   `json:"next_action"`
+		BlockReason            string   `json:"block_reason"`
+		Explanation            string   `json:"explanation"`
+		Plan                   []struct {
 			ID          string   `json:"id"`
 			Step        string   `json:"step"`
 			Title       string   `json:"title"`
@@ -127,12 +178,41 @@ func (UpdatePlanTool) Run(_ context.Context, raw json.RawMessage, execCtx *Execu
 	state := execCtx.Session.Plan
 	state.Goal = chooseNonEmpty(strings.TrimSpace(args.Goal), state.Goal)
 	state.Summary = chooseNonEmpty(strings.TrimSpace(args.Summary), strings.TrimSpace(args.Explanation), state.Summary)
+	state.ImplementationBrief = chooseNonEmpty(strings.TrimSpace(args.ImplementationBrief), state.ImplementationBrief)
 	state.NextAction = chooseNonEmpty(strings.TrimSpace(args.NextAction), state.NextAction)
 	state.BlockReason = chooseNonEmpty(strings.TrimSpace(args.BlockReason), state.BlockReason)
 	state.Steps = steps
+	if args.Risks != nil {
+		state.Risks = trimPlanStrings(args.Risks)
+	}
+	if args.Verification != nil {
+		state.Verification = trimPlanStrings(args.Verification)
+	}
+	if args.DecisionLog != nil {
+		decisionLog := make([]planpkg.Decision, 0, len(args.DecisionLog))
+		for _, entry := range args.DecisionLog {
+			decisionLog = append(decisionLog, planpkg.Decision{
+				Decision: strings.TrimSpace(entry.Decision),
+				Reason:   strings.TrimSpace(entry.Reason),
+			})
+		}
+		state.DecisionLog = decisionLog
+	}
+	if args.DecisionGaps != nil {
+		state.DecisionGaps = trimPlanStrings(args.DecisionGaps)
+	}
+	if args.ScopeDefined != nil {
+		state.ScopeDefined = *args.ScopeDefined
+	}
+	if args.RiskAndRollbackDefined != nil {
+		state.RiskRollbackDefined = *args.RiskAndRollbackDefined
+	}
+	if args.VerificationDefined != nil {
+		state.VerificationDefined = *args.VerificationDefined
+	}
 	state.Phase = planpkg.NormalizePhase(args.Phase)
 	if state.Phase == planpkg.PhaseNone {
-		state.Phase = planpkg.DerivePhase(execCtx.Mode, steps, state.BlockReason)
+		state.Phase = planpkg.DerivePhase(execCtx.Mode, state)
 	}
 	state.UpdatedAt = time.Now().UTC()
 	state = planpkg.NormalizeState(state)

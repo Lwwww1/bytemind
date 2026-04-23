@@ -196,7 +196,14 @@ func (m *model) handleAgentEvent(event Event) {
 		if m.phase == "none" {
 			m.phase = "plan"
 		}
-		m.statusNote = fmt.Sprintf("Plan updated with %d step(s).", len(m.plan.Steps))
+		switch {
+		case canContinuePlan(m.plan):
+			m.statusNote = "Plan converged. Type start execution to switch to Build mode."
+		case len(m.plan.DecisionGaps) > 0:
+			m.statusNote = fmt.Sprintf("Plan updated. %d decision gap(s) remain.", len(m.plan.DecisionGaps))
+		default:
+			m.statusNote = fmt.Sprintf("Plan updated with %d step(s).", len(m.plan.Steps))
+		}
 	case EventUsageUpdated:
 		m.applyUsage(event.Usage)
 	case EventRunFinished:

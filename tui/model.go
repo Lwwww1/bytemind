@@ -2162,16 +2162,7 @@ func parsePlanSteps(raw string) []string {
 }
 
 func canContinuePlan(state planpkg.State) bool {
-	state = planpkg.NormalizeState(state)
-	if !planpkg.HasStructuredPlan(state) {
-		return false
-	}
-	switch planpkg.NormalizePhase(string(state.Phase)) {
-	case planpkg.PhaseBlocked, planpkg.PhaseCompleted:
-		return false
-	default:
-		return true
-	}
+	return planpkg.CanStartExecution(state)
 }
 
 func currentOrNextStepTitle(state planpkg.State) string {
@@ -2273,12 +2264,19 @@ func isContinueExecutionInput(input string) bool {
 	case "continue",
 		"continue execution",
 		"continue plan",
+		"start execution",
+		"start build",
+		"begin execution",
+		"execute plan",
 		"resume",
 		"resume execution",
 		"\u7ee7\u7eed",
 		"\u7ee7\u7eed\u6267\u884c",
 		"\u7ee7\u7eed\u505a",
-		"\u7ee7\u7eed\u4efb\u52a1":
+		"\u7ee7\u7eed\u4efb\u52a1",
+		"\u5f00\u59cb\u6267\u884c",
+		"\u5f00\u59cb\u505a",
+		"\u6309\u8ba1\u5212\u6267\u884c":
 		return true
 	default:
 		return false
@@ -2370,6 +2368,9 @@ func preparePlanForContinuation(state planpkg.State) (planpkg.State, error) {
 		return state, fmt.Errorf("plan is blocked and cannot continue yet")
 	case planpkg.PhaseCompleted:
 		return state, fmt.Errorf("plan is already completed")
+	}
+	if !planpkg.CanStartExecution(state) {
+		return state, fmt.Errorf("plan is not converged yet: define scope, risks/rollback, and verification before starting execution")
 	}
 
 	if _, ok := planpkg.CurrentStep(state); !ok {

@@ -79,3 +79,31 @@ func TestUpdatePlanToolRejectsInvalidPlanShapes(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdatePlanToolStoresConvergenceFields(t *testing.T) {
+	sess := session.New(t.TempDir())
+	tool := UpdatePlanTool{}
+	payload, _ := json.Marshal(map[string]any{
+		"phase":                     "converge_ready",
+		"scope_defined":             true,
+		"risk_and_rollback_defined": true,
+		"verification_defined":      true,
+		"decision_log":              []map[string]any{{"decision": "Keep plan state provider-agnostic", "reason": "Matches prompt architecture"}},
+		"risks":                     []string{"Mode switch regression"},
+		"verification":              []string{"go test ./internal/plan -v"},
+		"plan":                      []map[string]any{{"step": "Rewrite prompt", "status": "pending"}},
+	})
+
+	if _, err := tool.Run(context.Background(), payload, &ExecutionContext{Session: sess, Mode: planpkg.ModePlan}); err != nil {
+		t.Fatal(err)
+	}
+	if sess.Plan.Phase != planpkg.PhaseConvergeReady {
+		t.Fatalf("expected converge_ready phase, got %q", sess.Plan.Phase)
+	}
+	if len(sess.Plan.DecisionLog) != 1 || sess.Plan.DecisionLog[0].Decision == "" {
+		t.Fatalf("expected decision log to be stored, got %#v", sess.Plan.DecisionLog)
+	}
+	if !sess.Plan.ScopeDefined || !sess.Plan.RiskRollbackDefined || !sess.Plan.VerificationDefined {
+		t.Fatalf("expected readiness flags to be stored, got %#v", sess.Plan)
+	}
+}

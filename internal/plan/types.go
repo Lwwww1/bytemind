@@ -18,13 +18,20 @@ const (
 type Phase string
 
 const (
-	PhaseNone      Phase = "none"
-	PhaseDrafting  Phase = "drafting"
-	PhaseReady     Phase = "ready"
-	PhaseApproved  Phase = "approved"
-	PhaseExecuting Phase = "executing"
-	PhaseBlocked   Phase = "blocked"
-	PhaseCompleted Phase = "completed"
+	PhaseNone            Phase = "none"
+	PhaseExplore         Phase = "explore"
+	PhaseClarify         Phase = "clarify"
+	PhaseDraft           Phase = "draft"
+	PhaseConvergeReady   Phase = "converge_ready"
+	PhaseApprovedToBuild Phase = "approved_to_build"
+	PhaseExecuting       Phase = "executing"
+	PhaseBlocked         Phase = "blocked"
+	PhaseCompleted       Phase = "completed"
+
+	// Legacy aliases kept for persisted sessions and older callers.
+	PhaseDrafting = PhaseDraft
+	PhaseReady    = PhaseConvergeReady
+	PhaseApproved = PhaseApprovedToBuild
 )
 
 type StepStatus string
@@ -54,14 +61,27 @@ type Step struct {
 	Risk        RiskLevel  `json:"risk,omitempty"`
 }
 
+type Decision struct {
+	Decision string `json:"decision"`
+	Reason   string `json:"reason,omitempty"`
+}
+
 type State struct {
-	Goal        string    `json:"goal,omitempty"`
-	Summary     string    `json:"summary,omitempty"`
-	Phase       Phase     `json:"phase,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
-	Steps       []Step    `json:"steps,omitempty"`
-	NextAction  string    `json:"next_action,omitempty"`
-	BlockReason string    `json:"block_reason,omitempty"`
+	Goal                string     `json:"goal,omitempty"`
+	Summary             string     `json:"summary,omitempty"`
+	ImplementationBrief string     `json:"implementation_brief,omitempty"`
+	Phase               Phase      `json:"phase,omitempty"`
+	UpdatedAt           time.Time  `json:"updated_at,omitempty"`
+	Steps               []Step     `json:"steps,omitempty"`
+	Risks               []string   `json:"risks,omitempty"`
+	Verification        []string   `json:"verification,omitempty"`
+	DecisionLog         []Decision `json:"decision_log,omitempty"`
+	DecisionGaps        []string   `json:"decision_gaps,omitempty"`
+	ScopeDefined        bool       `json:"scope_defined,omitempty"`
+	RiskRollbackDefined bool       `json:"risk_and_rollback_defined,omitempty"`
+	VerificationDefined bool       `json:"verification_defined,omitempty"`
+	NextAction          string     `json:"next_action,omitempty"`
+	BlockReason         string     `json:"block_reason,omitempty"`
 }
 
 func NormalizeMode(raw string) AgentMode {
@@ -77,12 +97,16 @@ func NormalizeMode(raw string) AgentMode {
 
 func NormalizePhase(raw string) Phase {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case string(PhaseDrafting):
-		return PhaseDrafting
-	case string(PhaseReady):
-		return PhaseReady
-	case string(PhaseApproved):
-		return PhaseApproved
+	case string(PhaseExplore):
+		return PhaseExplore
+	case string(PhaseClarify):
+		return PhaseClarify
+	case string(PhaseDraft), "drafting":
+		return PhaseDraft
+	case string(PhaseConvergeReady), "ready":
+		return PhaseConvergeReady
+	case string(PhaseApprovedToBuild), "approved":
+		return PhaseApprovedToBuild
 	case string(PhaseExecuting):
 		return PhaseExecuting
 	case string(PhaseBlocked):
@@ -131,9 +155,22 @@ func CloneSteps(steps []Step) []Step {
 	return cloned
 }
 
+func CloneDecisionLog(entries []Decision) []Decision {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := make([]Decision, len(entries))
+	copy(cloned, entries)
+	return cloned
+}
+
 func CloneState(state State) State {
 	cloned := state
 	cloned.Steps = CloneSteps(state.Steps)
+	cloned.Risks = append([]string(nil), state.Risks...)
+	cloned.Verification = append([]string(nil), state.Verification...)
+	cloned.DecisionLog = CloneDecisionLog(state.DecisionLog)
+	cloned.DecisionGaps = append([]string(nil), state.DecisionGaps...)
 	return cloned
 }
 
@@ -160,7 +197,42 @@ func CountByStatus(state State, status StepStatus) int {
 	return count
 }
 
+func HasDecisionGaps(state State) bool {
+	return len(state.DecisionGaps) > 0
+}
+
+func HasExecutionReadiness(state State) bool {
+	return state.ScopeDefined && state.RiskRollbackDefined && state.VerificationDefined
+}
+
+func CanStartExecution(state State) bool {
+	state = NormalizeState(state)
+	if !HasStructuredPlan(state) || HasDecisionGaps(state) {
+		return false
+	}
+	switch NormalizePhase(string(state.Phase)) {
+	case PhaseConvergeReady, PhaseApprovedToBuild:
+		return true
+	default:
+		return false
+	}
+}
+
 func DefaultNextAction(state State) string {
+	switch NormalizePhase(string(state.Phase)) {
+	case PhaseExplore:
+		return "Inspect the relevant code and sketch the first plan draft."
+	case PhaseClarify:
+		return "Ask the next 1 to 2 decision questions and update the plan."
+	case PhaseDraft:
+		return "Refine the plan and close the remaining decision gaps."
+	case PhaseConvergeReady:
+		return "Ask whether to start execution or keep adjusting the plan."
+	case PhaseApprovedToBuild:
+		return "Switch to Build mode and execute the first planned step."
+	case PhaseBlocked, PhaseCompleted:
+		return ""
+	}
 	if step, ok := CurrentStep(state); ok && strings.TrimSpace(step.Title) != "" {
 		return "Continue: " + strings.TrimSpace(step.Title)
 	}
@@ -172,38 +244,59 @@ func DefaultNextAction(state State) string {
 	return ""
 }
 
-func DerivePhase(mode AgentMode, steps []Step, blockReason string) Phase {
-	if len(steps) == 0 {
+func DerivePhase(mode AgentMode, state State) Phase {
+	if len(state.Steps) == 0 {
 		if mode == ModePlan {
-			return PhaseDrafting
+			return PhaseExplore
 		}
 		return PhaseNone
 	}
 
-	if strings.TrimSpace(blockReason) != "" || hasStepStatus(steps, StepBlocked) {
+	if strings.TrimSpace(state.BlockReason) != "" || hasStepStatus(state.Steps, StepBlocked) {
 		return PhaseBlocked
 	}
-	if allStepsCompleted(steps) {
+	if allStepsCompleted(state.Steps) {
 		return PhaseCompleted
 	}
 	if mode == ModePlan {
-		return PhaseReady
+		if HasDecisionGaps(state) {
+			return PhaseClarify
+		}
+		if HasExecutionReadiness(state) {
+			return PhaseConvergeReady
+		}
+		return PhaseDraft
 	}
-	if hasStepStatus(steps, StepInProgress) {
+	if hasStepStatus(state.Steps, StepInProgress) {
 		return PhaseExecuting
 	}
-	return PhaseApproved
+	if NormalizePhase(string(state.Phase)) == PhaseApprovedToBuild {
+		return PhaseApprovedToBuild
+	}
+	return PhaseExecuting
 }
 
 func NormalizeState(state State) State {
 	state.Phase = NormalizePhase(string(state.Phase))
 	state.Goal = strings.TrimSpace(state.Goal)
 	state.Summary = strings.TrimSpace(state.Summary)
+	state.ImplementationBrief = strings.TrimSpace(state.ImplementationBrief)
 	state.NextAction = strings.TrimSpace(state.NextAction)
 	state.BlockReason = strings.TrimSpace(state.BlockReason)
+	state.Risks = trimStrings(state.Risks)
+	state.Verification = trimStrings(state.Verification)
+	state.DecisionLog = normalizeDecisionLog(state.DecisionLog)
+	state.DecisionGaps = trimStrings(state.DecisionGaps)
 	if len(state.Steps) == 0 {
 		state.Steps = nil
-		if state.Phase == PhaseNone && strings.TrimSpace(state.Goal) == "" && strings.TrimSpace(state.Summary) == "" {
+		if state.Phase == PhaseNone &&
+			strings.TrimSpace(state.Goal) == "" &&
+			strings.TrimSpace(state.Summary) == "" &&
+			strings.TrimSpace(state.ImplementationBrief) == "" &&
+			len(state.DecisionLog) == 0 &&
+			len(state.DecisionGaps) == 0 &&
+			len(state.Risks) == 0 &&
+			len(state.Verification) == 0 {
 			return state
 		}
 		return state
@@ -235,7 +328,7 @@ func NormalizeState(state State) State {
 		state.NextAction = DefaultNextAction(state)
 	}
 	if state.Phase == PhaseNone {
-		state.Phase = DerivePhase(ModeBuild, state.Steps, state.BlockReason)
+		state.Phase = DerivePhase(ModeBuild, state)
 	}
 	return state
 }
@@ -269,6 +362,28 @@ func normalizeOptionalRisk(raw RiskLevel) RiskLevel {
 		}
 		return RiskLow
 	}
+}
+
+func normalizeDecisionLog(entries []Decision) []Decision {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]Decision, 0, len(entries))
+	for _, entry := range entries {
+		decision := strings.TrimSpace(entry.Decision)
+		reason := strings.TrimSpace(entry.Reason)
+		if decision == "" {
+			continue
+		}
+		out = append(out, Decision{
+			Decision: decision,
+			Reason:   reason,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func hasStepStatus(steps []Step, want StepStatus) bool {

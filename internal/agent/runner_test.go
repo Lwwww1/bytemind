@@ -352,6 +352,72 @@ func TestRunPromptRepairsContinueWorkWithoutToolCalls(t *testing.T) {
 	}
 }
 
+func TestRunPromptRepairsUnavailableRunShellClaimWithoutToolCall(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role:    "assistant",
+			Content: "run_shell 看起来超时了，而且我当前没法继续调用 shell 工具执行命令。",
+		},
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-1",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name:      "run_shell",
+					Arguments: `{"command":"echo hello"}`,
+				},
+			}},
+		},
+		{
+			Role:    "assistant",
+			Content: "<turn_intent>finalize</turn_intent>Shell checked.",
+		},
+	}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:       config.ProviderConfig{Model: "test-model"},
+			MaxIterations:  6,
+			Stream:         false,
+			ApprovalPolicy: "never",
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "inspect shell availability", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Shell checked." {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("expected three requests (repair + tool + finalize), got %d", len(client.requests))
+	}
+	secondTurnMessages := client.requests[1].Messages
+	lastMsg := secondTurnMessages[len(secondTurnMessages)-1]
+	if lastMsg.Role != llm.RoleUser || !strings.Contains(strings.ToLower(lastMsg.Text()), "claimed the shell tool was unavailable or timed out") {
+		t.Fatalf("expected shell-claim repair note to be appended as user message, got %#v", secondTurnMessages)
+	}
+	if len(sess.Messages) != 4 {
+		t.Fatalf("expected user + tool call + tool result + final assistant, got %#v", sess.Messages)
+	}
+	if len(sess.Messages[1].ToolCalls) != 1 || sess.Messages[1].ToolCalls[0].Function.Name != "run_shell" {
+		t.Fatalf("expected repaired turn to execute run_shell, got %#v", sess.Messages[1])
+	}
+}
+
 func TestRunPromptRepairsPlanDecisionAcknowledgementWithoutUpdatePlan(t *testing.T) {
 	workspace := t.TempDir()
 	store, err := session.NewStore(t.TempDir())

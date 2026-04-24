@@ -11,10 +11,14 @@ import (
 )
 
 func (m model) renderFooter() string {
+	return m.footerComponent().Render(m)
+}
+
+func renderFooterDefault(m model) string {
 	ensureZoneManager()
 	inputBorder := m.inputBorderStyle().
 		Width(m.chatPanelInnerWidth()).
-		Render(zone.Mark(inputEditorZoneID, m.renderInputEditorView()))
+		Render(zone.Mark(inputEditorZoneID, m.inputEditorViewComponent().Render(m)))
 	parts := make([]string, 0, 4)
 	if m.approval != nil {
 		parts = append(parts, m.renderApprovalBanner())
@@ -27,6 +31,8 @@ func (m model) renderFooter() string {
 		parts = append(parts, m.renderMentionPalette())
 	} else if m.commandOpen {
 		parts = append(parts, m.renderCommandPalette())
+	} else if m.planActionOpen {
+		parts = append(parts, m.renderPlanActionPicker())
 	}
 	if banner := m.renderActiveSkillBanner(); banner != "" {
 		parts = append(parts, banner)

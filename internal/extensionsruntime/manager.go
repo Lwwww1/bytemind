@@ -436,7 +436,6 @@ func (m *Manager) updateHealthPolicy(cfg configpkg.ExtensionsConfig) {
 		RecoveryCooldown: time.Duration(cfg.RecoveryCooldownSec) * time.Second,
 	})
 }
-
 func (m *Manager) applyConfig(cfg configpkg.MCPConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

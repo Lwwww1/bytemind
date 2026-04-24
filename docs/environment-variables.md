@@ -10,6 +10,7 @@ ByteMind TUI supports the following runtime environment variables:
 | `BYTEMIND_APPROVAL_MODE` | `interactive` | Runtime approval mode override. Supported values: `interactive`, `away`. |
 | `BYTEMIND_AWAY_POLICY` | `auto_deny_continue` | Away-mode behavior for denied approval requests. Supported values: `auto_deny_continue`, `fail_fast`. |
 | `BYTEMIND_SANDBOX_ENABLED` | `false` | Enables lease-based sandbox policy checks and worker-path enforcement for shell/file tools. |
+| `BYTEMIND_SYSTEM_SANDBOX_MODE` | `off` | System sandbox execution mode for shell tools. Supported values: `off`, `best_effort`, `required`. `required` fail-closes when backend is unavailable; `best_effort` falls back without system sandbox and logs a startup warning. |
 | `BYTEMIND_WRITABLE_ROOTS` | empty | Additional writable roots. Use the OS path-list separator (`;` on Windows, `:` on Linux/macOS). |
 | `BYTEMIND_SANDBOX_WORKER` | internal | Internal process marker used to avoid recursive worker spawning. Do not set manually. |
 
@@ -18,4 +19,11 @@ ByteMind TUI supports the following runtime environment variables:
 - `BYTEMIND_MOUSE_Y_OFFSET` is clamped to `[-10, 10]`.
 - Explicitly setting `BYTEMIND_MOUSE_Y_OFFSET` disables auto-offset detection.
 - `BYTEMIND_SANDBOX_WORKER` is reserved for the worker subprocess bootstrap path.
+- Current backend support:
+  - Linux: `unshare`
+  - macOS: `sandbox-exec` (when available in `PATH`)
+  - Windows: Job Object process isolation; `required` mode is enabled with strict single-segment read-only allowlist guard (`run_shell` rejects commands outside plan-safe allowlist)
+- Runtime visibility:
+  - when sandbox mode is enabled (`best_effort` or `required`), run output prints a startup status line (`mode/backend/state/required_capable/capability_level`).
+  - audit events include startup and per-tool sandbox metadata (`system_sandbox_startup`, `permission_decision`, `tool_execute_start`, `tool_execute_result`, `task_state_changed`) including `sandbox_capability_level`.
 - See [Sandbox Acceptance Checklist](./sandbox-acceptance.md) for validation matrix and test commands.

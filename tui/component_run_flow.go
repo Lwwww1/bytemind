@@ -52,7 +52,14 @@ func (m model) submitPrompt(value string) (tea.Model, tea.Cmd) {
 		m.statusNote = err.Error()
 		return m, nil
 	}
+	return m.submitPreparedPrompt(promptInput, displayText)
+}
 
+func (m model) submitPreparedPrompt(promptInput RunPromptInput, displayText string) (tea.Model, tea.Cmd) {
+	if strings.TrimSpace(promptInput.DisplayText) == "" && strings.TrimSpace(displayText) != "" {
+		promptInput.DisplayText = displayText
+	}
+	m.closePlanActionPicker()
 	m.input.Reset()
 	m.clearPasteTransaction()
 	m.clearVirtualPasteParts()
@@ -196,7 +203,19 @@ func (m *model) handleAgentEvent(event Event) {
 		if m.phase == "none" {
 			m.phase = "plan"
 		}
-		m.statusNote = fmt.Sprintf("Plan updated with %d step(s).", len(m.plan.Steps))
+		switch {
+		case planpkg.HasActiveChoice(m.plan):
+			m.statusNote = "Plan updated. A clarification choice will appear after this reply finishes."
+		case canContinuePlan(m.plan):
+			m.statusNote = "Plan converged. Review the full plan, then choose the next action from the picker."
+		case len(m.plan.DecisionGaps) > 0:
+			m.statusNote = fmt.Sprintf("Plan updated. %d decision gap(s) remain.", len(m.plan.DecisionGaps))
+		default:
+			m.statusNote = fmt.Sprintf("Plan updated with %d step(s).", len(m.plan.Steps))
+		}
+		if !canContinuePlan(m.plan) {
+			m.closePlanActionPicker()
+		}
 	case EventUsageUpdated:
 		m.applyUsage(event.Usage)
 	case EventRunFinished:
@@ -204,6 +223,12 @@ func (m *model) handleAgentEvent(event Event) {
 			m.statusNote = "Run finished."
 		}
 		m.phase = "idle"
+		if m.mode == modePlan && canContinuePlan(m.plan) {
+			m.syncPlanActionPicker()
+			m.statusNote = "请选择下一步：开始执行，或继续微调计划。"
+		} else {
+			m.closePlanActionPicker()
+		}
 	}
 }
 

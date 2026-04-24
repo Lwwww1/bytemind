@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	planpkg "bytemind/internal/plan"
 )
 
 func (m model) shouldKeepStreamingIndexOnRunFinished() bool {
@@ -67,6 +69,14 @@ func (m *model) finishAssistantMessage(content string) {
 		return
 	}
 	finalContent := m.decorateFinalAnswer(content)
+	if m.mode == modePlan {
+		if planpkg.HasActiveChoice(m.plan) {
+			finalContent = stripClarifyChoiceBlockFromAnswer(finalContent)
+		}
+		if planpkg.CanStartExecution(m.plan) {
+			finalContent = stripPlanActionTailFromAnswer(finalContent)
+		}
+	}
 
 	if m.streamingIndex >= 0 && m.streamingIndex < len(m.chatItems) {
 		current := &m.chatItems[m.streamingIndex]

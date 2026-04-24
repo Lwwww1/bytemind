@@ -354,6 +354,34 @@ func TestRenderToolFeedbackBranches(t *testing.T) {
 	}
 }
 
+func TestRenderToolFeedbackRunShellSandboxMetadata(t *testing.T) {
+	runner := NewRunner(Options{})
+	var out bytes.Buffer
+
+	runner.renderToolFeedback(&out, "run_shell", `{"ok":true,"exit_code":0,"stdout":"done","stderr":"","system_sandbox":{"mode":"best_effort","backend":"none","active":false,"required_capable":false,"fallback":true,"fallback_reason":"darwin backend \"sandbox-exec\" is unavailable"}}`)
+
+	got := out.String()
+	for _, want := range []string{"exit", "code 0", "sandbox:", "fallback", "mode=best_effort", "backend=none", "required_capable=false", "sandbox reason:", "sandbox-exec"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, got)
+		}
+	}
+}
+
+func TestRenderToolFeedbackRunShellSandboxRequiredCapableTrue(t *testing.T) {
+	runner := NewRunner(Options{})
+	var out bytes.Buffer
+
+	runner.renderToolFeedback(&out, "run_shell", `{"ok":true,"exit_code":0,"stdout":"done","stderr":"","system_sandbox":{"mode":"required","backend":"linux_unshare","active":true,"required_capable":true,"fallback":false}}`)
+
+	got := out.String()
+	for _, want := range []string{"sandbox:", "active", "mode=required", "backend=linux_unshare", "required_capable=true"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, got)
+		}
+	}
+}
+
 func TestRenderToolFeedbackPendingApprovalBranch(t *testing.T) {
 	runner := NewRunner(Options{})
 	var out bytes.Buffer

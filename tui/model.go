@@ -316,6 +316,8 @@ type model struct {
 	chatItems                  []chatEntry
 	toolRuns                   []toolRun
 	plan                       planpkg.State
+	planAction                 *planActionPicker
+	planActionOpen             bool
 	sessions                   []session.Summary
 	sessionLimit               int
 	sessionCursor              int
@@ -515,6 +517,7 @@ func newModel(opts Options) model {
 	m.tokenUsage.SetBreakdown(m.tokenInput, m.tokenOutput, m.tokenContext)
 	m.ensureSessionImageAssets()
 	m.ensurePastedContentState()
+	m.syncPlanActionPicker()
 	m.syncInputStyle()
 	m.syncInputOverlays()
 	if m.mentionIndex != nil {
@@ -633,21 +636,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.shouldKeepStreamingIndexOnRunFinished() {
 				m.streamingIndex = -1
 			}
-			m.statusNote = "Ready."
 			m.phase = "idle"
+			if m.mode == modePlan {
+				m.syncPlanActionPicker()
+				m.statusNote = planActionStatusNote(m.plan)
+			} else {
+				m.closePlanActionPicker()
+				m.statusNote = "Ready."
+			}
 		case runFinishReasonCanceled:
 			m.streamingIndex = -1
+			m.closePlanActionPicker()
 			m.statusNote = "Run canceled."
 			m.phase = "idle"
 			m.llmConnected = true
 		case runFinishReasonFailed:
 			m.streamingIndex = -1
+			m.closePlanActionPicker()
 			m.statusNote = "Run failed: " + msg.Err.Error()
 			m.phase = "error"
 			m.llmConnected = false
 			m.failLatestAssistant(msg.Err.Error())
 		default:
 			m.streamingIndex = -1
+			m.closePlanActionPicker()
 			m.statusNote = "Ready."
 			m.phase = "idle"
 		}
@@ -754,15 +766,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	}
 
-	if !m.sessionsOpen && !m.helpOpen && !m.commandOpen && m.approval == nil {
-		before := m.input.Value()
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		if m.input.Value() != before {
-			m.handleInputMutation(before, m.input.Value(), "")
-			m.syncInputOverlays()
-		}
-		return m, cmd
+	if !m.sessionsOpen && !m.helpOpen && !m.commandOpen && !m.planActionOpen && m.approval == nil {
+		return m.defaultInputComponent().Update(m, msg)
 	}
 
 	return m, nil
@@ -1087,6 +1092,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.promptSearchOpen {
 		return m.handlePromptSearchKey(msg)
 	}
+	if m.planActionOpen {
+		return m.handlePlanActionKey(msg)
+	}
 
 	if m.shouldPromoteImplicitPasteCandidate(msg) {
 		return m, m.captureImplicitPasteCandidate(msg)
@@ -1109,7 +1117,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "tab":
-		if m.commandOpen || m.mentionOpen || m.sessionsOpen || m.helpOpen || m.approval != nil {
+		if m.commandOpen || m.mentionOpen || m.sessionsOpen || m.helpOpen || m.approval != nil || m.planActionOpen {
 			break
 		}
 		m.toggleMode()
@@ -1120,12 +1128,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "ctrl+f":
-		if m.approval != nil || m.helpOpen || m.sessionsOpen || m.skillsOpen || m.commandOpen || m.mentionOpen {
+		if m.approval != nil || m.helpOpen || m.sessionsOpen || m.skillsOpen || m.commandOpen || m.mentionOpen || m.planActionOpen {
 			return m, nil
 		}
 		return m, m.openPromptSearch(promptSearchModeQuick)
 	case "ctrl+k":
-		if m.approval != nil || m.helpOpen || m.sessionsOpen || m.commandOpen || m.mentionOpen || m.busy {
+		if m.approval != nil || m.helpOpen || m.sessionsOpen || m.commandOpen || m.mentionOpen || m.planActionOpen || m.busy {
 			return m, nil
 		}
 		if err := m.openSkillsPicker(); err != nil {
@@ -1371,24 +1379,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m.submitBTW(value)
 		}
-		if isContinueExecutionInput(value) && planpkg.HasStructuredPlan(m.plan) {
-			state, err := preparePlanForContinuation(m.plan)
-			if err != nil {
-				m.statusNote = err.Error()
-				return m, nil
-			}
-			m.plan = state
-			m.mode = modeBuild
-			if m.sess != nil {
-				m.sess.Mode = planpkg.ModeBuild
-				m.sess.Plan = copyPlanState(state)
-				if m.store != nil {
-					if err := m.store.Save(m.sess); err != nil {
-						m.statusNote = err.Error()
-						return m, nil
-					}
-				}
-			}
+		if action, ok := resolvePlanActionSelection(value, m.plan, m.sess); ok {
+			return m.submitPlanActionSelectionWithDisplay(action, strings.TrimSpace(value))
 		}
 		if strings.HasPrefix(value, "/") {
 			m.input.Reset()
@@ -2214,16 +2206,7 @@ func parsePlanSteps(raw string) []string {
 }
 
 func canContinuePlan(state planpkg.State) bool {
-	state = planpkg.NormalizeState(state)
-	if !planpkg.HasStructuredPlan(state) {
-		return false
-	}
-	switch planpkg.NormalizePhase(string(state.Phase)) {
-	case planpkg.PhaseBlocked, planpkg.PhaseCompleted:
-		return false
-	default:
-		return true
-	}
+	return planpkg.CanStartExecution(state)
 }
 
 func currentOrNextStepTitle(state planpkg.State) string {
@@ -2325,16 +2308,112 @@ func isContinueExecutionInput(input string) bool {
 	case "continue",
 		"continue execution",
 		"continue plan",
+		"start execution",
+		"start build",
+		"begin execution",
+		"execute plan",
 		"resume",
 		"resume execution",
 		"\u7ee7\u7eed",
 		"\u7ee7\u7eed\u6267\u884c",
 		"\u7ee7\u7eed\u505a",
-		"\u7ee7\u7eed\u4efb\u52a1":
+		"\u7ee7\u7eed\u4efb\u52a1",
+		"\u5f00\u59cb\u6267\u884c",
+		"\u5f00\u59cb\u505a",
+		"\u6309\u8ba1\u5212\u6267\u884c":
 		return true
 	default:
 		return false
 	}
+}
+
+func resolvePlanActionSelection(input string, state planpkg.State, sess *session.Session) (string, bool) {
+	state = planpkg.NormalizeState(state)
+	if !planpkg.HasStructuredPlan(state) {
+		return "", false
+	}
+	if action, ok := resolveActiveChoiceSelection(input, state); ok {
+		return action, true
+	}
+	if isContinueExecutionInput(input) {
+		return "start execution", true
+	}
+	if !planpkg.CanStartExecution(state) || !latestAssistantHasPlanActionChoices(sess) {
+		return "", false
+	}
+
+	switch normalizePlanActionInput(input) {
+	case "1", "1.", "a", "a.", "option 1", "option a":
+		return "start execution", true
+	case "2", "2.", "b", "b.", "adjust", "adjust plan", "option 2", "option b",
+		"\u8c03\u6574", "\u8c03\u6574\u8ba1\u5212":
+		return "adjust plan", true
+	default:
+		return "", false
+	}
+}
+
+func normalizePlanActionInput(input string) string {
+	return strings.ToLower(strings.TrimSpace(input))
+}
+
+func resolveActiveChoiceSelection(input string, state planpkg.State) (string, bool) {
+	state = planpkg.NormalizeState(state)
+	if state.ActiveChoice == nil || len(state.ActiveChoice.Options) == 0 {
+		return "", false
+	}
+	normalized := normalizePlanActionInput(input)
+	if normalized == "" {
+		return "", false
+	}
+	for index, option := range state.ActiveChoice.Options {
+		number := fmt.Sprintf("%d", index+1)
+		shortcut := strings.ToLower(strings.TrimSpace(option.Shortcut))
+		title := strings.ToLower(strings.TrimSpace(option.Title))
+		switch normalized {
+		case number, number + ".", shortcut, shortcut + ".", "option " + number, "option " + shortcut:
+			return formatActiveChoiceAction(state.ActiveChoice.ID, option.ID), true
+		case "other", "other:", "其他", "自定义":
+			if option.Freeform {
+				return formatActiveChoiceAction(state.ActiveChoice.ID, option.ID), true
+			}
+		}
+		if title != "" && normalized == title {
+			return formatActiveChoiceAction(state.ActiveChoice.ID, option.ID), true
+		}
+	}
+	return "", false
+}
+
+func latestAssistantHasPlanActionChoices(sess *session.Session) bool {
+	return hasPlanActionChoices(latestAssistantMessageText(sess))
+}
+
+func latestAssistantMessageText(sess *session.Session) string {
+	if sess == nil {
+		return ""
+	}
+	for i := len(sess.Messages) - 1; i >= 0; i-- {
+		msg := sess.Messages[i]
+		if msg.Role != llm.RoleAssistant {
+			continue
+		}
+		text := strings.TrimSpace(msg.Text())
+		if text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func hasPlanActionChoices(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if normalized == "" {
+		return false
+	}
+	hasStart := strings.Contains(normalized, "start execution")
+	hasAdjust := strings.Contains(normalized, "adjust plan")
+	return hasStart && hasAdjust
 }
 
 func (m model) currentPhaseLabel() string {
@@ -2422,6 +2501,9 @@ func preparePlanForContinuation(state planpkg.State) (planpkg.State, error) {
 		return state, fmt.Errorf("plan is blocked and cannot continue yet")
 	case planpkg.PhaseCompleted:
 		return state, fmt.Errorf("plan is already completed")
+	}
+	if !planpkg.CanStartExecution(state) {
+		return state, fmt.Errorf("plan is not converged yet: define scope, risks/rollback, and verification before starting execution")
 	}
 
 	if _, ok := planpkg.CurrentStep(state); !ok {

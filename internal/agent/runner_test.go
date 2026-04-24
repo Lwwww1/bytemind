@@ -1397,6 +1397,98 @@ func TestRunPromptAwayAutoDenyContinueKeepsRunningAfterPermissionDenied(t *testi
 	}
 }
 
+func TestRunPromptAwayAutoDenyContinueRecordsSandboxFallbackForSkippedDependency(t *testing.T) {
+	original := resolveAgentSystemSandboxRuntimeStatus
+	resolveAgentSystemSandboxRuntimeStatus = func(enabled bool, mode string) (tools.SystemSandboxRuntimeStatus, error) {
+		if !enabled {
+			return tools.SystemSandboxRuntimeStatus{}, nil
+		}
+		return tools.SystemSandboxRuntimeStatus{
+			Mode:            mode,
+			BackendEnabled:  false,
+			BackendName:     "none",
+			RequiredCapable: false,
+			CapabilityLevel: "none",
+			Fallback:        true,
+			Message:         "system sandbox best_effort fallback: test backend unavailable",
+		}, nil
+	}
+	t.Cleanup(func() {
+		resolveAgentSystemSandboxRuntimeStatus = original
+	})
+
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "call-1",
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "write_file",
+						Arguments: `{"path":"x.txt","content":"x"}`,
+					},
+				},
+				{
+					ID:   "call-2",
+					Type: "function",
+					Function: llm.ToolFunctionCall{
+						Name:      "read_file",
+						Arguments: `{"path":"x.txt"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:    "assistant",
+			Content: "continued after denied approval",
+		},
+	}}
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:          config.ProviderConfig{Model: "test-model"},
+			MaxIterations:     4,
+			Stream:            false,
+			ApprovalPolicy:    "on-request",
+			ApprovalMode:      "away",
+			AwayPolicy:        "auto_deny_continue",
+			SandboxEnabled:    true,
+			SystemSandboxMode: "best_effort",
+		},
+		Client:   client,
+		Store:    store,
+		Registry: tools.DefaultRegistry(),
+		Stdin:    strings.NewReader(""),
+		Stdout:   io.Discard,
+	})
+
+	var out bytes.Buffer
+	answer, err := runner.RunPrompt(context.Background(), sess, "trigger permission path", "build", &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "continued after denied approval" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+	for _, want := range []string{
+		"- System sandbox fallback:",
+		"startup (mode=best_effort, backend=none, required_capable=false, capability_level=none, shell_network_isolation=false, worker_network_isolation=false, reason=system sandbox best_effort fallback: test backend unavailable)",
+		"write_file (mode=best_effort, backend=none, required_capable=false, capability_level=none, shell_network_isolation=false, worker_network_isolation=false, reason=system sandbox best_effort fallback: test backend unavailable)",
+		"read_file (mode=best_effort, backend=none, required_capable=false, capability_level=none, shell_network_isolation=false, worker_network_isolation=false, reason=system sandbox best_effort fallback: test backend unavailable)",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected task report output to contain %q, got %q", want, out.String())
+		}
+	}
+}
+
 func TestRunPromptAwayFailFastStopsAfterPermissionDenied(t *testing.T) {
 	workspace := t.TempDir()
 	store, err := session.NewStore(t.TempDir())
@@ -1593,9 +1685,9 @@ func TestRunPromptReportsSystemSandboxStartupFallbackOnSuccess(t *testing.T) {
 	for _, want := range []string{
 		"mode=best_effort backend=none state=fallback required_capable=false capability_level=none",
 		"Task report summary:",
-		"- System sandbox fallback: startup (mode=best_effort, backend=none, required_capable=false, capability_level=none, reason=system sandbox best_effort fallback: test backend unavailable)",
+		"- System sandbox fallback: startup (mode=best_effort, backend=none, required_capable=false, capability_level=none, shell_network_isolation=false, worker_network_isolation=false, reason=system sandbox best_effort fallback: test backend unavailable)",
 		"Task report (json):",
-		`"system_sandbox_fallback":["startup (mode=best_effort, backend=none, required_capable=false, capability_level=none, reason=system sandbox best_effort fallback: test backend unavailable)"]`,
+		`"system_sandbox_fallback":["startup (mode=best_effort, backend=none, required_capable=false, capability_level=none, shell_network_isolation=false, worker_network_isolation=false, reason=system sandbox best_effort fallback: test backend unavailable)"]`,
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("expected output to contain %q, got %q", want, out.String())

@@ -393,6 +393,12 @@ func TestBuildSystemSandboxExecutionMetadataDefaults(t *testing.T) {
 	if got := meta["capability_level"]; got != "none" {
 		t.Fatalf("expected capability_level=none, got %#v", meta)
 	}
+	if got := meta["shell_network_isolation"]; got != false {
+		t.Fatalf("expected shell_network_isolation=false, got %#v", meta)
+	}
+	if got := meta["worker_network_isolation"]; got != false {
+		t.Fatalf("expected worker_network_isolation=false, got %#v", meta)
+	}
 	if got := meta["fallback"]; got != false {
 		t.Fatalf("expected fallback=false, got %#v", meta)
 	}
@@ -417,6 +423,12 @@ func TestBuildSystemSandboxExecutionMetadataFallback(t *testing.T) {
 	}
 	if got := meta["capability_level"]; got != "none" {
 		t.Fatalf("expected capability_level=none in fallback metadata, got %#v", meta)
+	}
+	if got := meta["shell_network_isolation"]; got != false {
+		t.Fatalf("expected shell_network_isolation=false in fallback metadata, got %#v", meta)
+	}
+	if got := meta["worker_network_isolation"]; got != false {
+		t.Fatalf("expected worker_network_isolation=false in fallback metadata, got %#v", meta)
 	}
 	if got := meta["status"]; got != "fallback" {
 		t.Fatalf("expected status fallback, got %#v", meta)
@@ -470,6 +482,12 @@ func TestRunShellToolResultIncludesSandboxMetadata(t *testing.T) {
 	if got := metadata["capability_level"]; got != "none" {
 		t.Fatalf("expected capability_level=none, got %#v", metadata)
 	}
+	if got := metadata["shell_network_isolation"]; got != false {
+		t.Fatalf("expected shell_network_isolation=false, got %#v", metadata)
+	}
+	if got := metadata["worker_network_isolation"]; got != false {
+		t.Fatalf("expected worker_network_isolation=false, got %#v", metadata)
+	}
 	if got := metadata["fallback"]; got != false {
 		t.Fatalf("expected fallback=false, got %#v", metadata)
 	}
@@ -486,12 +504,14 @@ func TestBuildSystemSandboxExecutionMetadataMarksRequiredCapabilityWhenBackendSu
 			Policy: systemSandboxPolicy{
 				FileIsolation:    true,
 				ProcessIsolation: true,
+				NetworkIsolation: true,
 			},
 		},
 		Worker: systemSandboxLaunchSpec{
 			Policy: systemSandboxPolicy{
 				FileIsolation:    true,
 				ProcessIsolation: true,
+				NetworkIsolation: false,
 			},
 		},
 	})
@@ -500,6 +520,12 @@ func TestBuildSystemSandboxExecutionMetadataMarksRequiredCapabilityWhenBackendSu
 	}
 	if got := meta["capability_level"]; got != "full" {
 		t.Fatalf("expected capability_level=full for capable backend, got %#v", meta)
+	}
+	if got := meta["shell_network_isolation"]; got != true {
+		t.Fatalf("expected shell_network_isolation=true for linux backend, got %#v", meta)
+	}
+	if got := meta["worker_network_isolation"]; got != false {
+		t.Fatalf("expected worker_network_isolation=false for linux backend, got %#v", meta)
 	}
 }
 
@@ -567,6 +593,36 @@ func TestValidateRequiredWindowsShellCommandRejectsNonReadOnly(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "strict read-only") {
 		t.Fatalf("expected required windows guard message, got %v", err)
+	}
+}
+
+func TestValidateRequiredWindowsShellCommandRejectsGoEnvWriteFlag(t *testing.T) {
+	err := validateRequiredWindowsShellCommand("go env -w GOPATH=C:\\tmp\\go")
+	if err == nil {
+		t.Fatal("expected go env -w to be rejected in strict mode")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "strict read-only") {
+		t.Fatalf("expected strict read-only guard message, got %v", err)
+	}
+}
+
+func TestValidateRequiredWindowsShellCommandRejectsGitOutputFlag(t *testing.T) {
+	err := validateRequiredWindowsShellCommand("git diff --output out.patch")
+	if err == nil {
+		t.Fatal("expected git diff --output to be rejected in strict mode")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "strict read-only") {
+		t.Fatalf("expected strict read-only guard message, got %v", err)
+	}
+}
+
+func TestValidateRequiredWindowsShellCommandRejectsFindDelete(t *testing.T) {
+	err := validateRequiredWindowsShellCommand("find . -delete")
+	if err == nil {
+		t.Fatal("expected find -delete to be rejected in strict mode")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "strict read-only") {
+		t.Fatalf("expected strict read-only guard message, got %v", err)
 	}
 }
 

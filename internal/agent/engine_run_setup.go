@@ -52,6 +52,8 @@ func (e *defaultEngine) prepareRunPrompt(sess *session.Session, input RunPromptI
 	systemSandboxBackend := "none"
 	systemSandboxRequiredCapable := false
 	systemSandboxCapabilityLevel := "none"
+	systemSandboxShellNetwork := false
+	systemSandboxWorkerNetwork := false
 	systemSandboxFallback := false
 	systemSandboxStatus := ""
 	if runtimeStatus, statusErr := resolveAgentSystemSandboxRuntimeStatus(runner.config.SandboxEnabled, runner.config.SystemSandboxMode); statusErr != nil {
@@ -67,6 +69,8 @@ func (e *defaultEngine) prepareRunPrompt(sess *session.Session, input RunPromptI
 		if level := strings.TrimSpace(runtimeStatus.CapabilityLevel); level != "" {
 			systemSandboxCapabilityLevel = level
 		}
+		systemSandboxShellNetwork = runtimeStatus.ShellNetworkIsolation
+		systemSandboxWorkerNetwork = runtimeStatus.WorkerNetworkIsolation
 		systemSandboxFallback = runtimeStatus.Fallback
 		systemSandboxStatus = strings.TrimSpace(runtimeStatus.Message)
 	}
@@ -79,6 +83,8 @@ func (e *defaultEngine) prepareRunPrompt(sess *session.Session, input RunPromptI
 		SystemSandboxBackend:         systemSandboxBackend,
 		SystemSandboxRequiredCapable: systemSandboxRequiredCapable,
 		SystemSandboxCapabilityLevel: systemSandboxCapabilityLevel,
+		SystemSandboxShellNetwork:    systemSandboxShellNetwork,
+		SystemSandboxWorkerNetwork:   systemSandboxWorkerNetwork,
 		SystemSandboxFallback:        systemSandboxFallback,
 		SystemSandboxStatus:          systemSandboxStatus,
 		ActiveSkill:                  activeSkill,
@@ -135,6 +141,8 @@ func (e *defaultEngine) buildTurnMessages(sess *session.Session, setup runPrompt
 			SystemSandboxBackend:         setup.SystemSandboxBackend,
 			SystemSandboxRequiredCapable: setup.SystemSandboxRequiredCapable,
 			SystemSandboxCapabilityLevel: setup.SystemSandboxCapabilityLevel,
+			SystemSandboxShellNetwork:    setup.SystemSandboxShellNetwork,
+			SystemSandboxWorkerNetwork:   setup.SystemSandboxWorkerNetwork,
 			SystemSandboxFallback:        setup.SystemSandboxFallback,
 			SystemSandboxStatus:          setup.SystemSandboxStatus,
 			Model:                        runner.config.Provider.Model,

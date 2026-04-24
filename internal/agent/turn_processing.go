@@ -332,8 +332,16 @@ func (e *defaultEngine) processTurn(ctx context.Context, p turnProcessParams) (s
 			if failFast {
 				continue
 			}
-			if err := e.appendSkippedDependencyResult(ctx, p.Session, skippedCall, p.Out); err != nil {
+			if err := e.appendSkippedDependencyResult(ctx, p.Session, skippedCall, p.Out, p.SandboxAudit); err != nil {
 				return "", false, err
+			}
+			if p.TaskReport == nil {
+				continue
+			}
+			if skippedEnvelope, ok := latestToolResultEnvelope(p.Session); ok {
+				if note := systemSandboxFallbackReportEntry(skippedCall.Function.Name, skippedEnvelope); note != "" {
+					p.TaskReport.RecordSystemSandboxFallback(note)
+				}
 			}
 		}
 		if failFast {
@@ -371,6 +379,8 @@ type toolResultEnvelope struct {
 		Backend         string `json:"backend"`
 		RequiredCapable bool   `json:"required_capable"`
 		CapabilityLevel string `json:"capability_level"`
+		ShellNetwork    bool   `json:"shell_network_isolation"`
+		WorkerNetwork   bool   `json:"worker_network_isolation"`
 		Fallback        bool   `json:"fallback"`
 		FallbackReason  string `json:"fallback_reason"`
 	} `json:"system_sandbox"`
@@ -439,6 +449,8 @@ func systemSandboxFallbackReportEntry(toolName string, envelope toolResultEnvelo
 	if capability := strings.TrimSpace(envelope.SystemSandbox.CapabilityLevel); capability != "" {
 		parts = append(parts, "capability_level="+capability)
 	}
+	parts = append(parts, fmt.Sprintf("shell_network_isolation=%t", envelope.SystemSandbox.ShellNetwork))
+	parts = append(parts, fmt.Sprintf("worker_network_isolation=%t", envelope.SystemSandbox.WorkerNetwork))
 	if reason != "" {
 		parts = append(parts, "reason="+reason)
 	}
@@ -453,6 +465,7 @@ func (e *defaultEngine) appendSkippedDependencyResult(
 	sess *session.Session,
 	call llm.ToolCall,
 	out io.Writer,
+	sandboxAudit sandboxAuditContext,
 ) error {
 	if e == nil || e.runner == nil {
 		return fmt.Errorf("agent engine is unavailable")
@@ -460,12 +473,16 @@ func (e *defaultEngine) appendSkippedDependencyResult(
 	runner := e.runner
 
 	errText := fmt.Sprintf("%s: tool %q was skipped because a prior approval-required action was denied in away mode", reasonCodeDeniedDependency, call.Function.Name)
-	result := marshalToolResult(map[string]any{
+	payload := map[string]any{
 		"ok":          false,
 		"error":       errText,
 		"status":      statusSkipped,
 		"reason_code": reasonCodeDeniedDependency,
-	})
+	}
+	if systemSandbox := systemSandboxResultPayload(sandboxAudit); len(systemSandbox) != 0 {
+		payload["system_sandbox"] = systemSandbox
+	}
+	result := marshalToolResult(payload)
 	if out != nil {
 		runner.renderToolFeedback(out, call.Function.Name, result)
 	}

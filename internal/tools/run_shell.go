@@ -151,13 +151,15 @@ func buildSystemSandboxExecutionMetadata(mode string, backend systemSandboxRunti
 		capabilityLevel = systemSandboxCapabilityLevel(mode, backend)
 	}
 	payload := map[string]any{
-		"mode":             mode,
-		"backend":          backendName,
-		"active":           active,
-		"required_capable": requiredCapable,
-		"capability_level": capabilityLevel,
-		"fallback":         fallback,
-		"status":           status,
+		"mode":                     mode,
+		"backend":                  backendName,
+		"active":                   active,
+		"required_capable":         requiredCapable,
+		"capability_level":         capabilityLevel,
+		"shell_network_isolation":  backend.Shell.Policy.NetworkIsolation,
+		"worker_network_isolation": backend.Worker.Policy.NetworkIsolation,
+		"fallback":                 fallback,
+		"status":                   status,
 	}
 	if reason != "" {
 		payload["fallback_reason"] = reason

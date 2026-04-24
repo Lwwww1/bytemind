@@ -13,6 +13,13 @@ type systemSandboxPolicy struct {
 	NetworkIsolation bool
 }
 
+type SystemSandboxBackendCapabilities struct {
+	Name                   string
+	Known                  bool
+	ShellNetworkIsolation  bool
+	WorkerNetworkIsolation bool
+}
+
 type systemSandboxLaunchSpec struct {
 	ArgPrefix []string
 	Policy    systemSandboxPolicy
@@ -184,6 +191,52 @@ func systemSandboxBackendForOS(goos string) systemSandboxPlatformBackend {
 		return windowsJobObjectSystemSandboxBackend{}
 	default:
 		return nil
+	}
+}
+
+func systemSandboxBackendByName(name string) systemSandboxPlatformBackend {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "linux_unshare":
+		return linuxUnshareSystemSandboxBackend{}
+	case "darwin_sandbox_exec":
+		return darwinSandboxExecSystemSandboxBackend{}
+	case "windows_job_object":
+		return windowsJobObjectSystemSandboxBackend{}
+	default:
+		return nil
+	}
+}
+
+func SystemSandboxBackendCapabilitiesForName(name string) SystemSandboxBackendCapabilities {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	switch normalized {
+	case "future_worker_net_isolated":
+		return SystemSandboxBackendCapabilities{
+			Name:                   normalized,
+			Known:                  true,
+			ShellNetworkIsolation:  false,
+			WorkerNetworkIsolation: true,
+		}
+	case "future_shell_net_isolated":
+		return SystemSandboxBackendCapabilities{
+			Name:                   normalized,
+			Known:                  true,
+			ShellNetworkIsolation:  true,
+			WorkerNetworkIsolation: false,
+		}
+	}
+
+	backend := systemSandboxBackendByName(normalized)
+	if backend == nil {
+		return SystemSandboxBackendCapabilities{Name: normalized, Known: false}
+	}
+	shell := backend.ShellLaunchSpec()
+	worker := backend.WorkerLaunchSpec()
+	return SystemSandboxBackendCapabilities{
+		Name:                   normalized,
+		Known:                  true,
+		ShellNetworkIsolation:  shell.Policy.NetworkIsolation,
+		WorkerNetworkIsolation: worker.Policy.NetworkIsolation,
 	}
 }
 

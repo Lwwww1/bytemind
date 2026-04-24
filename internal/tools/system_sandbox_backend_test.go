@@ -144,6 +144,73 @@ func TestResolveSystemSandboxRuntimeBackendLinuxProfiles(t *testing.T) {
 	}
 }
 
+func TestSystemSandboxBackendCapabilitiesForName(t *testing.T) {
+	tests := []struct {
+		name              string
+		backend           string
+		wantKnown         bool
+		wantShellNetwork  bool
+		wantWorkerNetwork bool
+	}{
+		{
+			name:              "linux_unshare",
+			backend:           "linux_unshare",
+			wantKnown:         true,
+			wantShellNetwork:  true,
+			wantWorkerNetwork: false,
+		},
+		{
+			name:              "darwin_sandbox_exec",
+			backend:           "darwin_sandbox_exec",
+			wantKnown:         true,
+			wantShellNetwork:  false,
+			wantWorkerNetwork: false,
+		},
+		{
+			name:              "windows_job_object",
+			backend:           "windows_job_object",
+			wantKnown:         true,
+			wantShellNetwork:  false,
+			wantWorkerNetwork: false,
+		},
+		{
+			name:              "future_worker_net_isolated",
+			backend:           "future_worker_net_isolated",
+			wantKnown:         true,
+			wantShellNetwork:  false,
+			wantWorkerNetwork: true,
+		},
+		{
+			name:              "future_shell_net_isolated",
+			backend:           "future_shell_net_isolated",
+			wantKnown:         true,
+			wantShellNetwork:  true,
+			wantWorkerNetwork: false,
+		},
+		{
+			name:              "unknown_backend",
+			backend:           "unknown_backend",
+			wantKnown:         false,
+			wantShellNetwork:  false,
+			wantWorkerNetwork: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SystemSandboxBackendCapabilitiesForName(tt.backend)
+			if got.Known != tt.wantKnown {
+				t.Fatalf("Known mismatch: got %v want %v", got.Known, tt.wantKnown)
+			}
+			if got.ShellNetworkIsolation != tt.wantShellNetwork {
+				t.Fatalf("ShellNetworkIsolation mismatch: got %v want %v", got.ShellNetworkIsolation, tt.wantShellNetwork)
+			}
+			if got.WorkerNetworkIsolation != tt.wantWorkerNetwork {
+				t.Fatalf("WorkerNetworkIsolation mismatch: got %v want %v", got.WorkerNetworkIsolation, tt.wantWorkerNetwork)
+			}
+		})
+	}
+}
+
 func containsString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

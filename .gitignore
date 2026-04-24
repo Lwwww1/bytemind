@@ -1,5 +1,6 @@
 .gocache/
 .gomodcache/
+.appdata/
 .bytemind/
 /config.json
 .installtest*/

@@ -16,6 +16,8 @@ type runPromptSetup struct {
 	SystemSandboxBackend         string
 	SystemSandboxRequiredCapable bool
 	SystemSandboxCapabilityLevel string
+	SystemSandboxShellNetwork    bool
+	SystemSandboxWorkerNetwork   bool
 	SystemSandboxFallback        bool
 	SystemSandboxStatus          string
 	ActiveSkill                  *activeSkillRuntime

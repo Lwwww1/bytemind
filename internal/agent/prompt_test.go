@@ -27,6 +27,8 @@ func TestSystemPromptRendersMainModeSystemAndInstruction(t *testing.T) {
 		SystemSandbox:                "best_effort",
 		SystemSandboxBackend:         "linux_unshare",
 		SystemSandboxRequiredCapable: true,
+		SystemSandboxShellNetwork:    true,
+		SystemSandboxWorkerNetwork:   false,
 		SystemSandboxFallback:        false,
 		SystemSandboxStatus:          `system sandbox backend "linux_unshare" is active`,
 		Model:                        "gpt-5.4-mini",
@@ -69,6 +71,8 @@ func TestSystemPromptRendersMainModeSystemAndInstruction(t *testing.T) {
 	assertContains(t, prompt, "system_sandbox_backend: linux_unshare")
 	assertContains(t, prompt, "system_sandbox_required_capable: true")
 	assertContains(t, prompt, "system_sandbox_capability_level: none")
+	assertContains(t, prompt, "system_sandbox_shell_network_isolation: true")
+	assertContains(t, prompt, "system_sandbox_worker_network_isolation: false")
 	assertContains(t, prompt, "system_sandbox_fallback: false")
 	assertContains(t, prompt, `system_sandbox_status: system sandbox backend "linux_unshare" is active`)
 	assertContains(t, prompt, "[Available Skills]")
@@ -113,6 +117,8 @@ func TestSystemPromptOmitsOptionalBlocksWhenEmpty(t *testing.T) {
 	assertContains(t, prompt, "system_sandbox_backend: none")
 	assertContains(t, prompt, "system_sandbox_required_capable: false")
 	assertContains(t, prompt, "system_sandbox_capability_level: none")
+	assertContains(t, prompt, "system_sandbox_shell_network_isolation: false")
+	assertContains(t, prompt, "system_sandbox_worker_network_isolation: false")
 	assertContains(t, prompt, "system_sandbox_fallback: false")
 	if strings.Contains(prompt, "[Instructions]") {
 		t.Fatalf("did not expect instruction block in prompt: %q", prompt)

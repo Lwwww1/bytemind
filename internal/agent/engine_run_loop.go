@@ -191,11 +191,16 @@ func writeSystemSandboxStartupNotice(out io.Writer, setup runPromptSetup, sandbo
 		sandboxState = "inactive"
 	}
 	requiredCapable := strconv.FormatBool(setup.SystemSandboxRequiredCapable)
+	shellNetwork := strconv.FormatBool(setup.SystemSandboxShellNetwork)
+	workerNetwork := strconv.FormatBool(setup.SystemSandboxWorkerNetwork)
 	capabilityLevel := strings.TrimSpace(setup.SystemSandboxCapabilityLevel)
 	if capabilityLevel == "" {
 		capabilityLevel = "none"
 	}
-	line := fmt.Sprintf("%ssystem sandbox startup%s mode=%s backend=%s state=%s required_capable=%s capability_level=%s", ansiDim, ansiReset, mode, backend, sandboxState, requiredCapable, capabilityLevel)
+	line := fmt.Sprintf(
+		"%ssystem sandbox startup%s mode=%s backend=%s state=%s required_capable=%s capability_level=%s shell_network_isolation=%s worker_network_isolation=%s",
+		ansiDim, ansiReset, mode, backend, sandboxState, requiredCapable, capabilityLevel, shellNetwork, workerNetwork,
+	)
 	if status != "" {
 		line += fmt.Sprintf(" (%s)", status)
 	}
@@ -215,12 +220,17 @@ func recordSystemSandboxStartupFallback(taskReport *TaskReport, setup runPromptS
 		backend = "none"
 	}
 	requiredCapable := strconv.FormatBool(setup.SystemSandboxRequiredCapable)
+	shellNetwork := strconv.FormatBool(setup.SystemSandboxShellNetwork)
+	workerNetwork := strconv.FormatBool(setup.SystemSandboxWorkerNetwork)
 	capabilityLevel := strings.TrimSpace(setup.SystemSandboxCapabilityLevel)
 	if capabilityLevel == "" {
 		capabilityLevel = "none"
 	}
 	reason := strings.TrimSpace(setup.SystemSandboxStatus)
-	note := fmt.Sprintf("startup (mode=%s, backend=%s, required_capable=%s, capability_level=%s", mode, backend, requiredCapable, capabilityLevel)
+	note := fmt.Sprintf(
+		"startup (mode=%s, backend=%s, required_capable=%s, capability_level=%s, shell_network_isolation=%s, worker_network_isolation=%s",
+		mode, backend, requiredCapable, capabilityLevel, shellNetwork, workerNetwork,
+	)
 	if reason != "" {
 		note += fmt.Sprintf(", reason=%s", reason)
 	}
@@ -258,13 +268,15 @@ func appendSystemSandboxStartupAudit(
 		state = "inactive"
 	}
 	metadata := map[string]string{
-		"sandbox_enabled":          strconv.FormatBool(sandboxEnabled),
-		"sandbox_mode":             mode,
-		"sandbox_backend":          backend,
-		"sandbox_required_capable": strconv.FormatBool(setup.SystemSandboxRequiredCapable),
-		"sandbox_capability_level": capabilityLevelFromSetup(setup),
-		"sandbox_status":           state,
-		"sandbox_fallback":         strconv.FormatBool(setup.SystemSandboxFallback),
+		"sandbox_enabled":                  strconv.FormatBool(sandboxEnabled),
+		"sandbox_mode":                     mode,
+		"sandbox_backend":                  backend,
+		"sandbox_required_capable":         strconv.FormatBool(setup.SystemSandboxRequiredCapable),
+		"sandbox_capability_level":         capabilityLevelFromSetup(setup),
+		"sandbox_shell_network_isolation":  strconv.FormatBool(setup.SystemSandboxShellNetwork),
+		"sandbox_worker_network_isolation": strconv.FormatBool(setup.SystemSandboxWorkerNetwork),
+		"sandbox_status":                   state,
+		"sandbox_fallback":                 strconv.FormatBool(setup.SystemSandboxFallback),
 	}
 	if reason != "" {
 		metadata["sandbox_message"] = reason

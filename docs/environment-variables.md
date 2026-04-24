@@ -23,7 +23,11 @@ ByteMind TUI supports the following runtime environment variables:
   - Linux: `unshare`
   - macOS: `sandbox-exec` (when available in `PATH`)
   - Windows: Job Object process isolation; `required` mode is enabled with strict single-segment read-only allowlist guard (`run_shell` rejects commands outside plan-safe allowlist)
+  - In `required` mode, network-targeted operations are fail-closed when the active backend does not provide the required network isolation for the relevant tool path (`run_shell` vs `web_*`).
+  - In `required` mode, when backend worker network isolation is unavailable, `web_fetch` / `web_search` are denied at policy stage (`reason_code=sandbox_guard`) before tool execution.
+  - In `required` mode, when backend shell network isolation is unavailable, network-targeted `run_shell` is denied at policy stage (`reason_code=sandbox_guard`) before tool execution.
 - Runtime visibility:
-  - when sandbox mode is enabled (`best_effort` or `required`), run output prints a startup status line (`mode/backend/state/required_capable/capability_level`).
-  - audit events include startup and per-tool sandbox metadata (`system_sandbox_startup`, `permission_decision`, `tool_execute_start`, `tool_execute_result`, `task_state_changed`) including `sandbox_capability_level`.
+  - when sandbox mode is enabled (`best_effort` or `required`), run output prints a startup status line (`mode/backend/state/required_capable/capability_level/shell_network_isolation/worker_network_isolation`).
+  - denied/error tool results now carry a `system_sandbox` envelope (when sandbox is enabled), so CLI feedback can show sandbox state/reason on failure paths, not only successful `run_shell` outputs.
+  - audit events include startup and per-tool sandbox metadata (`system_sandbox_startup`, `permission_decision`, `tool_execute_start`, `tool_execute_result`, `task_state_changed`) including `sandbox_capability_level`, `sandbox_shell_network_isolation`, and `sandbox_worker_network_isolation`.
 - See [Sandbox Acceptance Checklist](./sandbox-acceptance.md) for validation matrix and test commands.

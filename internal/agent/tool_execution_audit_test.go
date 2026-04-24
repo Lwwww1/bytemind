@@ -439,13 +439,15 @@ func TestRunPromptRecordsSystemSandboxStartupAudit(t *testing.T) {
 		t.Fatalf("expected startup audit result=%q, got %q", want, got)
 	}
 	for k, want := range map[string]string{
-		"sandbox_enabled":          "true",
-		"sandbox_mode":             "best_effort",
-		"sandbox_backend":          "none",
-		"sandbox_required_capable": "false",
-		"sandbox_capability_level": "none",
-		"sandbox_status":           "fallback",
-		"sandbox_fallback":         "true",
+		"sandbox_enabled":                  "true",
+		"sandbox_mode":                     "best_effort",
+		"sandbox_backend":                  "none",
+		"sandbox_required_capable":         "false",
+		"sandbox_capability_level":         "none",
+		"sandbox_shell_network_isolation":  "false",
+		"sandbox_worker_network_isolation": "false",
+		"sandbox_status":                   "fallback",
+		"sandbox_fallback":                 "true",
 	} {
 		if got := startupEvent.Metadata[k]; got != want {
 			t.Fatalf("expected startup audit metadata[%q]=%q, got %q", k, want, got)
@@ -561,6 +563,12 @@ func TestRunPromptPropagatesSandboxFallbackContextToPermissionAndStartAudit(t *t
 		}
 		if got := metadata["sandbox_capability_level"]; got != "none" {
 			t.Fatalf("%s: expected sandbox_capability_level=none, got %q", label, got)
+		}
+		if got := metadata["sandbox_shell_network_isolation"]; got != "false" {
+			t.Fatalf("%s: expected sandbox_shell_network_isolation=false, got %q", label, got)
+		}
+		if got := metadata["sandbox_worker_network_isolation"]; got != "false" {
+			t.Fatalf("%s: expected sandbox_worker_network_isolation=false, got %q", label, got)
 		}
 		if got := metadata["sandbox_fallback"]; got != "true" {
 			t.Fatalf("%s: expected sandbox_fallback=true, got %q", label, got)

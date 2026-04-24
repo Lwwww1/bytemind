@@ -9,16 +9,18 @@ import (
 // SystemSandboxRuntimeStatus describes system sandbox runtime state after
 // configuration and platform/backend probing are applied.
 type SystemSandboxRuntimeStatus struct {
-	SandboxEnabled  bool
-	RequestedMode   string
-	Mode            string
-	GOOS            string
-	BackendEnabled  bool
-	BackendName     string
-	RequiredCapable bool
-	CapabilityLevel string
-	Fallback        bool
-	Message         string
+	SandboxEnabled         bool
+	RequestedMode          string
+	Mode                   string
+	GOOS                   string
+	BackendEnabled         bool
+	BackendName            string
+	RequiredCapable        bool
+	CapabilityLevel        string
+	ShellNetworkIsolation  bool
+	WorkerNetworkIsolation bool
+	Fallback               bool
+	Message                string
 }
 
 // ValidateSystemSandboxRuntime verifies whether the configured system sandbox mode
@@ -77,6 +79,8 @@ func resolveSystemSandboxRuntimeStatusWith(
 		status.BackendName = strings.TrimSpace(backend.Name)
 		status.RequiredCapable = backend.RequiredCapable
 		status.CapabilityLevel = strings.TrimSpace(backend.CapabilityLevel)
+		status.ShellNetworkIsolation = backend.Shell.Policy.NetworkIsolation
+		status.WorkerNetworkIsolation = backend.Worker.Policy.NetworkIsolation
 		if status.CapabilityLevel == "" {
 			status.CapabilityLevel = systemSandboxCapabilityLevel(status.Mode, backend)
 		}

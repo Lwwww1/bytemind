@@ -27,6 +27,8 @@ type sandboxAuditContext struct {
 	Backend         string
 	RequiredCapable bool
 	CapabilityLevel string
+	ShellNetwork    bool
+	WorkerNetwork   bool
 	Fallback        bool
 	Status          string
 	FallbackReason  string
@@ -63,11 +65,19 @@ func (e *defaultEngine) executeToolCall(
 	sandboxAudit = normalizeSandboxAuditContext(sandboxAudit)
 
 	decision, err := runner.policyGateway.DecideTool(ctx, ToolDecisionInput{
-		ToolName:       call.Function.Name,
-		AllowedTools:   allowedTools,
-		DeniedTools:    deniedTools,
-		ApprovalPolicy: runner.config.ApprovalPolicy,
-		SafetyClass:    e.toolSafetyClass(call.Function.Name),
+		ToolName:             call.Function.Name,
+		ToolArguments:        call.Function.Arguments,
+		AllowedTools:         allowedTools,
+		DeniedTools:          deniedTools,
+		ApprovalPolicy:       runner.config.ApprovalPolicy,
+		SafetyClass:          e.toolSafetyClass(call.Function.Name),
+		SandboxEnabled:       sandboxAudit.Enabled,
+		SandboxMode:          sandboxAudit.Mode,
+		SandboxBackend:       sandboxAudit.Backend,
+		SandboxCapability:    sandboxAudit.CapabilityLevel,
+		SandboxRequiredCapab: sandboxAudit.RequiredCapable,
+		SandboxShellNetwork:  sandboxAudit.ShellNetwork,
+		SandboxWorkerNetwork: sandboxAudit.WorkerNetwork,
 	})
 	if err != nil {
 		return err
@@ -183,12 +193,16 @@ func (e *defaultEngine) executeToolCall(
 
 	if execErr != nil {
 		status, reasonCode := classifyToolExecutionError(execErr)
-		result = marshalToolResult(map[string]any{
+		payload := map[string]any{
 			"ok":          false,
 			"error":       execErr.Error(),
 			"status":      status,
 			"reason_code": reasonCode,
-		})
+		}
+		if systemSandbox := systemSandboxResultPayload(sandboxAudit); len(systemSandbox) != 0 {
+			payload["system_sandbox"] = systemSandbox
+		}
+		result = marshalToolResult(payload)
 	}
 	if out != nil {
 		runner.renderToolFeedback(out, call.Function.Name, result)
@@ -305,6 +319,16 @@ func (e *defaultEngine) handleRejectedToolCall(
 		"decision":    decision.Decision,
 		"reason_code": decision.ReasonCode,
 	})
+	if systemSandbox := systemSandboxResultPayload(sandboxAudit); len(systemSandbox) != 0 {
+		result = marshalToolResult(map[string]any{
+			"ok":             false,
+			"error":          errorText,
+			"status":         statusDenied,
+			"decision":       decision.Decision,
+			"reason_code":    decision.ReasonCode,
+			"system_sandbox": systemSandbox,
+		})
+	}
 
 	if out != nil {
 		runner.renderToolFeedback(out, call.Function.Name, result)
@@ -476,6 +500,8 @@ func appendSystemSandboxAuditMetadata(metadata map[string]string, result string)
 			Status          string `json:"status"`
 			RequiredCapable bool   `json:"required_capable"`
 			CapabilityLevel string `json:"capability_level"`
+			ShellNetwork    bool   `json:"shell_network_isolation"`
+			WorkerNetwork   bool   `json:"worker_network_isolation"`
 			Fallback        bool   `json:"fallback"`
 			FallbackReason  string `json:"fallback_reason"`
 		} `json:"system_sandbox"`
@@ -497,10 +523,49 @@ func appendSystemSandboxAuditMetadata(metadata map[string]string, result string)
 	if capability := strings.TrimSpace(systemSandbox.CapabilityLevel); capability != "" {
 		metadata["sandbox_capability_level"] = capability
 	}
+	metadata["sandbox_shell_network_isolation"] = strconv.FormatBool(systemSandbox.ShellNetwork)
+	metadata["sandbox_worker_network_isolation"] = strconv.FormatBool(systemSandbox.WorkerNetwork)
 	metadata["sandbox_fallback"] = strconv.FormatBool(systemSandbox.Fallback)
 	if reason := strings.TrimSpace(systemSandbox.FallbackReason); reason != "" {
 		metadata["sandbox_fallback_reason"] = reason
 	}
+}
+
+func systemSandboxResultPayload(context sandboxAuditContext) map[string]any {
+	context = normalizeSandboxAuditContext(context)
+	if !context.Enabled || strings.EqualFold(context.Mode, "off") {
+		return nil
+	}
+
+	active := strings.EqualFold(context.Status, "active")
+	fallback := context.Fallback || strings.EqualFold(context.Status, "fallback")
+	status := strings.TrimSpace(context.Status)
+	if status == "" {
+		switch {
+		case active:
+			status = "active"
+		case fallback:
+			status = "fallback"
+		default:
+			status = "inactive"
+		}
+	}
+
+	payload := map[string]any{
+		"mode":                     context.Mode,
+		"backend":                  context.Backend,
+		"active":                   active,
+		"required_capable":         context.RequiredCapable,
+		"capability_level":         context.CapabilityLevel,
+		"shell_network_isolation":  context.ShellNetwork,
+		"worker_network_isolation": context.WorkerNetwork,
+		"fallback":                 fallback,
+		"status":                   status,
+	}
+	if reason := strings.TrimSpace(context.FallbackReason); reason != "" {
+		payload["fallback_reason"] = reason
+	}
+	return payload
 }
 
 func sandboxAuditFromSetup(setup runPromptSetup, sandboxEnabled bool, configuredMode string) sandboxAuditContext {
@@ -510,6 +575,8 @@ func sandboxAuditFromSetup(setup runPromptSetup, sandboxEnabled bool, configured
 		Backend:         strings.TrimSpace(setup.SystemSandboxBackend),
 		RequiredCapable: setup.SystemSandboxRequiredCapable,
 		CapabilityLevel: strings.TrimSpace(setup.SystemSandboxCapabilityLevel),
+		ShellNetwork:    setup.SystemSandboxShellNetwork,
+		WorkerNetwork:   setup.SystemSandboxWorkerNetwork,
 		Fallback:        setup.SystemSandboxFallback,
 		FallbackReason:  strings.TrimSpace(setup.SystemSandboxStatus),
 	}
@@ -556,6 +623,8 @@ func appendSandboxAuditContext(metadata map[string]string, context sandboxAuditC
 	metadata["sandbox_backend"] = context.Backend
 	metadata["sandbox_required_capable"] = strconv.FormatBool(context.RequiredCapable)
 	metadata["sandbox_capability_level"] = context.CapabilityLevel
+	metadata["sandbox_shell_network_isolation"] = strconv.FormatBool(context.ShellNetwork)
+	metadata["sandbox_worker_network_isolation"] = strconv.FormatBool(context.WorkerNetwork)
 	metadata["sandbox_fallback"] = strconv.FormatBool(context.Fallback)
 	if context.Status != "" {
 		metadata["sandbox_status"] = context.Status

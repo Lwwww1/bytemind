@@ -49,15 +49,42 @@ func (m model) renderHelpModal() string {
 }
 
 func (m model) renderApprovalBanner() string {
-	width := max(24, m.chatPanelInnerWidth())
-	commandWidth := max(20, width-4)
-	lines := []string{
-		accentStyle.Render("Approval required"),
-		mutedStyle.Render("Reason: " + trimPreview(m.approval.Reason, commandWidth)),
-		codeStyle.Width(commandWidth).Render(m.approval.Command),
-		mutedStyle.Render("Y / Enter approve    N / Esc reject"),
+	bannerWidth := max(24, m.chatPanelInnerWidth())
+	innerWidth := max(20, bannerWidth-approvalBannerStyle.GetHorizontalFrameSize())
+	command := strings.TrimSpace(m.approval.Command)
+	if command == "" {
+		command = "-"
 	}
-	return approvalBannerStyle.Width(width).Render(strings.Join(lines, "\n"))
+
+	title := "Approval required"
+	reasonBudget := max(0, innerWidth-lipgloss.Width(title)-2)
+	reason := trimPreview(m.approval.Reason, reasonBudget)
+	line1 := approvalTitleStyle.Render(title)
+	if reason != "" {
+		line1 += "  " + approvalReasonStyle.Render(reason)
+	}
+
+	toolPrefix := "Tool: "
+	hint := "Approve [Y/Enter]  Reject [N/Esc]"
+	minGap := 2
+	toolBudget := innerWidth - lipgloss.Width(toolPrefix) - lipgloss.Width(hint) - minGap
+	if toolBudget < 6 {
+		toolBudget = 6
+	}
+	tool := trimPreview(command, toolBudget)
+	leftPlain := toolPrefix + tool
+	gap := innerWidth - lipgloss.Width(leftPlain) - lipgloss.Width(hint)
+	if gap < 1 {
+		tool = trimPreview(command, max(1, innerWidth-lipgloss.Width(toolPrefix)-lipgloss.Width(hint)-1))
+		leftPlain = toolPrefix + tool
+		gap = max(1, innerWidth-lipgloss.Width(leftPlain)-lipgloss.Width(hint))
+	}
+	line2 := approvalCommandStyle.Render(leftPlain) + strings.Repeat(" ", gap) + approvalHintStyle.Render(hint)
+
+	body := lipgloss.NewStyle().
+		Width(innerWidth).
+		Render(strings.Join([]string{line1, line2}, "\n"))
+	return approvalBannerStyle.Render(body)
 }
 
 func (m model) renderActiveSkillBanner() string {

@@ -392,8 +392,22 @@ var (
 	approvalBannerStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.NormalBorder()).
 				BorderForeground(semanticColors.Warning).
-				Background(semanticColors.WarningSoft).
-				Padding(0, 1)
+				Background(lipgloss.Color("#000000")).
+				Padding(1, 0)
+
+	approvalTitleStyle = lipgloss.NewStyle().
+				Foreground(semanticColors.Warning).
+				Bold(true)
+
+	approvalReasonStyle = lipgloss.NewStyle().
+				Foreground(semanticColors.TextMuted)
+
+	approvalCommandStyle = lipgloss.NewStyle().
+				Foreground(semanticColors.TextBase).
+				Background(lipgloss.Color("#000000"))
+
+	approvalHintStyle = lipgloss.NewStyle().
+				Foreground(semanticColors.TextMuted)
 
 	activeSkillBannerStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.NormalBorder()).

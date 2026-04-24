@@ -85,11 +85,13 @@ func TestRunPromptPolicyGatewayDeniesToolBeforeExecutor(t *testing.T) {
 	runner := NewRunner(Options{
 		Workspace: workspace,
 		Config: config.Config{
-			Provider:       config.ProviderConfig{Type: "openai-compatible", Model: "test-model"},
-			MaxIterations:  3,
-			Stream:         false,
-			TokenQuota:     generousTokenQuota,
-			ApprovalPolicy: "on-request",
+			Provider:          config.ProviderConfig{Type: "openai-compatible", Model: "test-model"},
+			MaxIterations:     3,
+			Stream:            false,
+			TokenQuota:        generousTokenQuota,
+			ApprovalPolicy:    "on-request",
+			SandboxEnabled:    true,
+			SystemSandboxMode: "best_effort",
 		},
 		Client:   client,
 		Store:    store,
@@ -123,12 +125,34 @@ func TestRunPromptPolicyGatewayDeniesToolBeforeExecutor(t *testing.T) {
 
 	foundPermissionDecision := false
 	foundExecuteStart := false
+	foundDeniedResult := false
 	for _, event := range auditStore.snapshot() {
 		if event.Action == "permission_decision" && event.Decision == corepkg.DecisionDeny && event.ReasonCode == policyReasonExplicitDeny {
 			foundPermissionDecision = true
+			if got := event.Metadata["sandbox_enabled"]; got != "true" {
+				t.Fatalf("expected deny permission_decision sandbox_enabled=true, got %q", got)
+			}
+			if got := event.Metadata["sandbox_mode"]; got != "best_effort" {
+				t.Fatalf("expected deny permission_decision sandbox_mode=best_effort, got %q", got)
+			}
+			if got := event.Metadata["sandbox_required_capable"]; got != "true" && got != "false" {
+				t.Fatalf("expected deny permission_decision sandbox_required_capable boolean text, got %q", got)
+			}
 		}
 		if event.Action == "tool_execute_start" && event.Metadata["tool_name"] == "blocked_tool" {
 			foundExecuteStart = true
+		}
+		if event.Action == "tool_execute_result" && event.Metadata["tool_name"] == "blocked_tool" && event.Result == "denied" {
+			foundDeniedResult = true
+			if got := event.Metadata["sandbox_enabled"]; got != "true" {
+				t.Fatalf("expected denied tool_execute_result sandbox_enabled=true, got %q", got)
+			}
+			if got := event.Metadata["sandbox_mode"]; got != "best_effort" {
+				t.Fatalf("expected denied tool_execute_result sandbox_mode=best_effort, got %q", got)
+			}
+			if got := event.Metadata["sandbox_required_capable"]; got != "true" && got != "false" {
+				t.Fatalf("expected denied tool_execute_result sandbox_required_capable boolean text, got %q", got)
+			}
 		}
 	}
 	if !foundPermissionDecision {
@@ -136,6 +160,9 @@ func TestRunPromptPolicyGatewayDeniesToolBeforeExecutor(t *testing.T) {
 	}
 	if foundExecuteStart {
 		t.Fatal("did not expect tool_execute_start audit event for denied tool")
+	}
+	if !foundDeniedResult {
+		t.Fatal("expected denied tool_execute_result audit event for blocked tool")
 	}
 }
 
@@ -197,11 +224,13 @@ func TestRunPromptPolicyGatewayAskRequestsApprovalAndExecutesTool(t *testing.T) 
 	runner := NewRunner(Options{
 		Workspace: workspace,
 		Config: config.Config{
-			Provider:       config.ProviderConfig{Type: "openai-compatible", Model: "test-model"},
-			MaxIterations:  3,
-			Stream:         false,
-			TokenQuota:     generousTokenQuota,
-			ApprovalPolicy: "on-request",
+			Provider:          config.ProviderConfig{Type: "openai-compatible", Model: "test-model"},
+			MaxIterations:     3,
+			Stream:            false,
+			TokenQuota:        generousTokenQuota,
+			ApprovalPolicy:    "on-request",
+			SandboxEnabled:    true,
+			SystemSandboxMode: "best_effort",
 		},
 		Client:   client,
 		Store:    store,
@@ -248,12 +277,39 @@ func TestRunPromptPolicyGatewayAskRequestsApprovalAndExecutesTool(t *testing.T) 
 	for _, event := range auditStore.snapshot() {
 		if event.Action == "permission_decision" && event.Decision == corepkg.DecisionAsk && event.ReasonCode == policyReasonRiskRule {
 			foundPermissionDecisionAsk = true
+			if got := event.Metadata["sandbox_enabled"]; got != "true" {
+				t.Fatalf("expected ask permission_decision sandbox_enabled=true, got %q", got)
+			}
+			if got := event.Metadata["sandbox_mode"]; got != "best_effort" {
+				t.Fatalf("expected ask permission_decision sandbox_mode=best_effort, got %q", got)
+			}
+			if got := event.Metadata["sandbox_required_capable"]; got != "true" && got != "false" {
+				t.Fatalf("expected ask permission_decision sandbox_required_capable boolean text, got %q", got)
+			}
 		}
 		if event.Action == "tool_execute_start" && event.Metadata["tool_name"] == "ask_tool" {
 			foundExecuteStart = true
+			if got := event.Metadata["sandbox_enabled"]; got != "true" {
+				t.Fatalf("expected ask tool_execute_start sandbox_enabled=true, got %q", got)
+			}
+			if got := event.Metadata["sandbox_mode"]; got != "best_effort" {
+				t.Fatalf("expected ask tool_execute_start sandbox_mode=best_effort, got %q", got)
+			}
+			if got := event.Metadata["sandbox_required_capable"]; got != "true" && got != "false" {
+				t.Fatalf("expected ask tool_execute_start sandbox_required_capable boolean text, got %q", got)
+			}
 		}
 		if event.Action == "tool_execute_result" && event.Metadata["tool_name"] == "ask_tool" && event.Result == "ok" {
 			foundExecuteResult = true
+			if got := event.Metadata["sandbox_enabled"]; got != "true" {
+				t.Fatalf("expected ask tool_execute_result sandbox_enabled=true, got %q", got)
+			}
+			if got := event.Metadata["sandbox_mode"]; got != "best_effort" {
+				t.Fatalf("expected ask tool_execute_result sandbox_mode=best_effort, got %q", got)
+			}
+			if got := event.Metadata["sandbox_required_capable"]; got != "true" && got != "false" {
+				t.Fatalf("expected ask tool_execute_result sandbox_required_capable boolean text, got %q", got)
+			}
 		}
 	}
 	if !foundPermissionDecisionAsk {

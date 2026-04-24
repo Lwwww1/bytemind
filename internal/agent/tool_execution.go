@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,17 @@ import (
 	"bytemind/internal/tools"
 )
 
+type sandboxAuditContext struct {
+	Enabled         bool
+	Mode            string
+	Backend         string
+	RequiredCapable bool
+	CapabilityLevel string
+	Fallback        bool
+	Status          string
+	FallbackReason  string
+}
+
 func (e *defaultEngine) executeToolCall(
 	ctx context.Context,
 	sess *session.Session,
@@ -28,6 +41,7 @@ func (e *defaultEngine) executeToolCall(
 	allowedTools map[string]struct{},
 	deniedTools map[string]struct{},
 	approval tools.ApprovalHandler,
+	sandboxAudit sandboxAuditContext,
 ) error {
 	if e == nil || e.runner == nil {
 		return fmt.Errorf("agent engine is unavailable")
@@ -46,6 +60,7 @@ func (e *defaultEngine) executeToolCall(
 
 	traceID := buildToolTraceID(call)
 	sessionID := corepkg.SessionID(sess.ID)
+	sandboxAudit = normalizeSandboxAuditContext(sandboxAudit)
 
 	decision, err := runner.policyGateway.DecideTool(ctx, ToolDecisionInput{
 		ToolName:       call.Function.Name,
@@ -57,6 +72,11 @@ func (e *defaultEngine) executeToolCall(
 	if err != nil {
 		return err
 	}
+	permissionMetadata := map[string]string{
+		"tool_name": call.Function.Name,
+		"reason":    decision.Reason,
+	}
+	appendSandboxAuditContext(permissionMetadata, sandboxAudit)
 	runner.appendAudit(ctx, storagepkg.AuditEvent{
 		SessionID:  sessionID,
 		TraceID:    traceID,
@@ -65,14 +85,11 @@ func (e *defaultEngine) executeToolCall(
 		Decision:   decision.Decision,
 		ReasonCode: decision.ReasonCode,
 		RiskLevel:  decision.RiskLevel,
-		Metadata: map[string]string{
-			"tool_name": call.Function.Name,
-			"reason":    decision.Reason,
-		},
+		Metadata:   permissionMetadata,
 	})
 
 	if decision.Decision == corepkg.DecisionDeny {
-		return e.handleRejectedToolCall(ctx, sess, call, out, decision)
+		return e.handleRejectedToolCall(ctx, sess, call, out, decision, sandboxAudit)
 	}
 
 	runner.emit(Event{
@@ -81,57 +98,73 @@ func (e *defaultEngine) executeToolCall(
 		ToolName:      call.Function.Name,
 		ToolArguments: call.Function.Arguments,
 	})
+	sandboxLeaseID := fmt.Sprintf("session-%s", sess.ID)
+	sandboxRunID := fmt.Sprintf("trace-%s", traceID)
+	startMetadata := map[string]string{
+		"tool_name":        call.Function.Name,
+		"sandbox_lease_id": sandboxLeaseID,
+		"sandbox_run_id":   sandboxRunID,
+	}
+	appendSandboxAuditContext(startMetadata, sandboxAudit)
 	runner.appendAudit(ctx, storagepkg.AuditEvent{
 		SessionID: sessionID,
 		TraceID:   traceID,
 		Actor:     "agent",
 		Action:    "tool_execute_start",
-		Metadata: map[string]string{
-			"tool_name": call.Function.Name,
-		},
+		Metadata:  startMetadata,
 	})
 	if out != nil {
 		_, _ = io.WriteString(out, ansiBold+ansiCyan+"tool>"+ansiReset+" "+call.Function.Name+"\n")
 	}
 
 	execStartedAt := time.Now()
+	runtimeMetadata := map[string]string{
+		"tool_name": call.Function.Name,
+	}
+	appendSandboxAuditContext(runtimeMetadata, sandboxAudit)
 	execution, runtimeErr := runner.runtime.RunSync(ctx, RuntimeTaskRequest{
 		SessionID: sessionID,
 		TraceID:   traceID,
 		Name:      call.Function.Name,
 		Kind:      "tool",
-		Metadata: map[string]string{
-			"tool_name": call.Function.Name,
-		},
+		Metadata:  runtimeMetadata,
 		Execute: func(execCtx context.Context) ([]byte, error) {
 			sandboxRoots := buildSandboxRoots(runner.workspace, runner.config.WritableRoots)
 			output, err := runner.executor.ExecuteForMode(execCtx, runMode, call.Function.Name, call.Function.Arguments, &tools.ExecutionContext{
-				Workspace:        runner.workspace,
-				WritableRoots:    runner.config.WritableRoots,
-				ApprovalPolicy:   runner.config.ApprovalPolicy,
-				ApprovalMode:     runner.config.ApprovalMode,
-				AwayPolicy:       runner.config.AwayPolicy,
-				SandboxEnabled:   runner.config.SandboxEnabled,
-				LeaseID:          fmt.Sprintf("session-%s", sess.ID),
-				RunID:            fmt.Sprintf("trace-%s", traceID),
-				FSRead:           append([]string(nil), sandboxRoots...),
-				FSWrite:          append([]string(nil), sandboxRoots...),
-				ExecAllowlist:    toSandboxExecRules(runner.config.ExecAllowlist),
-				NetworkAllowlist: toSandboxNetworkRules(runner.config.NetworkAllowlist),
-				Approval:         approval,
-				Session:          sess,
-				TaskManager:      runner.taskManager,
-				Extensions:       runner.extensions,
-				Mode:             runMode,
-				Stdin:            runner.stdin,
-				Stdout:           runner.stdout,
-				AllowedTools:     allowedTools,
-				DeniedTools:      deniedTools,
+				Workspace:         runner.workspace,
+				WritableRoots:     runner.config.WritableRoots,
+				ApprovalPolicy:    runner.config.ApprovalPolicy,
+				ApprovalMode:      runner.config.ApprovalMode,
+				AwayPolicy:        runner.config.AwayPolicy,
+				SandboxEnabled:    runner.config.SandboxEnabled,
+				SystemSandboxMode: runner.config.SystemSandboxMode,
+				LeaseID:           sandboxLeaseID,
+				RunID:             sandboxRunID,
+				FSRead:            append([]string(nil), sandboxRoots...),
+				FSWrite:           append([]string(nil), sandboxRoots...),
+				ExecAllowlist:     toSandboxExecRules(runner.config.ExecAllowlist),
+				NetworkAllowlist:  toSandboxNetworkRules(runner.config.NetworkAllowlist),
+				Approval:          approval,
+				Session:           sess,
+				TaskManager:       runner.taskManager,
+				Extensions:        runner.extensions,
+				Mode:              runMode,
+				Stdin:             runner.stdin,
+				Stdout:            runner.stdout,
+				AllowedTools:      allowedTools,
+				DeniedTools:       deniedTools,
 			})
 			return []byte(output), err
 		},
 		OnTaskStateChanged: func(task runtimepkg.Task) {
-			runner.appendTaskStateAudit(ctx, sessionID, traceID, call.Function.Name, task)
+			runner.appendTaskStateAudit(
+				ctx,
+				sessionID,
+				traceID,
+				call.Function.Name,
+				sandboxAudit,
+				task,
+			)
 		},
 	})
 
@@ -189,12 +222,16 @@ func (e *defaultEngine) executeToolCall(
 		auditResult = "error"
 	}
 	metadata := map[string]string{
-		"tool_name": call.Function.Name,
-		"error":     errText,
+		"tool_name":        call.Function.Name,
+		"error":            errText,
+		"sandbox_lease_id": sandboxLeaseID,
+		"sandbox_run_id":   sandboxRunID,
 	}
+	appendSandboxAuditContext(metadata, sandboxAudit)
 	if execution.Result.ErrorCode != "" {
 		metadata["error_code"] = execution.Result.ErrorCode
 	}
+	appendSystemSandboxAuditMetadata(metadata, result)
 	runner.appendAudit(ctx, storagepkg.AuditEvent{
 		SessionID: sessionID,
 		TaskID:    execution.TaskID,
@@ -252,11 +289,13 @@ func (e *defaultEngine) handleRejectedToolCall(
 	call llm.ToolCall,
 	out io.Writer,
 	decision ToolDecision,
+	sandboxAudit sandboxAuditContext,
 ) error {
 	if e == nil || e.runner == nil {
 		return fmt.Errorf("agent engine is unavailable")
 	}
 	runner := e.runner
+	sandboxAudit = normalizeSandboxAuditContext(sandboxAudit)
 
 	errorText := fmt.Sprintf("tool %q blocked by policy (%s): %s", call.Function.Name, decision.ReasonCode, decision.Reason)
 	if decision.ReasonCode == policyReasonExplicitDeny {
@@ -291,16 +330,18 @@ func (e *defaultEngine) handleRejectedToolCall(
 		},
 	})
 
+	deniedMetadata := map[string]string{
+		"tool_name": call.Function.Name,
+		"error":     errorText,
+		"decision":  string(decision.Decision),
+	}
+	appendSandboxAuditContext(deniedMetadata, sandboxAudit)
 	runner.appendAudit(ctx, storagepkg.AuditEvent{
 		SessionID: corepkg.SessionID(sess.ID),
 		Actor:     "agent",
 		Action:    "tool_execute_result",
 		Result:    "denied",
-		Metadata: map[string]string{
-			"tool_name": call.Function.Name,
-			"error":     errorText,
-			"decision":  string(decision.Decision),
-		},
+		Metadata:  deniedMetadata,
 	})
 
 	toolMessage := llm.NewToolResultMessage(call.ID, result)
@@ -325,9 +366,10 @@ func (r *Runner) executeToolCall(
 	allowedTools map[string]struct{},
 	deniedTools map[string]struct{},
 	approval tools.ApprovalHandler,
+	sandboxAudit sandboxAuditContext,
 ) error {
 	engine := &defaultEngine{runner: r}
-	return engine.executeToolCall(ctx, sess, runMode, call, out, allowedTools, deniedTools, approval)
+	return engine.executeToolCall(ctx, sess, runMode, call, out, allowedTools, deniedTools, approval, sandboxAudit)
 }
 
 func (r *Runner) toolSafetyClass(name string) tools.SafetyClass {
@@ -341,9 +383,10 @@ func (r *Runner) handleRejectedToolCall(
 	call llm.ToolCall,
 	out io.Writer,
 	decision ToolDecision,
+	sandboxAudit sandboxAuditContext,
 ) error {
 	engine := &defaultEngine{runner: r}
-	return engine.handleRejectedToolCall(ctx, sess, call, out, decision)
+	return engine.handleRejectedToolCall(ctx, sess, call, out, decision, sandboxAudit)
 }
 
 func classifyToolExecutionError(err error) (status, reasonCode string) {
@@ -424,4 +467,104 @@ func toSandboxNetworkRules(rules []configpkg.NetworkAllowRule) []sandboxpkg.Netw
 		})
 	}
 	return out
+}
+
+func appendSystemSandboxAuditMetadata(metadata map[string]string, result string) {
+	if len(metadata) == 0 || strings.TrimSpace(result) == "" {
+		return
+	}
+	var payload struct {
+		SystemSandbox *struct {
+			Mode            string `json:"mode"`
+			Backend         string `json:"backend"`
+			Status          string `json:"status"`
+			RequiredCapable bool   `json:"required_capable"`
+			CapabilityLevel string `json:"capability_level"`
+			Fallback        bool   `json:"fallback"`
+			FallbackReason  string `json:"fallback_reason"`
+		} `json:"system_sandbox"`
+	}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil || payload.SystemSandbox == nil {
+		return
+	}
+	systemSandbox := payload.SystemSandbox
+	if mode := strings.TrimSpace(systemSandbox.Mode); mode != "" {
+		metadata["sandbox_mode"] = mode
+	}
+	if backend := strings.TrimSpace(systemSandbox.Backend); backend != "" {
+		metadata["sandbox_backend"] = backend
+	}
+	if status := strings.TrimSpace(systemSandbox.Status); status != "" {
+		metadata["sandbox_status"] = status
+	}
+	metadata["sandbox_required_capable"] = strconv.FormatBool(systemSandbox.RequiredCapable)
+	if capability := strings.TrimSpace(systemSandbox.CapabilityLevel); capability != "" {
+		metadata["sandbox_capability_level"] = capability
+	}
+	metadata["sandbox_fallback"] = strconv.FormatBool(systemSandbox.Fallback)
+	if reason := strings.TrimSpace(systemSandbox.FallbackReason); reason != "" {
+		metadata["sandbox_fallback_reason"] = reason
+	}
+}
+
+func sandboxAuditFromSetup(setup runPromptSetup, sandboxEnabled bool, configuredMode string) sandboxAuditContext {
+	context := sandboxAuditContext{
+		Enabled:         sandboxEnabled,
+		Mode:            strings.TrimSpace(configuredMode),
+		Backend:         strings.TrimSpace(setup.SystemSandboxBackend),
+		RequiredCapable: setup.SystemSandboxRequiredCapable,
+		CapabilityLevel: strings.TrimSpace(setup.SystemSandboxCapabilityLevel),
+		Fallback:        setup.SystemSandboxFallback,
+		FallbackReason:  strings.TrimSpace(setup.SystemSandboxStatus),
+	}
+	if context.Fallback {
+		context.Status = "fallback"
+	} else if !context.Enabled || strings.EqualFold(context.Mode, "off") {
+		context.Status = "off"
+		context.FallbackReason = ""
+	} else if strings.EqualFold(context.Backend, "none") {
+		context.Status = "inactive"
+		context.FallbackReason = ""
+	} else {
+		context.Status = "active"
+		context.FallbackReason = ""
+	}
+	return normalizeSandboxAuditContext(context)
+}
+
+func normalizeSandboxAuditContext(context sandboxAuditContext) sandboxAuditContext {
+	context.Mode = strings.TrimSpace(context.Mode)
+	if context.Mode == "" {
+		context.Mode = "off"
+	}
+	context.Backend = strings.TrimSpace(context.Backend)
+	if context.Backend == "" {
+		context.Backend = "none"
+	}
+	context.CapabilityLevel = strings.TrimSpace(context.CapabilityLevel)
+	if context.CapabilityLevel == "" {
+		context.CapabilityLevel = "none"
+	}
+	context.Status = strings.TrimSpace(context.Status)
+	context.FallbackReason = strings.TrimSpace(context.FallbackReason)
+	return context
+}
+
+func appendSandboxAuditContext(metadata map[string]string, context sandboxAuditContext) {
+	if len(metadata) == 0 {
+		return
+	}
+	context = normalizeSandboxAuditContext(context)
+	metadata["sandbox_enabled"] = strconv.FormatBool(context.Enabled)
+	metadata["sandbox_mode"] = context.Mode
+	metadata["sandbox_backend"] = context.Backend
+	metadata["sandbox_required_capable"] = strconv.FormatBool(context.RequiredCapable)
+	metadata["sandbox_capability_level"] = context.CapabilityLevel
+	metadata["sandbox_fallback"] = strconv.FormatBool(context.Fallback)
+	if context.Status != "" {
+		metadata["sandbox_status"] = context.Status
+	}
+	if context.FallbackReason != "" {
+		metadata["sandbox_fallback_reason"] = context.FallbackReason
+	}
 }

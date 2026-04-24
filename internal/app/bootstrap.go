@@ -18,20 +18,25 @@ import (
 	"bytemind/internal/tools"
 )
 
+var validateSystemSandboxRuntime = tools.ValidateSystemSandboxRuntime
+var resolveSystemSandboxRuntimeStatus = tools.ResolveSystemSandboxRuntimeStatus
+
 // BootstrapRequest declares dependencies and runtime overrides needed to
 // assemble the application runtime for CLI/TUI execution.
 type BootstrapRequest struct {
-	Workspace             string
-	ConfigPath            string
-	ModelOverride         string
-	SessionID             string
-	StreamOverride        string
-	ApprovalModeOverride  string
-	AwayPolicyOverride    string
-	MaxIterationsOverride int
-	RequireAPIKey         bool
-	Stdin                 io.Reader
-	Stdout                io.Writer
+	Workspace                 string
+	ConfigPath                string
+	ModelOverride             string
+	SessionID                 string
+	StreamOverride            string
+	SandboxEnabledOverride    string
+	SystemSandboxModeOverride string
+	ApprovalModeOverride      string
+	AwayPolicyOverride        string
+	MaxIterationsOverride     int
+	RequireAPIKey             bool
+	Stdin                     io.Reader
+	Stdout                    io.Writer
 }
 
 // Runtime is the assembled runtime bundle consumed by command entrypoints.
@@ -51,19 +56,29 @@ func Bootstrap(req BootstrapRequest) (Runtime, error) {
 	}
 
 	cfg, err := LoadRuntimeConfig(ConfigRequest{
-		Workspace:             workspace,
-		ConfigPath:            req.ConfigPath,
-		ModelOverride:         req.ModelOverride,
-		StreamOverride:        req.StreamOverride,
-		ApprovalModeOverride:  req.ApprovalModeOverride,
-		AwayPolicyOverride:    req.AwayPolicyOverride,
-		MaxIterationsOverride: req.MaxIterationsOverride,
+		Workspace:                 workspace,
+		ConfigPath:                req.ConfigPath,
+		ModelOverride:             req.ModelOverride,
+		StreamOverride:            req.StreamOverride,
+		SandboxEnabledOverride:    req.SandboxEnabledOverride,
+		SystemSandboxModeOverride: req.SystemSandboxModeOverride,
+		ApprovalModeOverride:      req.ApprovalModeOverride,
+		AwayPolicyOverride:        req.AwayPolicyOverride,
+		MaxIterationsOverride:     req.MaxIterationsOverride,
 	})
 	if err != nil {
 		return Runtime{}, err
 	}
 	if req.StreamOverride == "" {
 		req.StreamOverride = strings.TrimSpace(strconv.FormatBool(cfg.Stream))
+	}
+	if err := validateSystemSandboxRuntime(cfg.SandboxEnabled, cfg.SystemSandboxMode); err != nil {
+		return Runtime{}, err
+	}
+	if status, statusErr := resolveSystemSandboxRuntimeStatus(cfg.SandboxEnabled, cfg.SystemSandboxMode); statusErr != nil {
+		return Runtime{}, statusErr
+	} else if status.Fallback && strings.TrimSpace(status.Message) != "" {
+		log.Printf("bootstrap: %s", status.Message)
 	}
 
 	apiKey := cfg.Provider.ResolveAPIKey()

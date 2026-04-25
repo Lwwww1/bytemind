@@ -95,12 +95,22 @@ var semanticColors = semanticColorTokens{
 }
 
 var (
+<<<<<<< HEAD
 	colorPanel        = semanticColors.Panel
 	colorBorder       = semanticColors.Border
 	colorAccent       = semanticColors.Accent
 	colorThinkingBlue = semanticColors.Thinking
 	colorThinkingDone = semanticColors.ThinkingDone
 	colorCard         = semanticColors.SurfaceAlt
+=======
+	colorPanel        = lipgloss.Color("#0B0D12")
+	colorLandingPanel = lipgloss.Color("#060B1A")
+	colorBorder       = lipgloss.Color("#314156")
+	colorAccent       = lipgloss.Color("#6CB6FF")
+	colorThinkingBlue = lipgloss.Color("#6CB6FF")
+	colorThinkingDone = lipgloss.Color("#93A4B8")
+	colorCard         = lipgloss.Color("#171717")
+>>>>>>> 8172d27 (feat(tui): add landing renderer primitives and animation styles)
 	colorHotPink      = lipgloss.Color("#F05AA6")
 	colorThinking     = lipgloss.Color("#9D8AC8")
 	colorUser         = semanticColors.User
@@ -129,31 +139,75 @@ var (
 			Padding(0, 0)
 
 	landingCanvasStyle = lipgloss.NewStyle().
+<<<<<<< HEAD
 				Background(semanticColors.Panel)
+=======
+				Background(colorLandingPanel)
+>>>>>>> 8172d27 (feat(tui): add landing renderer primitives and animation styles)
 
-	landingLogoByteStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#7A7A7A", Dark: "#8A8A8A"}).
-				Bold(false).
-				Align(lipgloss.Center)
-
-	landingLogoMindStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FFFFFF")).
+	landingLogoStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FF8A62")).
 				Bold(true).
 				Align(lipgloss.Center)
 
-	landingLogoStyle = landingLogoMindStyle
+	landingLogoPixelStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#FF8A62")).
+				Foreground(lipgloss.Color("#FF8A62"))
+
+	landingLogoPixelSoftStyle = lipgloss.NewStyle().
+					Background(lipgloss.Color("#FFAA7E")).
+					Foreground(lipgloss.Color("#FFAA7E"))
+
+	landingLogoPixelGlowStyle = lipgloss.NewStyle().
+					Background(lipgloss.Color("#FFC8A6")).
+					Foreground(lipgloss.Color("#FFC8A6"))
+
+	landingLogoFrameStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#C5D6FF")).
+				Faint(true)
+
+	landingLogoFrameSoftStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#D6E4FF"))
+
+	landingLogoFrameGlowStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#EAF3FF")).
+					Bold(true)
+
+	landingSubtitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#B7D38A")).
+				Background(colorLandingPanel).
+				Align(lipgloss.Center)
 
 	landingInputStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.NormalBorder()).
+<<<<<<< HEAD
 				BorderForeground(semanticColors.Border).
 				Background(semanticColors.Surface).
 				Padding(0, 2)
+=======
+				BorderForeground(lipgloss.Color("#73C6FF")).
+				Background(lipgloss.Color("#000000")).
+				Padding(0, 0)
+
+	landingInputEditorSurfaceStyle = lipgloss.NewStyle().
+					Background(lipgloss.Color("#000000")).
+					Foreground(lipgloss.Color("#E9F2FF"))
+>>>>>>> 8172d27 (feat(tui): add landing renderer primitives and animation styles)
 
 	landingPlaceholderStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#7C7C7C"))
+				Foreground(lipgloss.Color("#6478A7"))
 
 	landingInputValueStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#EAEAEA"))
+				Foreground(lipgloss.Color("#E9F2FF"))
+
+	landingInputCaretStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Bold(true)
+
+	landingInputCaretOverlayStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#FFFFFF")).
+					Bold(true).
+					Underline(true)
 
 	landingModeStyle = lipgloss.NewStyle().
 				Foreground(semanticColors.Accent).
@@ -163,7 +217,53 @@ var (
 				Foreground(lipgloss.Color("#B9B9B9"))
 
 	landingHintStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "246", Dark: "240"})
+				Foreground(lipgloss.Color("#8FA2CC")).
+				Background(colorLandingPanel)
+
+	landingActionKeyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#D7E8FF")).
+				Background(colorLandingPanel).
+				Bold(true)
+
+	landingActionLabelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#8EA2C8")).
+				Background(colorLandingPanel)
+
+	landingActionDividerStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#6A7FAE")).
+					Background(colorLandingPanel)
+
+	landingModeBuildActiveStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#6CB6FF")).
+					Background(colorLandingPanel).
+					Bold(true)
+
+	landingModePlanActiveStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#A78BFA")).
+					Background(colorLandingPanel).
+					Bold(true)
+
+	landingModeInactiveStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#A0AEC0")).
+					Background(colorLandingPanel)
+
+	landingModeAwayActiveStyle = lipgloss.NewStyle().
+					Foreground(colorWarningBright).
+					Background(colorLandingPanel).
+					Bold(true)
+
+	landingShortcutKeyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#EAF2FF")).
+				Background(colorLandingPanel).
+				Bold(true)
+
+	landingShortcutLabelStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#AAB8D4")).
+					Background(colorLandingPanel)
+
+	landingShortcutDividerStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#6A7FAE")).
+					Background(colorLandingPanel)
 
 	landingTipDotStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#F59E0B"))

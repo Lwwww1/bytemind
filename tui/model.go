@@ -51,8 +51,12 @@ const (
 	conversationViewportZoneID = "bytemind:conversation:viewport"
 	inputEditorZoneID          = "bytemind:input:editor"
 	thinkingSpinnerFPS         = 80 * time.Millisecond
+<<<<<<< HEAD
 	pasteAggregateDebounce     = 120 * time.Millisecond
 	pasteBurstSettleDelay      = 120 * time.Millisecond
+=======
+	landingGlowTickInterval    = 50 * time.Millisecond
+>>>>>>> 8172d27 (feat(tui): add landing renderer primitives and animation styles)
 )
 
 type footerShortcutHint struct {
@@ -235,9 +239,13 @@ type mouseSelectionScrollTickMsg struct {
 	ID int
 }
 
+<<<<<<< HEAD
 type pasteFinalizeMsg struct {
 	ID int
 }
+=======
+type landingGlowTickMsg struct{}
+>>>>>>> 8172d27 (feat(tui): add landing renderer primitives and animation styles)
 
 type pasteTransactionState struct {
 	Active             bool
@@ -428,6 +436,7 @@ type model struct {
 	activeRunID                int
 	startupGuide               StartupGuide
 	mouseYOffset               int
+	landingGlowStep            int
 }
 
 func newModel(opts Options) model {
@@ -577,7 +586,14 @@ func (m model) Init() tea.Cmd {
 		waitForAsync(m.async),
 		m.tokenUsage.tickCmd(),
 		m.loadSessionsCmd(),
+		landingGlowTickCmd(),
 	)
+}
+
+func landingGlowTickCmd() tea.Cmd {
+	return tea.Tick(landingGlowTickInterval, func(time.Time) tea.Msg {
+		return landingGlowTickMsg{}
+	})
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -788,6 +804,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tokenMonitorTickMsg:
 		cmd, _ := m.tokenUsage.Update(msg)
 		return m, cmd
+	case landingGlowTickMsg:
+		m.landingGlowStep = (m.landingGlowStep + 1) % 2048
+		return m, landingGlowTickCmd()
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
@@ -1068,35 +1087,10 @@ func (m model) mouseOverLandingInput(y int) bool {
 	if m.height <= 0 {
 		return false
 	}
-	logoHeight := lipgloss.Height(landingLogoStyle.Render(strings.Join([]string{
-		"    ____        __                      _           __",
-		"   / __ )__  __/ /____  ____ ___  ____(_)___  ____/ /",
-		"  / __  / / / / __/ _ \\/ __ `__ \\/ __/ / __ \\/ __  / ",
-		" / /_/ / /_/ / /_/  __/ / / / / / /_/ / / / / /_/ /  ",
-		"/_____/\\__, /\\__/\\___/_/ /_/ /_/\\__/_/_/ /_/\\__,_/   ",
-		"      /____/                                          ",
-	}, "\n")))
-	modeTabsHeight := lipgloss.Height(m.renderModeTabs())
-	overlayHeight := 0
-	if m.startupGuide.Active {
-		overlayHeight = lipgloss.Height(m.renderStartupGuidePanel()) + 1
-	} else if m.promptSearchOpen {
-		overlayHeight = lipgloss.Height(m.renderPromptSearchPalette()) + 1
-	} else if m.mentionOpen {
-		overlayHeight = lipgloss.Height(m.renderMentionPalette()) + 1
-	} else if m.commandOpen {
-		overlayHeight = lipgloss.Height(m.renderCommandPalette()) + 1
-	}
-	inputHeight := lipgloss.Height(
-		landingInputStyle.Copy().
-			BorderForeground(m.modeAccentColor()).
-			Width(m.landingInputShellWidth()).
-			Render(m.input.View()),
-	)
-	hintHeight := lipgloss.Height(renderFooterShortcutHints())
-	contentHeight := logoHeight + 1 + modeTabsHeight + 1 + overlayHeight + inputHeight + 1 + hintHeight
+	contentHeight := m.landingContentHeight()
 	contentTop := max(0, (m.height-contentHeight)/2)
-	inputTop := contentTop + logoHeight + 1 + modeTabsHeight + 1 + overlayHeight
+	inputTop := m.landingInputTop(contentTop)
+	inputHeight := lipgloss.Height(m.renderLandingInputBox(false))
 	inputBottom := inputTop + max(1, inputHeight) - 1
 	return y >= inputTop && y <= inputBottom
 }

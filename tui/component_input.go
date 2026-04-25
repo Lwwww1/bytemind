@@ -3,12 +3,16 @@ package tui
 import (
 	"strings"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 func (m model) landingInputShellWidth() int {
-	return min(72, max(36, m.width/2))
+	maxFit := max(52, m.width-16)
+	preferred := max(58, (m.width*2)/3)
+	maxPreferred := 104
+	return clamp(min(preferred, maxPreferred), 52, maxFit)
 }
 
 func (m model) modeAccentColor() lipgloss.Color {
@@ -25,7 +29,7 @@ func (m model) chatInputContentWidth() int {
 
 func (m model) landingInputContentWidth() int {
 	width := m.landingInputShellWidth() - landingInputStyle.GetHorizontalFrameSize()
-	return max(24, width)
+	return max(44, width)
 }
 
 func (m model) inputBorderStyle() lipgloss.Style {
@@ -33,13 +37,66 @@ func (m model) inputBorderStyle() lipgloss.Style {
 }
 
 func (m *model) syncInputStyle() {
+	m.applyInputThemeForScreen()
 	if m.startupGuide.Active {
 		m.input.Placeholder = startupGuideInputPlaceholder(m.startupGuide.CurrentField)
+	} else if m.screen == screenLanding {
+		m.input.Placeholder = "Let's get started..."
 	} else {
 		m.input.Placeholder = "Ask Bytemind to inspect, change, or verify this workspace..."
 	}
 	m.input.Prompt = ""
 	setInputHeightSafe(&m.input, 2)
+}
+
+func (m *model) applyInputThemeForScreen() {
+	if m == nil {
+		return
+	}
+	if m.screen == screenLanding {
+		m.applyLandingInputTheme()
+		return
+	}
+	m.applyDefaultInputTheme()
+}
+
+func (m *model) applyDefaultInputTheme() {
+	if m == nil {
+		return
+	}
+	focused, blurred := textarea.DefaultStyles()
+	m.input.FocusedStyle = focused
+	m.input.BlurredStyle = blurred
+	_ = m.input.Cursor.SetMode(cursor.CursorBlink)
+}
+
+func (m *model) applyLandingInputTheme() {
+	if m == nil {
+		return
+	}
+	bg := lipgloss.Color("#000000")
+	text := lipgloss.Color("#E9F2FF")
+	placeholder := lipgloss.Color("#7D91BA")
+	cursorLine := bg
+	cursorBg := lipgloss.Color("#FFFFFF")
+	cursorFg := lipgloss.Color("#000000")
+	prompt := lipgloss.Color("#8CCEFF")
+
+	focused, blurred := textarea.DefaultStyles()
+	for _, style := range []*textarea.Style{&focused, &blurred} {
+		style.Base = style.Base.Background(bg).Foreground(text)
+		style.CursorLine = style.CursorLine.Background(cursorLine).Foreground(text)
+		style.CursorLineNumber = style.CursorLineNumber.Background(cursorLine).Foreground(text)
+		style.EndOfBuffer = style.EndOfBuffer.Background(bg).Foreground(text)
+		style.LineNumber = style.LineNumber.Background(bg).Foreground(text)
+		style.Placeholder = style.Placeholder.Background(bg).Foreground(placeholder)
+		style.Prompt = style.Prompt.Background(bg).Foreground(prompt)
+		style.Text = style.Text.Background(bg).Foreground(text)
+	}
+	m.input.FocusedStyle = focused
+	m.input.BlurredStyle = blurred
+	m.input.Cursor.Style = m.input.Cursor.Style.Background(cursorBg).Foreground(cursorFg).Bold(true)
+	_ = m.input.Cursor.SetMode(cursor.CursorHide)
 }
 
 func setInputHeightSafe(input *textarea.Model, height int) {

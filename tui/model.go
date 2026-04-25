@@ -51,12 +51,9 @@ const (
 	conversationViewportZoneID = "bytemind:conversation:viewport"
 	inputEditorZoneID          = "bytemind:input:editor"
 	thinkingSpinnerFPS         = 80 * time.Millisecond
-<<<<<<< HEAD
+	landingGlowTickInterval    = 50 * time.Millisecond
 	pasteAggregateDebounce     = 120 * time.Millisecond
 	pasteBurstSettleDelay      = 120 * time.Millisecond
-=======
-	landingGlowTickInterval    = 50 * time.Millisecond
->>>>>>> 8172d27 (feat(tui): add landing renderer primitives and animation styles)
 )
 
 type footerShortcutHint struct {
@@ -239,13 +236,11 @@ type mouseSelectionScrollTickMsg struct {
 	ID int
 }
 
-<<<<<<< HEAD
+type landingGlowTickMsg struct{}
+
 type pasteFinalizeMsg struct {
 	ID int
 }
-=======
-type landingGlowTickMsg struct{}
->>>>>>> 8172d27 (feat(tui): add landing renderer primitives and animation styles)
 
 type pasteTransactionState struct {
 	Active             bool

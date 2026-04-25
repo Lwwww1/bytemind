@@ -95,22 +95,13 @@ var semanticColors = semanticColorTokens{
 }
 
 var (
-<<<<<<< HEAD
 	colorPanel        = semanticColors.Panel
+	colorLandingPanel = lipgloss.Color("#060B1A")
 	colorBorder       = semanticColors.Border
 	colorAccent       = semanticColors.Accent
 	colorThinkingBlue = semanticColors.Thinking
 	colorThinkingDone = semanticColors.ThinkingDone
 	colorCard         = semanticColors.SurfaceAlt
-=======
-	colorPanel        = lipgloss.Color("#0B0D12")
-	colorLandingPanel = lipgloss.Color("#060B1A")
-	colorBorder       = lipgloss.Color("#314156")
-	colorAccent       = lipgloss.Color("#6CB6FF")
-	colorThinkingBlue = lipgloss.Color("#6CB6FF")
-	colorThinkingDone = lipgloss.Color("#93A4B8")
-	colorCard         = lipgloss.Color("#171717")
->>>>>>> 8172d27 (feat(tui): add landing renderer primitives and animation styles)
 	colorHotPink      = lipgloss.Color("#F05AA6")
 	colorThinking     = lipgloss.Color("#9D8AC8")
 	colorUser         = semanticColors.User
@@ -139,11 +130,7 @@ var (
 			Padding(0, 0)
 
 	landingCanvasStyle = lipgloss.NewStyle().
-<<<<<<< HEAD
-				Background(semanticColors.Panel)
-=======
 				Background(colorLandingPanel)
->>>>>>> 8172d27 (feat(tui): add landing renderer primitives and animation styles)
 
 	landingLogoStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#FF8A62")).
@@ -180,11 +167,6 @@ var (
 
 	landingInputStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.NormalBorder()).
-<<<<<<< HEAD
-				BorderForeground(semanticColors.Border).
-				Background(semanticColors.Surface).
-				Padding(0, 2)
-=======
 				BorderForeground(lipgloss.Color("#73C6FF")).
 				Background(lipgloss.Color("#000000")).
 				Padding(0, 0)
@@ -192,7 +174,6 @@ var (
 	landingInputEditorSurfaceStyle = lipgloss.NewStyle().
 					Background(lipgloss.Color("#000000")).
 					Foreground(lipgloss.Color("#E9F2FF"))
->>>>>>> 8172d27 (feat(tui): add landing renderer primitives and animation styles)
 
 	landingPlaceholderStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#6478A7"))

@@ -103,7 +103,7 @@ func formatMCPHelpText() string {
 		"- /mcp list",
 		"- /mcp show <id>",
 		"- Configure MCP servers by editing `.bytemind/mcp.json` in the workspace.",
-		"- Supported file shape: `{ \"enabled\": true, \"servers\": [...] }` or `{ \"mcp\": { ... } }`.",
+		"- Supported file shape: `{ \"enabled\": true, \"servers\": [...] }`.",
 		"- /mcp help",
 	}, "\n")
 }

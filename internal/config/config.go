@@ -48,7 +48,7 @@ type Config struct {
 	TokenQuota        int                   `json:"token_quota"`
 	TokenUsage        TokenUsageConfig      `json:"token_usage"`
 	ContextBudget     ContextBudgetConfig   `json:"context_budget"`
-	MCP               MCPConfig             `json:"mcp"`
+	MCP               MCPConfig             `json:"-"`
 }
 
 type UpdateCheckConfig struct {
@@ -198,6 +198,10 @@ func Default(workspace string) Config {
 }
 
 func Load(workspace, configPath string) (Config, error) {
+	return LoadWithMCPConfigPath(workspace, configPath, "")
+}
+
+func LoadWithMCPConfigPath(workspace, configPath, mcpConfigPath string) (Config, error) {
 	cfg := Default(workspace)
 
 	if strings.TrimSpace(configPath) != "" {
@@ -216,16 +220,27 @@ func Load(workspace, configPath string) (Config, error) {
 				return cfg, err
 			}
 		}
+
+		if projectConfig := resolveProjectConfigPath(workspace); projectConfig != "" {
+			if err := mergeConfigFromFile(projectConfig, &cfg); err != nil {
+				return cfg, err
+			}
+		}
+	}
+
+	if strings.TrimSpace(mcpConfigPath) != "" {
+		path, err := filepath.Abs(mcpConfigPath)
+		if err != nil {
+			return cfg, err
+		}
+		if err := mergeMCPConfigFromFile(path, &cfg.MCP); err != nil {
+			return cfg, err
+		}
+	} else {
 		if userMCPConfig, err := resolveUserMCPConfigPath(); err != nil {
 			return cfg, err
 		} else if userMCPConfig != "" {
 			if err := mergeMCPConfigFromFile(userMCPConfig, &cfg.MCP); err != nil {
-				return cfg, err
-			}
-		}
-
-		if projectConfig := resolveProjectConfigPath(workspace); projectConfig != "" {
-			if err := mergeConfigFromFile(projectConfig, &cfg); err != nil {
 				return cfg, err
 			}
 		}
@@ -342,11 +357,6 @@ func ensureDefaultConfigFile(home string) error {
 			CriticalRatio:    DefaultContextBudgetCriticalRatio,
 			MaxReactiveRetry: DefaultContextBudgetMaxReactiveRetry,
 		},
-		MCP: MCPConfig{
-			Enabled:        false,
-			SyncTTLSeconds: DefaultMCPSyncTTLSeconds,
-			Servers:        nil,
-		},
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -442,15 +452,14 @@ func mergeMCPConfigFromFile(path string, cfg *MCPConfig) error {
 		return nil
 	}
 
-	payload := data
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(data, &root); err == nil {
-		if nested, ok := root["mcp"]; ok && len(nested) > 0 {
-			payload = nested
+		if _, ok := root["mcp"]; ok {
+			return errors.New("mcp config files must use top-level MCP fields; move mcp.* to the root")
 		}
 	}
 
-	if err := json.Unmarshal(payload, cfg); err != nil {
+	if err := json.Unmarshal(data, cfg); err != nil {
 		return err
 	}
 	return nil

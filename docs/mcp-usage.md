@@ -13,7 +13,7 @@ Copy-Item mcp.example.json .bytemind/mcp.json
 
 然后把 `.bytemind/mcp.json` 中的 `GITHUB_PERSONAL_ACCESS_TOKEN` 改成你的真实 PAT。
 
-支持两种 JSON 结构：
+`.bytemind/mcp.json` 使用独立的顶层 MCP 配置结构：
 
 ```json
 {
@@ -38,26 +38,6 @@ Copy-Item mcp.example.json .bytemind/mcp.json
       "max_concurrency": 4
     }
   ]
-}
-```
-
-或：
-
-```json
-{
-  "mcp": {
-    "enabled": true,
-    "servers": [
-      {
-        "id": "filesystem",
-        "transport": {
-          "type": "stdio",
-          "command": "npx",
-          "args": ["-y", "@modelcontextprotocol/server-filesystem"]
-        }
-      }
-    ]
-  }
 }
 ```
 

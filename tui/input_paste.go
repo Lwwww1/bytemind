@@ -475,6 +475,16 @@ func (m *model) clearPasteConfirmPending() {
 	m.pasteSubmitGuardUntil = time.Time{}
 }
 
+func (m *model) releasePasteSubmitSuppression() {
+	if m == nil {
+		return
+	}
+	m.clearPasteConfirmPending()
+	m.lastPasteAt = time.Time{}
+	m.clearPasteBurstCapture()
+	m.clearPasteBurstCandidate()
+}
+
 func (m *model) hasActivePasteSession() bool {
 	return m != nil && m.pasteSession.active
 }
@@ -600,6 +610,7 @@ func (m model) handlePastePayload(payload string) (tea.Model, tea.Cmd) {
 		m.syncInputOverlays()
 		return m, nil
 	}
+	m.beginOrAppendPasteTransaction(cleaned, "paste-payload")
 	return m, m.ingestPasteFragment(cleaned, "paste-payload")
 }
 

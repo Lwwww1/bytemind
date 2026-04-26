@@ -1118,6 +1118,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.planActionOpen {
 		return m.handlePlanActionKey(msg)
 	}
+	if m.consumePasteEchoKey(msg) {
+		return m, nil
+	}
 
 	if m.shouldPromoteImplicitPasteCandidate(msg) {
 		return m, m.captureImplicitPasteCandidate(msg)
@@ -1128,6 +1131,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if fragment, source, ok := m.pasteFragmentFromKey(msg); ok {
+		if source == "paste-key" {
+			m.beginOrAppendPasteTransaction(fragment, source)
+		}
 		return m, m.ingestPasteFragment(fragment, source)
 	}
 
@@ -1263,16 +1269,27 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Prefer Ctrl+V image paste first. If clipboard has no image, fall through
 	// so regular terminal paste behavior can continue.
 	if ctrlVPasteDetected {
-		if note := m.handleEmptyClipboardPaste(); strings.TrimSpace(note) != "" {
-			m.statusNote = note
-			if strings.Contains(note, "Attached image from clipboard") {
-				m.syncInputOverlays()
-				return m, nil
+		beforeClipboard := m.input.Value()
+		clipboardNote := strings.TrimSpace(m.handleEmptyClipboardPaste())
+		if m.input.Value() != beforeClipboard {
+			if clipboardNote != "" {
+				m.statusNote = clipboardNote
 			}
-			if !isClipboardNoImageNote(note) {
-				m.syncInputOverlays()
-				return m, nil
+			m.syncInputOverlays()
+			return m, nil
+		}
+		if payload, ok := m.readClipboardTextForPaste(); ok {
+			m.beginPasteTransaction(payload, "ctrl+v")
+			if strings.TrimSpace(m.statusNote) == "" || isClipboardNoImageNote(clipboardNote) {
+				m.statusNote = "Pasted text from clipboard."
 			}
+			return m, m.ingestPasteFragment(payload, "ctrl+v")
+		}
+		if clipboardNote != "" {
+			m.clearPasteTransaction()
+			m.statusNote = clipboardNote
+			m.syncInputOverlays()
+			return m, nil
 		}
 	}
 
@@ -1598,7 +1615,7 @@ func (m model) handleSuppressedPasteEnter(rawValue string) (tea.Model, bool) {
 			}
 		}
 		if m.pasteConfirmPending {
-			m.clearPasteConfirmPending()
+			m.releasePasteSubmitSuppression()
 			m.statusNote = "Paste compressed. Press Enter again to send."
 		}
 		return m, true
@@ -1616,7 +1633,7 @@ func (m model) handleSuppressedPasteEnter(rawValue string) (tea.Model, bool) {
 		return m, true
 	}
 	if m.pasteConfirmPending {
-		m.clearPasteConfirmPending()
+		m.releasePasteSubmitSuppression()
 		m.statusNote = "Paste captured. Press Enter again to send."
 		return m, true
 	}

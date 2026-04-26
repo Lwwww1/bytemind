@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -166,13 +168,23 @@ func (g *stubRuntimeGateway) RunSync(_ context.Context, request RuntimeTaskReque
 	}, nil
 }
 
-func TestShouldExecuteToolDirectlyRoutesOnlyReadOnlyBuiltins(t *testing.T) {
-	for _, name := range []string{"list_files", "read_file", "search_text", "web_search", "web_fetch"} {
+func TestShouldExecuteToolDirectlyRoutesSynchronousBuiltins(t *testing.T) {
+	for _, name := range []string{
+		"list_files",
+		"read_file",
+		"search_text",
+		"web_search",
+		"web_fetch",
+		"write_file",
+		"replace_in_file",
+		"apply_patch",
+		"update_plan",
+	} {
 		if !shouldExecuteToolDirectly(name) {
 			t.Fatalf("expected %s to execute directly", name)
 		}
 	}
-	for _, name := range []string{"write_file", "replace_in_file", "apply_patch", "update_plan", "run_shell", "manager_probe"} {
+	for _, name := range []string{"run_shell", "manager_probe"} {
 		if shouldExecuteToolDirectly(name) {
 			t.Fatalf("expected %s to remain runtime-backed", name)
 		}
@@ -268,6 +280,195 @@ func TestRunPromptExecutesReadOnlyToolDirectly(t *testing.T) {
 	}
 	if resultEvent.TraceID != corepkg.TraceID("tool-direct-read") {
 		t.Fatalf("expected trace id %q, got %q", "tool-direct-read", resultEvent.TraceID)
+	}
+}
+
+func TestRunPromptExecutesWriteFileDirectly(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	auditStore := &toolExecutionAuditStore{}
+
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				ID:   "tool-direct-write",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name:      "write_file",
+					Arguments: `{"path":"x.txt","content":"hello"}`,
+				},
+			}},
+		},
+		{
+			Role:    llm.RoleAssistant,
+			Content: "done",
+		},
+	}}
+	gateway := &stubRuntimeGateway{}
+
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:       config.ProviderConfig{Model: "test-model"},
+			MaxIterations:  4,
+			Stream:         false,
+			ApprovalPolicy: "on-request",
+		},
+		Client:     client,
+		Store:      store,
+		Registry:   tools.DefaultRegistry(),
+		Runtime:    gateway,
+		AuditStore: auditStore,
+		Stdin:      strings.NewReader("y\n"),
+		Stdout:     io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "write file", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+
+	gateway.mu.Lock()
+	callCount := len(gateway.calls)
+	gateway.mu.Unlock()
+	if callCount != 0 {
+		t.Fatalf("expected write_file to bypass runtime gateway, got %d calls", callCount)
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, "x.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("unexpected file content: %q", string(data))
+	}
+
+	events := auditStore.snapshot()
+	for _, event := range events {
+		if event.Action == "task_state_changed" {
+			t.Fatalf("did not expect task_state_changed for direct write tool, got %+v", event)
+		}
+	}
+	var resultEvent *storagepkg.AuditEvent
+	for i := range events {
+		if events[i].Action == "tool_execute_result" && events[i].Metadata["tool_name"] == "write_file" {
+			resultEvent = &events[i]
+		}
+	}
+	if resultEvent == nil {
+		t.Fatalf("expected tool_execute_result audit event, got %+v", events)
+	}
+	if resultEvent.TaskID != "" {
+		t.Fatalf("expected direct write audit to omit task id, got %+v", resultEvent)
+	}
+	if resultEvent.TraceID != corepkg.TraceID("tool-direct-write") {
+		t.Fatalf("expected trace id %q, got %q", "tool-direct-write", resultEvent.TraceID)
+	}
+}
+
+func TestRunPromptExecutesUpdatePlanDirectly(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	auditStore := &toolExecutionAuditStore{}
+	events := make([]Event, 0, 6)
+
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				ID:   "tool-direct-plan",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name:      "update_plan",
+					Arguments: `{"explanation":"starting","plan":[{"step":"Inspect provider","status":"completed"},{"step":"Add tests","status":"in_progress"}]}`,
+				},
+			}},
+		},
+		{
+			Role:    llm.RoleAssistant,
+			Content: "done",
+		},
+	}}
+	gateway := &stubRuntimeGateway{}
+
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:      config.ProviderConfig{Model: "test-model"},
+			MaxIterations: 4,
+			Stream:        false,
+		},
+		Client:     client,
+		Store:      store,
+		Registry:   tools.DefaultRegistry(),
+		Runtime:    gateway,
+		AuditStore: auditStore,
+		Observer: ObserverFunc(func(event Event) {
+			events = append(events, event)
+		}),
+		Stdin:  strings.NewReader(""),
+		Stdout: io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "update plan", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+
+	gateway.mu.Lock()
+	callCount := len(gateway.calls)
+	gateway.mu.Unlock()
+	if callCount != 0 {
+		t.Fatalf("expected update_plan to bypass runtime gateway, got %d calls", callCount)
+	}
+	if len(sess.Plan.Steps) != 2 || sess.Plan.Steps[1].Title != "Add tests" {
+		t.Fatalf("unexpected session plan: %#v", sess.Plan)
+	}
+	seenPlanUpdated := false
+	for _, event := range events {
+		if event.Type == EventPlanUpdated {
+			seenPlanUpdated = true
+			break
+		}
+	}
+	if !seenPlanUpdated {
+		t.Fatalf("expected EventPlanUpdated, got %+v", events)
+	}
+
+	auditEvents := auditStore.snapshot()
+	for _, event := range auditEvents {
+		if event.Action == "task_state_changed" {
+			t.Fatalf("did not expect task_state_changed for direct update_plan, got %+v", event)
+		}
+	}
+	var resultEvent *storagepkg.AuditEvent
+	for i := range auditEvents {
+		if auditEvents[i].Action == "tool_execute_result" && auditEvents[i].Metadata["tool_name"] == "update_plan" {
+			resultEvent = &auditEvents[i]
+		}
+	}
+	if resultEvent == nil {
+		t.Fatalf("expected tool_execute_result audit event, got %+v", auditEvents)
+	}
+	if resultEvent.TaskID != "" {
+		t.Fatalf("expected direct update_plan audit to omit task id, got %+v", resultEvent)
+	}
+	if resultEvent.TraceID != corepkg.TraceID("tool-direct-plan") {
+		t.Fatalf("expected trace id %q, got %q", "tool-direct-plan", resultEvent.TraceID)
 	}
 }
 

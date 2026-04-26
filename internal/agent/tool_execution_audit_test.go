@@ -36,7 +36,7 @@ func (s *toolExecutionAuditStore) snapshot() []storagepkg.AuditEvent {
 	return copied
 }
 
-func TestRunPromptRecordsTaskStateChangedAuditWithSessionTaskTrace(t *testing.T) {
+func TestRunPromptRecordsTaskStateChangedAuditForRuntimeBackedTool(t *testing.T) {
 	workspace := t.TempDir()
 	store, err := session.NewStore(t.TempDir())
 	if err != nil {
@@ -44,15 +44,20 @@ func TestRunPromptRecordsTaskStateChangedAuditWithSessionTaskTrace(t *testing.T)
 	}
 	sess := session.New(workspace)
 	auditStore := &toolExecutionAuditStore{}
+	probe := &managerProbeTool{}
+	registry := tools.DefaultRegistry()
+	if err := registry.Register(probe, tools.RegisterOptions{Source: tools.RegistrationSourceBuiltin}); err != nil {
+		t.Fatal(err)
+	}
 
 	client := &fakeClient{replies: []llm.Message{
 		{
 			Role: llm.RoleAssistant,
 			ToolCalls: []llm.ToolCall{{
-				ID:   "trace-tool-1",
+				ID:   "trace-runtime-tool-1",
 				Type: "function",
 				Function: llm.ToolFunctionCall{
-					Name:      "list_files",
+					Name:      "manager_probe",
 					Arguments: `{}`,
 				},
 			}},
@@ -74,13 +79,13 @@ func TestRunPromptRecordsTaskStateChangedAuditWithSessionTaskTrace(t *testing.T)
 		},
 		Client:     client,
 		Store:      store,
-		Registry:   tools.DefaultRegistry(),
+		Registry:   registry,
 		AuditStore: auditStore,
 		Stdin:      strings.NewReader(""),
 		Stdout:     io.Discard,
 	})
 
-	answer, err := runner.RunPrompt(context.Background(), sess, "list files", "build", io.Discard)
+	answer, err := runner.RunPrompt(context.Background(), sess, "probe managers", "build", io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,8 +113,8 @@ func TestRunPromptRecordsTaskStateChangedAuditWithSessionTaskTrace(t *testing.T)
 		if event.TaskID == "" {
 			t.Fatalf("expected non-empty task id, got %+v", event)
 		}
-		if event.TraceID != corepkg.TraceID("trace-tool-1") {
-			t.Fatalf("expected trace id %q, got %q", "trace-tool-1", event.TraceID)
+		if event.TraceID != corepkg.TraceID("trace-runtime-tool-1") {
+			t.Fatalf("expected trace id %q, got %q", "trace-runtime-tool-1", event.TraceID)
 		}
 		if got := event.Metadata["sandbox_enabled"]; got != "true" {
 			t.Fatalf("expected task_state_changed sandbox_enabled=true, got %q", got)
@@ -161,19 +166,33 @@ func (g *stubRuntimeGateway) RunSync(_ context.Context, request RuntimeTaskReque
 	}, nil
 }
 
-func TestRunPromptExecutesToolThroughRuntimeGatewayBoundary(t *testing.T) {
+func TestShouldExecuteToolDirectlyRoutesOnlyReadOnlyBuiltins(t *testing.T) {
+	for _, name := range []string{"list_files", "read_file", "search_text", "web_search", "web_fetch"} {
+		if !shouldExecuteToolDirectly(name) {
+			t.Fatalf("expected %s to execute directly", name)
+		}
+	}
+	for _, name := range []string{"write_file", "replace_in_file", "apply_patch", "update_plan", "run_shell", "manager_probe"} {
+		if shouldExecuteToolDirectly(name) {
+			t.Fatalf("expected %s to remain runtime-backed", name)
+		}
+	}
+}
+
+func TestRunPromptExecutesReadOnlyToolDirectly(t *testing.T) {
 	workspace := t.TempDir()
 	store, err := session.NewStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	sess := session.New(workspace)
+	auditStore := &toolExecutionAuditStore{}
 
 	client := &fakeClient{replies: []llm.Message{
 		{
 			Role: llm.RoleAssistant,
 			ToolCalls: []llm.ToolCall{{
-				ID:   "tool-via-runtime",
+				ID:   "tool-direct-read",
 				Type: "function",
 				Function: llm.ToolFunctionCall{
 					Name:      "list_files",
@@ -197,9 +216,105 @@ func TestRunPromptExecutesToolThroughRuntimeGatewayBoundary(t *testing.T) {
 			SandboxEnabled:    true,
 			SystemSandboxMode: "best_effort",
 		},
+		Client:     client,
+		Store:      store,
+		Registry:   tools.DefaultRegistry(),
+		Runtime:    gateway,
+		AuditStore: auditStore,
+		Stdin:      strings.NewReader(""),
+		Stdout:     io.Discard,
+	})
+
+	answer, err := runner.RunPrompt(context.Background(), sess, "run tool", "build", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "done" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+
+	gateway.mu.Lock()
+	callCount := len(gateway.calls)
+	gateway.mu.Unlock()
+	if callCount != 0 {
+		t.Fatalf("expected read-only tool to bypass runtime gateway, got %d calls", callCount)
+	}
+
+	if len(sess.Messages) < 3 {
+		t.Fatalf("expected tool result message to be persisted, got %#v", sess.Messages)
+	}
+	toolResult := sess.Messages[2].Content
+	if strings.Contains(toolResult, `"via":"runtime_gateway"`) {
+		t.Fatalf("expected direct tool result, got %q", toolResult)
+	}
+
+	events := auditStore.snapshot()
+	for _, event := range events {
+		if event.Action == "task_state_changed" {
+			t.Fatalf("did not expect task_state_changed for direct tool, got %+v", event)
+		}
+	}
+	var resultEvent *storagepkg.AuditEvent
+	for i := range events {
+		if events[i].Action == "tool_execute_result" && events[i].Metadata["tool_name"] == "list_files" {
+			resultEvent = &events[i]
+		}
+	}
+	if resultEvent == nil {
+		t.Fatalf("expected tool_execute_result audit event, got %+v", events)
+	}
+	if resultEvent.TaskID != "" {
+		t.Fatalf("expected direct tool audit to omit task id, got %+v", resultEvent)
+	}
+	if resultEvent.TraceID != corepkg.TraceID("tool-direct-read") {
+		t.Fatalf("expected trace id %q, got %q", "tool-direct-read", resultEvent.TraceID)
+	}
+}
+
+func TestRunPromptKeepsNonDirectToolOnRuntimeGateway(t *testing.T) {
+	workspace := t.TempDir()
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := session.New(workspace)
+	probe := &managerProbeTool{}
+	registry := tools.DefaultRegistry()
+	if err := registry.Register(probe, tools.RegisterOptions{Source: tools.RegistrationSourceBuiltin}); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeClient{replies: []llm.Message{
+		{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				ID:   "tool-via-runtime",
+				Type: "function",
+				Function: llm.ToolFunctionCall{
+					Name:      "manager_probe",
+					Arguments: `{}`,
+				},
+			}},
+		},
+		{
+			Role:    llm.RoleAssistant,
+			Content: "done",
+		},
+	}}
+	gateway := &stubRuntimeGateway{}
+
+	runner := NewRunner(Options{
+		Workspace: workspace,
+		Config: config.Config{
+			Provider:          config.ProviderConfig{Model: "test-model"},
+			MaxIterations:     4,
+			Stream:            false,
+			SandboxEnabled:    true,
+			SystemSandboxMode: "best_effort",
+		},
 		Client:   client,
 		Store:    store,
-		Registry: tools.DefaultRegistry(),
+		Registry: registry,
 		Runtime:  gateway,
 		Stdin:    strings.NewReader(""),
 		Stdout:   io.Discard,
@@ -223,7 +338,7 @@ func TestRunPromptExecutesToolThroughRuntimeGatewayBoundary(t *testing.T) {
 	if callCount != 1 {
 		t.Fatalf("expected exactly 1 runtime gateway call, got %d", callCount)
 	}
-	if call.Name != "list_files" || call.Kind != "tool" {
+	if call.Name != "manager_probe" || call.Kind != "tool" {
 		t.Fatalf("expected runtime gateway tool request, got %+v", call)
 	}
 	if got := call.Metadata["sandbox_enabled"]; got != "true" {

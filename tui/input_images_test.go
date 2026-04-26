@@ -30,6 +30,15 @@ func (f fakeClipboardImageReader) ReadImage(context.Context) (string, []byte, st
 	return f.mediaType, f.data, f.fileName, f.err
 }
 
+type fakeClipboardTextReader struct {
+	text string
+	err  error
+}
+
+func (f fakeClipboardTextReader) ReadText(context.Context) (string, error) {
+	return f.text, f.err
+}
+
 func newImagePipelineModel(t *testing.T) *model {
 	t.Helper()
 

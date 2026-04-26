@@ -694,10 +694,13 @@ func (m *model) tryStartClipboardPasteCapture(before, after, source string) (str
 		if afterMatched < clipboardCaptureMinPrefixRunes || afterMatched <= beforeMatched {
 			return after, "", false
 		}
+		afterRunes := []rune(after)
+		if afterMatched > len(afterRunes) {
+			return after, "", false
+		}
 		consumedRunes = afterMatched
 		buildReplacement = func(marker string) string {
-			keep := suffixRunes(after, len([]rune(normalizedAfter))-afterMatched)
-			return marker + keep
+			return string(afterRunes[:len(afterRunes)-afterMatched]) + marker
 		}
 	}
 
@@ -723,17 +726,6 @@ func longestClipboardPrefixSuffixLen(value, clipboard string) int {
 		}
 	}
 	return 0
-}
-
-func suffixRunes(value string, count int) string {
-	if count <= 0 {
-		return ""
-	}
-	runes := []rune(value)
-	if count >= len(runes) {
-		return value
-	}
-	return string(runes[len(runes)-count:])
 }
 
 func (m *model) upsertVirtualPastePart(pasteID, placeholder string) {

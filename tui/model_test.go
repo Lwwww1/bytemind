@@ -2637,6 +2637,32 @@ func TestCtrlVTextTransactionIgnoresControlMarkerEcho(t *testing.T) {
 	}
 }
 
+func TestHandleKeyCapturesImplicitClipboardRuneBurstBeforeVisibleInput(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	m.clipboardRead = fakeClipboardTextReader{
+		text: strings.Join([]string{
+			"能、帮我看下这个仓库结构",
+			"给这段代码做 review",
+			"顺便看一下最近改动",
+			"补充下测试建议",
+			"最后总结风险点",
+		}, "\n"),
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("能、")})
+	updated := got.(model)
+	if !regexp.MustCompile(`^\[Paste #\d+ ~\d+ lines\]$`).MatchString(updated.input.Value()) {
+		t.Fatalf("expected implicit clipboard rune burst to be captured before visible input, got %q", updated.input.Value())
+	}
+	if strings.Contains(updated.input.Value(), "能、") {
+		t.Fatalf("expected no visible rune-burst prefix, got %q", updated.input.Value())
+	}
+	if !updated.pasteTransaction.Active {
+		t.Fatalf("expected implicit clipboard rune burst to start paste transaction")
+	}
+}
+
 func TestTerminalPasteEventWithEmptyPayloadPastesClipboardImage(t *testing.T) {
 	m := newImagePipelineModel(t)
 	m.screen = screenChat

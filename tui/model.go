@@ -907,6 +907,41 @@ func isCtrlVPasteKey(msg tea.KeyMsg) bool {
 	return normalizeKeyName(msg.String()) == "ctrl+v"
 }
 
+func (m *model) tryStartImplicitClipboardPasteFromKey(msg tea.KeyMsg) bool {
+	if m == nil || msg.Paste || m.hasActivePasteSession() || m.hasActivePasteBurst() {
+		return false
+	}
+	if msg.Type != tea.KeyRunes || len(msg.Runes) <= 1 {
+		return false
+	}
+	fragment := normalizeNewlines(strings.ReplaceAll(string(msg.Runes), ctrlVMarkerRune, ""))
+	if strings.TrimSpace(fragment) == "" {
+		return false
+	}
+	clipboardText, ok := m.readClipboardTextForPaste()
+	if !ok || !m.isLongPastedText(clipboardText) {
+		return false
+	}
+	if !strings.HasPrefix(normalizeNewlines(clipboardText), fragment) {
+		return false
+	}
+	marker, content, err := m.compressPastedText(clipboardText)
+	if err != nil {
+		m.statusNote = err.Error()
+		return false
+	}
+	m.beginPasteTransaction(clipboardText, "clipboard-capture")
+	m.pasteTransaction.Consumed = len([]rune(fragment))
+	m.setInputValue(m.input.Value() + marker)
+	now := time.Now()
+	m.lastPasteAt = now
+	m.markPasteConfirmPending(now)
+	m.statusNote = fmt.Sprintf("Long pasted text (%d lines) compressed as %s. Use [Paste #%s], [Paste #%s line10], or [Paste #%s line10~line20].",
+		content.Lines, marker, content.ID, content.ID, content.ID)
+	m.syncInputOverlays()
+	return true
+}
+
 func (m model) pasteFragmentFromKey(msg tea.KeyMsg) (string, string, bool) {
 	if msg.Paste {
 		switch {
@@ -1122,6 +1157,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.tryStartImplicitClipboardPasteFromKey(msg) {
+		return m, nil
+	}
+
 	if m.shouldPromoteImplicitPasteCandidate(msg) {
 		return m, m.captureImplicitPasteCandidate(msg)
 	}
@@ -1131,7 +1170,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if fragment, source, ok := m.pasteFragmentFromKey(msg); ok {
-		if source == "paste-key" {
+		if source == "paste-key" || source == "rune-burst-paste" {
 			m.beginOrAppendPasteTransaction(fragment, source)
 		}
 		return m, m.ingestPasteFragment(fragment, source)

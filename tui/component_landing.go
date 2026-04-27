@@ -16,39 +16,41 @@ var landingShortcutHints = []footerShortcutHint{
 
 func (m model) renderLandingHero() string {
 	innerWidth := m.landingPromptHeroWidth()
-	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#1E2E3A"))
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#1E334C"))
+	headerBgStyle := lipgloss.NewStyle().Background(lipgloss.Color("#020A14"))
 	headerHostStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64DF69"))
 	promptSigilStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64DF69")).Bold(true)
-	brandStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E2F1FF")).Bold(true)
-	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#5B7288"))
-	dotMutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4A5F72"))
+	brandStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E6F2FF")).Bold(true)
+	brandShadowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#5F7890"))
+	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#718CA5"))
+	dotMutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#455C71"))
 	dotActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64DF69"))
 
 	headerHost := headerHostStyle.Render("bytemind@localhost:~")
 	dots := strings.Join([]string{
-		dotMutedStyle.Render("o"),
-		dotMutedStyle.Render("o"),
-		dotActiveStyle.Render("o"),
+		dotMutedStyle.Render("●"),
+		dotMutedStyle.Render("●"),
+		dotActiveStyle.Render("●"),
 	}, " ")
 	headerGap := max(1, innerWidth-lipgloss.Width(headerHost)-lipgloss.Width(dots))
-	headerRow := padLandingANSI(headerHost+strings.Repeat(" ", headerGap)+dots, innerWidth)
+	headerRow := headerBgStyle.Render(padLandingANSI(headerHost+strings.Repeat(" ", headerGap)+dots, innerWidth))
 
-	promptRow := padLandingANSI("  "+promptSigilStyle.Render(">_ ")+brandStyle.Render("Bytemind"), innerWidth)
-	blankRow := strings.Repeat(" ", innerWidth)
+	promptRow := padLandingANSI("  "+promptSigilStyle.Render(">_")+"  "+brandStyle.Render("Bytemind"), innerWidth)
+	shadowRow := padLandingANSI("     "+brandShadowStyle.Render("Bytemind"), innerWidth)
 	cursorGlyph := " "
 	if m.landingPromptCursorVisible() {
-		cursorGlyph = "_"
+		cursorGlyph = "▌"
 	}
-	cursorRow := padLandingANSI("  "+cursorStyle.Render(cursorGlyph), innerWidth)
+	cursorRow := padLandingANSI("  "+cursorStyle.Render("_ "+cursorGlyph), innerWidth)
 
 	frame := strings.Join([]string{
-		borderStyle.Render("+" + strings.Repeat("-", innerWidth) + "+"),
-		borderStyle.Render("|") + headerRow + borderStyle.Render("|"),
-		borderStyle.Render("+" + strings.Repeat("-", innerWidth) + "+"),
-		borderStyle.Render("|") + promptRow + borderStyle.Render("|"),
-		borderStyle.Render("|") + blankRow + borderStyle.Render("|"),
-		borderStyle.Render("|") + cursorRow + borderStyle.Render("|"),
-		borderStyle.Render("+" + strings.Repeat("-", innerWidth) + "+"),
+		borderStyle.Render("┌" + strings.Repeat("─", innerWidth) + "┐"),
+		borderStyle.Render("│") + headerRow + borderStyle.Render("│"),
+		borderStyle.Render("├" + strings.Repeat("─", innerWidth) + "┤"),
+		borderStyle.Render("│") + promptRow + borderStyle.Render("│"),
+		borderStyle.Render("│") + shadowRow + borderStyle.Render("│"),
+		borderStyle.Render("│") + cursorRow + borderStyle.Render("│"),
+		borderStyle.Render("└" + strings.Repeat("─", innerWidth) + "┘"),
 	}, "\n")
 
 	subtitle := landingSubtitleStyle.Render("Your AI assistant")
@@ -57,11 +59,11 @@ func (m model) renderLandingHero() string {
 
 func (m model) landingPromptHeroWidth() int {
 	if m.width <= 0 {
-		return 72
+		return 74
 	}
 	maxFit := max(24, m.width-14)
-	preferred := min(90, max(60, (m.width*3)/4))
-	return clamp(preferred, 48, maxFit)
+	preferred := min(88, max(64, (m.width*2)/3))
+	return clamp(preferred, 54, maxFit)
 }
 
 func (m model) landingPromptCursorVisible() bool {

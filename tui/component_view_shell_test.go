@@ -29,6 +29,12 @@ func TestRenderLandingProducesContent(t *testing.T) {
 	if !strings.Contains(plain, "Your AI assistant") {
 		t.Fatalf("expected landing subtitle in rendered content, got %q", plain)
 	}
+	if !strings.Contains(plain, "bytemind@localhost:~") {
+		t.Fatalf("expected prompt hero header in rendered content, got %q", plain)
+	}
+	if !strings.Contains(plain, ">_  Bytemind") {
+		t.Fatalf("expected prompt hero brand line in rendered content, got %q", plain)
+	}
 }
 
 func TestOverlayBottomAlignedPlacesOverlayAtBottom(t *testing.T) {
@@ -69,8 +75,8 @@ func TestLandingPromptHelpers(t *testing.T) {
 	}
 
 	m := model{width: 0}
-	if got := m.landingPromptHeroWidth(); got != 72 {
-		t.Fatalf("expected default prompt hero width 72, got %d", got)
+	if got := m.landingPromptHeroWidth(); got != 74 {
+		t.Fatalf("expected default prompt hero width 74, got %d", got)
 	}
 }
 

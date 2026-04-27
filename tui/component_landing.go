@@ -51,6 +51,7 @@ func (m model) renderLandingHero() string {
 		borderStyle.Render("│") + headerRow + borderStyle.Render("│"),
 		borderStyle.Render("├" + strings.Repeat("─", innerWidth) + "┤"),
 		borderStyle.Render("│") + promptRow + borderStyle.Render("│"),
+		borderStyle.Render("│") + strings.Repeat(" ", innerWidth) + borderStyle.Render("│"),
 	}
 	for _, row := range logoRows {
 		frameRows = append(frameRows, borderStyle.Render("│")+row+borderStyle.Render("│"))
@@ -207,9 +208,9 @@ func landingPixelLogoRows(text string, onStyle lipgloss.Style, maxWidth int) []s
 		offCell   string
 		letterGap string
 	}{
-		{onCell: onStyle.Render("█") + " ", offCell: "  ", letterGap: "  "},
-		{onCell: onStyle.Render("█"), offCell: " ", letterGap: "  "},
+		{onCell: onStyle.Render("██"), offCell: "  ", letterGap: "  "},
 		{onCell: onStyle.Render("█"), offCell: " ", letterGap: " "},
+		{onCell: onStyle.Render("█"), offCell: " ", letterGap: ""},
 	}
 
 	lastRows := []string{}

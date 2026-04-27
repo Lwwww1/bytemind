@@ -67,14 +67,14 @@ func upsertProviderValues(configPath string, values map[string]string) (string, 
 	if strings.TrimSpace(asString(providerSection["type"])) == "" {
 		providerSection["type"] = "openai-compatible"
 	}
-	if strings.TrimSpace(asString(providerSection["base_url"])) == "" {
-		providerSection["base_url"] = "https://api.openai.com/v1"
+	providerType := asString(providerSection["type"])
+	baseURL := asString(providerSection["base_url"])
+	if strings.TrimSpace(baseURL) == "" || usesOpenAIDefaultBaseURLForNativeProvider(providerType, baseURL) {
+		providerSection["base_url"] = defaultBaseURL(providerType)
 	}
-	if strings.TrimSpace(asString(providerSection["model"])) == "" {
-		providerSection["model"] = defaultModel(
-			asString(providerSection["type"]),
-			asString(providerSection["base_url"]),
-		)
+	model := asString(providerSection["model"])
+	if strings.TrimSpace(model) == "" || usesOpenAIDefaultModelForNativeProvider(providerType, model) {
+		providerSection["model"] = defaultModel(providerType, asString(providerSection["base_url"]))
 	}
 	raw["provider"] = providerSection
 

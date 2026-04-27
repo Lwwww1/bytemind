@@ -532,13 +532,13 @@ func normalize(cfg *Config) error {
 			cfg.Provider.Type = "openai-compatible"
 		}
 	}
-	if cfg.Provider.BaseURL == "" {
+	if cfg.Provider.BaseURL == "" || usesOpenAIDefaultBaseURLForNativeProvider(cfg.Provider.Type, cfg.Provider.BaseURL) {
 		cfg.Provider.BaseURL = defaultBaseURL(cfg.Provider.Type)
 	}
 	if strings.TrimSpace(cfg.Provider.BaseURL) == "" {
 		return errors.New("provider.base_url is required")
 	}
-	if strings.TrimSpace(cfg.Provider.Model) == "" {
+	if strings.TrimSpace(cfg.Provider.Model) == "" || usesOpenAIDefaultModelForNativeProvider(cfg.Provider.Type, cfg.Provider.Model) {
 		cfg.Provider.Model = defaultModel(cfg.Provider.Type, cfg.Provider.BaseURL)
 		if strings.TrimSpace(cfg.Provider.Model) == "" {
 			return errors.New("provider.model is required")
@@ -637,7 +637,7 @@ func normalize(cfg *Config) error {
 		cfg.MaxIterations = 32
 	}
 	if !isSupportedProviderType(cfg.Provider.Type) {
-		return errors.New("provider.type must be one of openai-compatible, openai, anthropic (or leave it empty with provider.auto_detect_type=true)")
+		return errors.New("provider.type must be one of openai-compatible, openai, anthropic, gemini (or leave it empty with provider.auto_detect_type=true)")
 	}
 	switch cfg.ApprovalPolicy {
 	case "", "on-request":
@@ -891,6 +891,8 @@ func normalizeProviderType(value string) string {
 		return "openai"
 	case "anthropic":
 		return "anthropic"
+	case "gemini", "google", "google-gemini":
+		return "gemini"
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}
@@ -913,6 +915,12 @@ func detectProviderType(cfg ProviderConfig) string {
 	if authHeader == "x-api-key" && strings.Contains(apiPath, "messages") {
 		return "anthropic"
 	}
+	if authHeader == "x-goog-api-key" || hasHeaderName(cfg.ExtraHeaders, "x-goog-api-key") {
+		return "gemini"
+	}
+	if strings.Contains(baseURL, "generativelanguage.googleapis.com") && !strings.Contains(baseURL, "/openai") {
+		return "gemini"
+	}
 	return "openai-compatible"
 }
 
@@ -927,7 +935,7 @@ func hasHeaderName(headers map[string]string, target string) bool {
 
 func isSupportedProviderType(value string) bool {
 	switch value {
-	case "openai-compatible", "openai", "anthropic":
+	case "openai-compatible", "openai", "anthropic", "gemini":
 		return true
 	default:
 		return false
@@ -938,8 +946,28 @@ func defaultBaseURL(providerType string) string {
 	switch normalizeProviderType(providerType) {
 	case "anthropic":
 		return "https://api.anthropic.com"
+	case "gemini":
+		return "https://generativelanguage.googleapis.com/v1beta"
 	default:
 		return "https://api.openai.com/v1"
+	}
+}
+
+func usesOpenAIDefaultBaseURLForNativeProvider(providerType, baseURL string) bool {
+	switch normalizeProviderType(providerType) {
+	case "anthropic", "gemini":
+		return strings.EqualFold(strings.TrimRight(strings.TrimSpace(baseURL), "/"), "https://api.openai.com/v1")
+	default:
+		return false
+	}
+}
+
+func usesOpenAIDefaultModelForNativeProvider(providerType, model string) bool {
+	switch normalizeProviderType(providerType) {
+	case "anthropic", "gemini":
+		return strings.TrimSpace(model) == defaultModelID
+	default:
+		return false
 	}
 }
 
@@ -950,6 +978,8 @@ func defaultModel(providerType, baseURL string) string {
 			return "deepseek-chat"
 		}
 		return defaultModelID
+	case "gemini":
+		return "gemini-2.5-flash"
 	default:
 		return ""
 	}

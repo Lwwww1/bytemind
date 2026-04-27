@@ -378,6 +378,36 @@ func TestLoadDefaultsModelFromProviderEndpointWhenMissing(t *testing.T) {
 	}
 }
 
+func TestLoadSupportsGeminiProviderDefaults(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("BYTEMIND_HOME", t.TempDir())
+	if err := writeConfig(projectConfigPath(workspace), map[string]any{
+		"provider": map[string]any{
+			"type":    "gemini",
+			"api_key": "test-key",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider.Type != "gemini" {
+		t.Fatalf("expected gemini provider, got %q", cfg.Provider.Type)
+	}
+	if cfg.Provider.BaseURL != "https://generativelanguage.googleapis.com/v1beta" {
+		t.Fatalf("unexpected gemini base url %q", cfg.Provider.BaseURL)
+	}
+	if cfg.Provider.Model != "gemini-2.5-flash" {
+		t.Fatalf("unexpected gemini model %q", cfg.Provider.Model)
+	}
+	if cfg.ProviderRuntime.DefaultProvider != "gemini" {
+		t.Fatalf("unexpected runtime provider %q", cfg.ProviderRuntime.DefaultProvider)
+	}
+}
+
 func TestLoadRejectsUnsupportedProviderType(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("BYTEMIND_HOME", t.TempDir())
@@ -688,6 +718,39 @@ func TestUpsertProviderFieldBackfillsModelForDeepseekEndpointWhenMissing(t *test
 	}
 	if cfg.Provider.Model != "deepseek-chat" {
 		t.Fatalf("expected deepseek model fallback, got %q", cfg.Provider.Model)
+	}
+}
+
+func TestUpsertProviderFieldBackfillsGeminiDefaults(t *testing.T) {
+	workspace := t.TempDir()
+	configPath := filepath.Join(workspace, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "provider": {
+    "type": "openai-compatible",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-5.4-mini",
+    "api_key": "test-key"
+  }
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := UpsertProviderField(configPath, "type", "gemini"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(workspace, configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider.Type != "gemini" {
+		t.Fatalf("expected gemini provider, got %q", cfg.Provider.Type)
+	}
+	if cfg.Provider.BaseURL != "https://generativelanguage.googleapis.com/v1beta" {
+		t.Fatalf("expected gemini base url, got %q", cfg.Provider.BaseURL)
+	}
+	if cfg.Provider.Model != "gemini-2.5-flash" {
+		t.Fatalf("expected gemini model, got %q", cfg.Provider.Model)
 	}
 }
 

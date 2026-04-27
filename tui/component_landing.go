@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
@@ -20,8 +21,9 @@ func (m model) renderLandingHero() string {
 	headerBgStyle := lipgloss.NewStyle().Background(lipgloss.Color("#020A14"))
 	headerHostStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64DF69"))
 	promptSigilStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64DF69")).Bold(true)
+	promptLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7FA4CC"))
 	brandStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E6F2FF")).Bold(true)
-	brandShadowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#5F7890"))
+	pixelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2BE8FF"))
 	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#718CA5"))
 	dotMutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#455C71"))
 	dotActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64DF69"))
@@ -35,23 +37,37 @@ func (m model) renderLandingHero() string {
 	headerGap := max(1, innerWidth-lipgloss.Width(headerHost)-lipgloss.Width(dots))
 	headerRow := headerBgStyle.Render(padLandingANSI(headerHost+strings.Repeat(" ", headerGap)+dots, innerWidth))
 
-	promptRow := padLandingANSI("  "+promptSigilStyle.Render(">_")+"  "+brandStyle.Render("Bytemind"), innerWidth)
-	shadowRow := padLandingANSI("     "+brandShadowStyle.Render("Bytemind"), innerWidth)
+	promptRow := padLandingANSI("  "+promptSigilStyle.Render(">_")+"  "+promptLabelStyle.Render("launching bytemind"), innerWidth)
+	pixelRows := landingPixelLogoRows("BYTEMIND", pixelStyle)
+	logoRows := make([]string, 0, len(pixelRows))
+	for _, row := range pixelRows {
+		left := max(0, (innerWidth-lipgloss.Width(row))/2)
+		logoRows = append(logoRows, padLandingANSI(strings.Repeat(" ", left)+row, innerWidth))
+	}
+	if len(logoRows) == 0 || lipgloss.Width(pixelRows[0])+2 > innerWidth {
+		logoRows = []string{padLandingANSI("  "+brandStyle.Render("Bytemind"), innerWidth)}
+	}
 	cursorGlyph := " "
 	if m.landingPromptCursorVisible() {
 		cursorGlyph = "▌"
 	}
 	cursorRow := padLandingANSI("  "+cursorStyle.Render("_ "+cursorGlyph), innerWidth)
 
-	frame := strings.Join([]string{
+	frameRows := []string{
 		borderStyle.Render("┌" + strings.Repeat("─", innerWidth) + "┐"),
 		borderStyle.Render("│") + headerRow + borderStyle.Render("│"),
 		borderStyle.Render("├" + strings.Repeat("─", innerWidth) + "┤"),
 		borderStyle.Render("│") + promptRow + borderStyle.Render("│"),
-		borderStyle.Render("│") + shadowRow + borderStyle.Render("│"),
-		borderStyle.Render("│") + cursorRow + borderStyle.Render("│"),
-		borderStyle.Render("└" + strings.Repeat("─", innerWidth) + "┘"),
-	}, "\n")
+	}
+	for _, row := range logoRows {
+		frameRows = append(frameRows, borderStyle.Render("│")+row+borderStyle.Render("│"))
+	}
+	frameRows = append(
+		frameRows,
+		borderStyle.Render("│")+cursorRow+borderStyle.Render("│"),
+		borderStyle.Render("└"+strings.Repeat("─", innerWidth)+"┘"),
+	)
+	frame := strings.Join(frameRows, "\n")
 
 	subtitle := landingSubtitleStyle.Render("Your AI assistant")
 	return frame + "\n\n" + subtitle
@@ -79,6 +95,123 @@ func padLandingANSI(text string, width int) string {
 		return text + strings.Repeat(" ", width-w)
 	}
 	return xansi.Cut(text, 0, width)
+}
+
+var landingPixelGlyphs = map[rune][]string{
+	'B': {
+		"11110",
+		"10001",
+		"11110",
+		"10001",
+		"10001",
+		"10001",
+		"11110",
+	},
+	'Y': {
+		"10001",
+		"01010",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+	},
+	'T': {
+		"11111",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+	},
+	'E': {
+		"11111",
+		"10000",
+		"11110",
+		"10000",
+		"10000",
+		"10000",
+		"11111",
+	},
+	'M': {
+		"10001",
+		"11011",
+		"10101",
+		"10001",
+		"10001",
+		"10001",
+		"10001",
+	},
+	'I': {
+		"11111",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+		"11111",
+	},
+	'N': {
+		"10001",
+		"11001",
+		"10101",
+		"10011",
+		"10001",
+		"10001",
+		"10001",
+	},
+	'D': {
+		"11110",
+		"10001",
+		"10001",
+		"10001",
+		"10001",
+		"10001",
+		"11110",
+	},
+	' ': {
+		"00000",
+		"00000",
+		"00000",
+		"00000",
+		"00000",
+		"00000",
+		"00000",
+	},
+}
+
+func landingPixelLogoRows(text string, onStyle lipgloss.Style) []string {
+	const glyphHeight = 7
+	runes := []rune(text)
+	if len(runes) == 0 {
+		return nil
+	}
+	rowBuilders := make([]strings.Builder, glyphHeight)
+	for i, r := range runes {
+		glyph, ok := landingPixelGlyphs[unicode.ToUpper(r)]
+		if !ok {
+			glyph = landingPixelGlyphs[' ']
+		}
+		for rowIdx := 0; rowIdx < glyphHeight; rowIdx++ {
+			rowPattern := glyph[rowIdx]
+			for _, cell := range rowPattern {
+				if cell == '1' {
+					rowBuilders[rowIdx].WriteString(onStyle.Render("█"))
+				} else {
+					rowBuilders[rowIdx].WriteByte(' ')
+				}
+			}
+			if i < len(runes)-1 {
+				rowBuilders[rowIdx].WriteByte(' ')
+			}
+		}
+	}
+	rows := make([]string, glyphHeight)
+	for i := range rowBuilders {
+		rows[i] = rowBuilders[i].String()
+	}
+	return rows
 }
 
 func (m model) renderLandingOverlayPanel() string {

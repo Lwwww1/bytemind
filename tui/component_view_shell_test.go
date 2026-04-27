@@ -32,8 +32,11 @@ func TestRenderLandingProducesContent(t *testing.T) {
 	if !strings.Contains(plain, "bytemind@localhost:~") {
 		t.Fatalf("expected prompt hero header in rendered content, got %q", plain)
 	}
-	if !strings.Contains(plain, ">_  Bytemind") {
-		t.Fatalf("expected prompt hero brand line in rendered content, got %q", plain)
+	if !strings.Contains(plain, "launching bytemind") {
+		t.Fatalf("expected prompt hero launch line in rendered content, got %q", plain)
+	}
+	if !strings.Contains(plain, "█") {
+		t.Fatalf("expected prompt hero pixel matrix logo in rendered content, got %q", plain)
 	}
 }
 
@@ -77,6 +80,14 @@ func TestLandingPromptHelpers(t *testing.T) {
 	m := model{width: 0}
 	if got := m.landingPromptHeroWidth(); got != 74 {
 		t.Fatalf("expected default prompt hero width 74, got %d", got)
+	}
+
+	rows := landingPixelLogoRows("BY", landingModeStyle)
+	if len(rows) != 7 {
+		t.Fatalf("expected 7 pixel logo rows, got %d", len(rows))
+	}
+	if !strings.Contains(rows[0], "█") {
+		t.Fatalf("expected pixel row to contain block glyph, got %q", rows[0])
 	}
 }
 

@@ -24,6 +24,7 @@ func (m model) renderLandingHero() string {
 	promptLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7FA4CC"))
 	brandStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E6F2FF")).Bold(true)
 	pixelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2BE8FF"))
+	pixelGlowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#91CFD5"))
 	dotMutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#455C71"))
 	dotActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64DF69"))
 
@@ -37,7 +38,7 @@ func (m model) renderLandingHero() string {
 	headerRow := headerBgStyle.Render(padLandingANSI(headerHost+strings.Repeat(" ", headerGap)+dots, innerWidth))
 
 	promptRow := padLandingANSI("  "+promptSigilStyle.Render(">_")+"  "+promptLabelStyle.Render("launching bytemind"), innerWidth)
-	pixelRows := landingPixelLogoRows("BYTEMIND", pixelStyle, innerWidth-2)
+	pixelRows := landingPixelLogoRows("BYTEMIND", pixelStyle, pixelGlowStyle, m.landingGlowStep, innerWidth-2)
 	logoRows := make([]string, 0, len(pixelRows))
 	for _, row := range pixelRows {
 		left := max(0, (innerWidth-lipgloss.Width(row))/2)
@@ -169,13 +170,34 @@ var landingPixelGlyphs = map[rune][]string{
 	},
 }
 
-func landingPixelLogoRows(text string, onStyle lipgloss.Style, maxWidth int) []string {
+func landingPixelLogoRows(text string, onStyle lipgloss.Style, glowStyle lipgloss.Style, glowStep int, maxWidth int) []string {
 	const glyphHeight = 7
 	runes := []rune(text)
 	if len(runes) == 0 {
 		return nil
 	}
-	renderWithCells := func(onCell, offCell, letterGap string) []string {
+	renderWithCells := func(onCell, offCell, letterGap string, letterGapCols int) []string {
+		prefixCols := make([]int, len(runes))
+		totalCols := 0
+		for i, r := range runes {
+			glyph, ok := landingPixelGlyphs[unicode.ToUpper(r)]
+			if !ok {
+				glyph = landingPixelGlyphs[' ']
+			}
+			prefixCols[i] = totalCols
+			totalCols += len(glyph[0])
+			if i < len(runes)-1 {
+				totalCols += letterGapCols
+			}
+		}
+		glowWidth := max(2, totalCols/10)
+		glowSpan := totalCols + glowWidth + 6
+		glowHead := 0
+		if glowSpan > 0 {
+			glowHead = glowStep % glowSpan
+		}
+		glowStart := glowHead - glowWidth
+
 		rowBuilders := make([]strings.Builder, glyphHeight)
 		for i, r := range runes {
 			glyph, ok := landingPixelGlyphs[unicode.ToUpper(r)]
@@ -184,12 +206,18 @@ func landingPixelLogoRows(text string, onStyle lipgloss.Style, maxWidth int) []s
 			}
 			for rowIdx := 0; rowIdx < glyphHeight; rowIdx++ {
 				rowPattern := glyph[rowIdx]
+				colCursor := prefixCols[i]
 				for _, cell := range rowPattern {
 					if cell == '1' {
-						rowBuilders[rowIdx].WriteString(onCell)
+						if colCursor >= glowStart && colCursor < glowHead {
+							rowBuilders[rowIdx].WriteString(glowStyle.Render(onCell))
+						} else {
+							rowBuilders[rowIdx].WriteString(onStyle.Render(onCell))
+						}
 					} else {
 						rowBuilders[rowIdx].WriteString(offCell)
 					}
+					colCursor++
 				}
 				if i < len(runes)-1 {
 					rowBuilders[rowIdx].WriteString(letterGap)
@@ -207,15 +235,16 @@ func landingPixelLogoRows(text string, onStyle lipgloss.Style, maxWidth int) []s
 		onCell    string
 		offCell   string
 		letterGap string
+		gapCols   int
 	}{
-		{onCell: onStyle.Render("██"), offCell: "  ", letterGap: "  "},
-		{onCell: onStyle.Render("█"), offCell: " ", letterGap: " "},
-		{onCell: onStyle.Render("█"), offCell: " ", letterGap: ""},
+		{onCell: "██", offCell: "  ", letterGap: "  ", gapCols: 2},
+		{onCell: "█", offCell: " ", letterGap: " ", gapCols: 1},
+		{onCell: "█", offCell: " ", letterGap: "", gapCols: 0},
 	}
 
 	lastRows := []string{}
 	for _, cfg := range configs {
-		rows := renderWithCells(cfg.onCell, cfg.offCell, cfg.letterGap)
+		rows := renderWithCells(cfg.onCell, cfg.offCell, cfg.letterGap, cfg.gapCols)
 		lastRows = rows
 		if maxWidth <= 0 || lipgloss.Width(rows[0]) <= maxWidth {
 			return rows

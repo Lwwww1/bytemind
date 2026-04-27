@@ -3839,7 +3839,7 @@ func TestLandingViewRendersCommandPaletteAboveInput(t *testing.T) {
 	}
 }
 
-func TestCommandPaletteUsesCompactThreeRowList(t *testing.T) {
+func TestCommandPaletteUsesCompactFiveRowList(t *testing.T) {
 	input := textarea.New()
 	input.SetValue("/")
 	m := model{
@@ -3852,8 +3852,8 @@ func TestCommandPaletteUsesCompactThreeRowList(t *testing.T) {
 
 	m.syncCommandPalette()
 
-	if len(m.visibleCommandItemsPage()) != 3 {
-		t.Fatalf("expected command palette list height 3, got %d", len(m.visibleCommandItemsPage()))
+	if len(m.visibleCommandItemsPage()) != 5 {
+		t.Fatalf("expected command palette list height 5, got %d", len(m.visibleCommandItemsPage()))
 	}
 }
 
@@ -3865,6 +3865,7 @@ func TestCommandPaletteSupportsPageNavigation(t *testing.T) {
 		{Name: "/c", Usage: "/c", Description: "c"},
 		{Name: "/d", Usage: "/d", Description: "d"},
 		{Name: "/e", Usage: "/e", Description: "e"},
+		{Name: "/f", Usage: "/f", Description: "f"},
 	}
 	defer func() { commandItems = original }()
 
@@ -3880,12 +3881,12 @@ func TestCommandPaletteSupportsPageNavigation(t *testing.T) {
 
 	afterDown, _ := m.handleCommandPaletteKey(tea.KeyMsg{Type: tea.KeyPgDown})
 	downModel := afterDown.(model)
-	if downModel.commandCursor != 3 {
+	if downModel.commandCursor != 5 {
 		t.Fatalf("expected pgdown to move to next command page, got cursor %d", downModel.commandCursor)
 	}
 	page := downModel.visibleCommandItemsPage()
-	if len(page) == 0 || page[0].Name != "/d" {
-		t.Fatalf("expected second page to start with /d, got %+v", page)
+	if len(page) == 0 || page[0].Name != "/f" {
+		t.Fatalf("expected second page to start with /f, got %+v", page)
 	}
 
 	afterUp, _ := downModel.handleCommandPaletteKey(tea.KeyMsg{Type: tea.KeyPgUp})

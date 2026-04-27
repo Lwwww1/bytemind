@@ -60,77 +60,17 @@ func TestOverlayBottomAlignedPlacesOverlayAtBottom(t *testing.T) {
 	}
 }
 
-func TestLandingHelperColorAndCenterFunctions(t *testing.T) {
-	if got := centeredText("abc", 7); got != "  abc  " {
-		t.Fatalf("expected centered text with symmetric padding, got %q", got)
+func TestLandingPromptHelpers(t *testing.T) {
+	if got := padLandingANSI("abc", 7); got != "abc    " {
+		t.Fatalf("expected landing ANSI padding to preserve text and add spaces, got %q", got)
 	}
-	if got := centeredText("   abc   ", 3); got != "abc" {
-		t.Fatalf("expected trimmed text when width is tight, got %q", got)
-	}
-
-	r, g, b := parseHexColor("#0A10FF")
-	if r != 10 || g != 16 || b != 255 {
-		t.Fatalf("expected parsed RGB 10/16/255, got %d/%d/%d", r, g, b)
-	}
-	r, g, b = parseHexColor("#123")
-	if r != 0 || g != 0 || b != 0 {
-		t.Fatalf("expected invalid hex to parse as 0/0/0, got %d/%d/%d", r, g, b)
+	if got := padLandingANSI("abcdef", 3); got != "abc" {
+		t.Fatalf("expected landing ANSI padding to clamp long text, got %q", got)
 	}
 
-	if got := formatHexColor(300, -5, 16); got != "#FF0010" {
-		t.Fatalf("expected clamped hex color #FF0010, got %q", got)
-	}
-	if got := string(lerpHexColor("#000000", "#FFFFFF", 0.5)); got != "#7F7F7F" {
-		t.Fatalf("expected midpoint hex color #7F7F7F, got %q", got)
-	}
-	if got := string(lerpHexColor("#000000", "#FFFFFF", 2)); got != "#FFFFFF" {
-		t.Fatalf("expected t>1 to clamp to end color, got %q", got)
-	}
-}
-
-func TestLandingFrameGlowPositionPhases(t *testing.T) {
-	inactive := landingFrameGlowPosition(0, 5, 3, false)
-	if inactive.topCol != -1 || inactive.leftRow != -1 || inactive.rightRow != -1 {
-		t.Fatalf("expected inactive glow state to be disabled, got %+v", inactive)
-	}
-
-	down := landingFrameGlowPosition(1, 5, 3, true)
-	if down.rightRow != 1 {
-		t.Fatalf("expected right-side downward phase at row 1, got %+v", down)
-	}
-
-	up := landingFrameGlowPosition(3, 5, 3, true)
-	if up.rightRow != 1 {
-		t.Fatalf("expected right-side upward phase at row 1, got %+v", up)
-	}
-
-	top := landingFrameGlowPosition(5, 5, 3, true)
-	if top.topCol != 8 {
-		t.Fatalf("expected top phase to start from rightmost column 8, got %+v", top)
-	}
-
-	left := landingFrameGlowPosition(14, 5, 3, true)
-	if left.leftRow != 1 {
-		t.Fatalf("expected left-side downward phase at row 1, got %+v", left)
-	}
-}
-
-func TestLandingFrameTravelFramesAndFrameLineRendering(t *testing.T) {
-	if got := landingFrameTravelFrames(0, 3); got != 1 {
-		t.Fatalf("expected degenerate travel frames to clamp to 1, got %d", got)
-	}
-	if got := landingFrameTravelFrames(5, 3); got != 16 {
-		t.Fatalf("expected travel frames 16 for width=5 rows=3, got %d", got)
-	}
-
-	line := "|--|"
-	plain := renderLandingFrameLine(line, -1)
-	if stripped := xansi.Strip(plain); stripped != line {
-		t.Fatalf("expected plain frame line text to be preserved, got %q", stripped)
-	}
-	glow := renderLandingFrameLine(line, 1)
-	if stripped := xansi.Strip(glow); stripped != line {
-		t.Fatalf("expected glow frame line text to be preserved, got %q", stripped)
+	m := model{width: 0}
+	if got := m.landingPromptHeroWidth(); got != 72 {
+		t.Fatalf("expected default prompt hero width 72, got %d", got)
 	}
 }
 

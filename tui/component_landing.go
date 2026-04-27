@@ -14,43 +14,6 @@ var landingShortcutHints = []footerShortcutHint{
 	{Key: "Ctrl+C", Label: "quit"},
 }
 
-var landingPixelGlyphs = map[rune][]string{
-	'B': {"11110", "10001", "11110", "10001", "11110"},
-	'Y': {"10001", "10001", "01010", "00100", "00100"},
-	'T': {"11111", "00100", "00100", "00100", "00100"},
-	'E': {"11111", "10000", "11110", "10000", "11111"},
-	'M': {"10001", "11011", "10101", "10001", "10001"},
-	'I': {"11111", "00100", "00100", "00100", "11111"},
-	'N': {"10001", "11001", "10101", "10011", "10001"},
-	'D': {"11110", "10001", "10001", "10001", "11110"},
-}
-
-var landingLogoGlyphLines = buildLandingLogoGlyphLines("BYTEMIND")
-
-func buildLandingLogoGlyphLines(text string) []string {
-	rows := []strings.Builder{
-		{}, {}, {}, {}, {},
-	}
-	for i, r := range text {
-		glyph, ok := landingPixelGlyphs[r]
-		if !ok || len(glyph) != len(rows) {
-			continue
-		}
-		for row := range rows {
-			rows[row].WriteString(glyph[row])
-			if i < len(text)-1 {
-				rows[row].WriteByte('0')
-			}
-		}
-	}
-
-	out := make([]string, len(rows))
-	for i := range rows {
-		out[i] = rows[i].String()
-	}
-	return out
-}
-
 func (m model) renderLandingHero() string {
 	innerWidth := m.landingPromptHeroWidth()
 	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#1E2E3A"))
@@ -63,9 +26,9 @@ func (m model) renderLandingHero() string {
 
 	headerHost := headerHostStyle.Render("bytemind@localhost:~")
 	dots := strings.Join([]string{
-		dotMutedStyle.Render("●"),
-		dotMutedStyle.Render("●"),
-		dotActiveStyle.Render("●"),
+		dotMutedStyle.Render("o"),
+		dotMutedStyle.Render("o"),
+		dotActiveStyle.Render("o"),
 	}, " ")
 	headerGap := max(1, innerWidth-lipgloss.Width(headerHost)-lipgloss.Width(dots))
 	headerRow := padLandingANSI(headerHost+strings.Repeat(" ", headerGap)+dots, innerWidth)
@@ -74,18 +37,18 @@ func (m model) renderLandingHero() string {
 	blankRow := strings.Repeat(" ", innerWidth)
 	cursorGlyph := " "
 	if m.landingPromptCursorVisible() {
-		cursorGlyph = "█"
+		cursorGlyph = "_"
 	}
 	cursorRow := padLandingANSI("  "+cursorStyle.Render(cursorGlyph), innerWidth)
 
 	frame := strings.Join([]string{
-		borderStyle.Render("┌" + strings.Repeat("─", innerWidth) + "┐"),
-		borderStyle.Render("│") + headerRow + borderStyle.Render("│"),
-		borderStyle.Render("├" + strings.Repeat("─", innerWidth) + "┤"),
-		borderStyle.Render("│") + promptRow + borderStyle.Render("│"),
-		borderStyle.Render("│") + blankRow + borderStyle.Render("│"),
-		borderStyle.Render("│") + cursorRow + borderStyle.Render("│"),
-		borderStyle.Render("└" + strings.Repeat("─", innerWidth) + "┘"),
+		borderStyle.Render("+" + strings.Repeat("-", innerWidth) + "+"),
+		borderStyle.Render("|") + headerRow + borderStyle.Render("|"),
+		borderStyle.Render("+" + strings.Repeat("-", innerWidth) + "+"),
+		borderStyle.Render("|") + promptRow + borderStyle.Render("|"),
+		borderStyle.Render("|") + blankRow + borderStyle.Render("|"),
+		borderStyle.Render("|") + cursorRow + borderStyle.Render("|"),
+		borderStyle.Render("+" + strings.Repeat("-", innerWidth) + "+"),
 	}, "\n")
 
 	subtitle := landingSubtitleStyle.Render("Your AI assistant")
@@ -264,239 +227,4 @@ func (m model) renderLandingCanvasRow(line string, row int) string {
 
 func (m model) landingGradientColor(row int) lipgloss.Color {
 	return colorLandingPanel
-}
-
-type landingAnimationState struct {
-	logoActive  bool
-	logoBeam10  int
-	frameActive bool
-	frameStep   int
-}
-
-func (m model) landingAnimationState(logoCols, logoRows int) landingAnimationState {
-	if logoCols <= 0 || logoRows <= 0 {
-		return landingAnimationState{}
-	}
-	const (
-		logoStartCol = -10
-		logoAdvance  = 3 // 0.3 col per tick for smoother motion.
-	)
-	// Keep the logo beam moving strictly left -> right.
-	logoEndCol := max(logoStartCol, logoCols-1)
-	logoDistance10 := max(0, (logoEndCol-logoStartCol)*10)
-	logoFrames := 1 + ((logoDistance10 + logoAdvance - 1) / logoAdvance)
-
-	innerWidth := logoCols * 2
-	frameFrames := landingFrameTravelFrames(innerWidth, logoRows)
-
-	totalFrames := logoFrames + frameFrames
-	if totalFrames <= 0 {
-		return landingAnimationState{}
-	}
-	step := m.landingGlowStep % totalFrames
-	if step < logoFrames {
-		return landingAnimationState{
-			logoActive: true,
-			logoBeam10: logoStartCol*10 + step*logoAdvance,
-		}
-	}
-	return landingAnimationState{
-		logoActive:  false,
-		logoBeam10:  logoEndCol * 10,
-		frameActive: true,
-		frameStep:   step - logoFrames,
-	}
-}
-
-type landingFrameGlowState struct {
-	topCol   int
-	leftRow  int
-	rightRow int
-}
-
-func landingFrameTravelFrames(innerWidth, rowCount int) int {
-	if innerWidth <= 0 || rowCount <= 0 {
-		return 1
-	}
-	topFrameLen := innerWidth + 4
-	rightDown := rowCount
-	rightUp := max(0, rowCount-1)
-	leftDown := max(0, rowCount-1)
-	return max(1, rightDown+rightUp+topFrameLen+leftDown)
-}
-
-func landingFrameGlowPosition(frameStep, innerWidth, rowCount int, active bool) landingFrameGlowState {
-	if !active || innerWidth <= 0 || rowCount <= 0 {
-		return landingFrameGlowState{topCol: -1, leftRow: -1, rightRow: -1}
-	}
-
-	topFrameLen := innerWidth + 4
-	rightDown := rowCount
-	rightUp := max(0, rowCount-1)
-	leftDown := max(0, rowCount-1)
-	total := rightDown + rightUp + topFrameLen + leftDown
-	if total <= 0 {
-		return landingFrameGlowState{topCol: -1, leftRow: -1, rightRow: -1}
-	}
-
-	step := frameStep % total
-	if step < rightDown {
-		return landingFrameGlowState{topCol: -1, leftRow: -1, rightRow: step}
-	}
-	step -= rightDown
-
-	if step < rightUp {
-		return landingFrameGlowState{topCol: -1, leftRow: -1, rightRow: (rowCount - 2) - step}
-	}
-	step -= rightUp
-
-	if step < topFrameLen {
-		return landingFrameGlowState{topCol: topFrameLen - 1 - step, leftRow: -1, rightRow: -1}
-	}
-	step -= topFrameLen
-
-	if step < leftDown {
-		return landingFrameGlowState{topCol: -1, leftRow: step + 1, rightRow: -1}
-	}
-	return landingFrameGlowState{topCol: -1, leftRow: rowCount - 1, rightRow: -1}
-}
-
-func renderLandingFrameLine(line string, glowCol int) string {
-	if glowCol < 0 {
-		return landingLogoFrameStyle.Render(line)
-	}
-	var b strings.Builder
-	for idx, r := range line {
-		ch := string(r)
-		switch absInt(idx - glowCol) {
-		case 0:
-			b.WriteString(landingLogoFrameGlowStyle.Render(ch))
-		case 1:
-			b.WriteString(landingLogoFrameSoftStyle.Render(ch))
-		default:
-			b.WriteString(landingLogoFrameStyle.Render(ch))
-		}
-	}
-	return b.String()
-}
-
-func (m model) renderLandingPixelRow(pattern string, _ int, beamRaw10 int, active bool) string {
-	beamCol10 := beamRaw10
-	const pixelCell = "  "
-
-	var b strings.Builder
-	for col, ch := range pattern {
-		if ch != '1' {
-			b.WriteString(pixelCell)
-			continue
-		}
-
-		pixelStyle := landingLogoPixelStyle
-		if active {
-			d10 := absInt(col*10 - beamCol10)
-			// Use a single highlight color for the flowing beam.
-			if d10 <= 7 {
-				pixelStyle = landingLogoPixelGlowStyle
-			}
-		}
-
-		b.WriteString(pixelStyle.Render(pixelCell))
-	}
-	return b.String()
-}
-
-func dashedPattern(width int) string {
-	if width <= 0 {
-		return ""
-	}
-	pattern := strings.Repeat("- ", (width/2)+2)
-	return pattern[:width]
-}
-
-func maxLineWidth(lines []string) int {
-	maxWidth := 0
-	for _, line := range lines {
-		if w := lipgloss.Width(line); w > maxWidth {
-			maxWidth = w
-		}
-	}
-	return maxWidth
-}
-
-func centeredText(text string, width int) string {
-	text = strings.TrimSpace(text)
-	if width <= lipgloss.Width(text) {
-		return text
-	}
-	left := (width - lipgloss.Width(text)) / 2
-	right := max(0, width-left-lipgloss.Width(text))
-	return strings.Repeat(" ", left) + text + strings.Repeat(" ", right)
-}
-
-func lerpHexColor(startHex, endHex string, t float64) lipgloss.Color {
-	sr, sg, sb := parseHexColor(startHex)
-	er, eg, eb := parseHexColor(endHex)
-	if t < 0 {
-		t = 0
-	} else if t > 1 {
-		t = 1
-	}
-	r := int(float64(sr) + (float64(er-sr) * t))
-	g := int(float64(sg) + (float64(eg-sg) * t))
-	b := int(float64(sb) + (float64(eb-sb) * t))
-	return lipgloss.Color(formatHexColor(r, g, b))
-}
-
-func parseHexColor(hex string) (int, int, int) {
-	value := strings.TrimPrefix(strings.TrimSpace(hex), "#")
-	if len(value) != 6 {
-		return 0, 0, 0
-	}
-	parseByte := func(s string) int {
-		var v int
-		for _, ch := range s {
-			v <<= 4
-			switch {
-			case ch >= '0' && ch <= '9':
-				v += int(ch - '0')
-			case ch >= 'a' && ch <= 'f':
-				v += int(ch-'a') + 10
-			case ch >= 'A' && ch <= 'F':
-				v += int(ch-'A') + 10
-			}
-		}
-		return v
-	}
-	return parseByte(value[0:2]), parseByte(value[2:4]), parseByte(value[4:6])
-}
-
-func formatHexColor(r, g, b int) string {
-	clampChannel := func(v int) int {
-		if v < 0 {
-			return 0
-		}
-		if v > 255 {
-			return 255
-		}
-		return v
-	}
-	const hexDigits = "0123456789ABCDEF"
-	r = clampChannel(r)
-	g = clampChannel(g)
-	b = clampChannel(b)
-	buf := []byte{'#', '0', '0', '0', '0', '0', '0'}
-	buf[1] = hexDigits[(r>>4)&0xF]
-	buf[2] = hexDigits[r&0xF]
-	buf[3] = hexDigits[(g>>4)&0xF]
-	buf[4] = hexDigits[g&0xF]
-	buf[5] = hexDigits[(b>>4)&0xF]
-	buf[6] = hexDigits[b&0xF]
-	return string(buf)
-}
-
-func absInt(v int) int {
-	if v < 0 {
-		return -v
-	}
-	return v
 }

@@ -82,12 +82,19 @@ func TestLandingPromptHelpers(t *testing.T) {
 		t.Fatalf("expected default prompt hero width 74, got %d", got)
 	}
 
-	rows := landingPixelLogoRows("BY", landingModeStyle)
-	if len(rows) != 6 {
-		t.Fatalf("expected 6 pixel logo rows, got %d", len(rows))
+	rows := landingPixelLogoRows("BY", landingModeStyle, 120)
+	if len(rows) != 7 {
+		t.Fatalf("expected 7 pixel logo rows, got %d", len(rows))
 	}
 	if !strings.Contains(rows[0], "█") {
 		t.Fatalf("expected pixel row to contain block glyph, got %q", rows[0])
+	}
+	narrowRows := landingPixelLogoRows("BYTEMIND", landingModeStyle, 50)
+	if len(narrowRows) != 7 {
+		t.Fatalf("expected 7 compact pixel rows, got %d", len(narrowRows))
+	}
+	if got := xansi.StringWidth(narrowRows[0]); got > 50 {
+		t.Fatalf("expected compact pixel row width <= 50, got %d", got)
 	}
 }
 

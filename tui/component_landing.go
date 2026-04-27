@@ -37,7 +37,7 @@ func (m model) renderLandingHero() string {
 	headerRow := headerBgStyle.Render(padLandingANSI(headerHost+strings.Repeat(" ", headerGap)+dots, innerWidth))
 
 	promptRow := padLandingANSI("  "+promptSigilStyle.Render(">_")+"  "+promptLabelStyle.Render("launching bytemind"), innerWidth)
-	pixelRows := landingPixelLogoRows("BYTEMIND", pixelStyle)
+	pixelRows := landingPixelLogoRows("BYTEMIND", pixelStyle, innerWidth-2)
 	logoRows := make([]string, 0, len(pixelRows))
 	for _, row := range pixelRows {
 		left := max(0, (innerWidth-lipgloss.Width(row))/2)
@@ -86,112 +86,141 @@ func padLandingANSI(text string, width int) string {
 
 var landingPixelGlyphs = map[rune][]string{
 	'B': {
-		"1110",
-		"1001",
-		"1110",
-		"1001",
-		"1001",
-		"1110",
+		"11110",
+		"10001",
+		"10001",
+		"11110",
+		"10001",
+		"10001",
+		"11110",
 	},
 	'Y': {
-		"1001",
-		"1001",
-		"0110",
-		"0010",
-		"0010",
-		"0010",
+		"10001",
+		"10001",
+		"01010",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
 	},
 	'T': {
-		"1111",
-		"0010",
-		"0010",
-		"0010",
-		"0010",
-		"0010",
+		"11111",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
 	},
 	'E': {
-		"1111",
-		"1000",
-		"1110",
-		"1000",
-		"1000",
-		"1111",
+		"11111",
+		"10000",
+		"10000",
+		"11110",
+		"10000",
+		"10000",
+		"11111",
 	},
 	'M': {
-		"1001",
-		"1111",
-		"1001",
-		"1001",
-		"1001",
-		"1001",
+		"10001",
+		"11011",
+		"10101",
+		"10101",
+		"10001",
+		"10001",
+		"10001",
 	},
 	'I': {
-		"1111",
-		"0010",
-		"0010",
-		"0010",
-		"0010",
-		"1111",
+		"11111",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+		"00100",
+		"11111",
 	},
 	'N': {
-		"1001",
-		"1101",
-		"1011",
-		"1001",
-		"1001",
-		"1001",
+		"10001",
+		"11001",
+		"10101",
+		"10011",
+		"10001",
+		"10001",
+		"10001",
 	},
 	'D': {
-		"1110",
-		"1001",
-		"1001",
-		"1001",
-		"1001",
-		"1110",
+		"11110",
+		"10001",
+		"10001",
+		"10001",
+		"10001",
+		"10001",
+		"11110",
 	},
 	' ': {
-		"0000",
-		"0000",
-		"0000",
-		"0000",
-		"0000",
-		"0000",
+		"00000",
+		"00000",
+		"00000",
+		"00000",
+		"00000",
+		"00000",
+		"00000",
 	},
 }
 
-func landingPixelLogoRows(text string, onStyle lipgloss.Style) []string {
-	const glyphHeight = 6
-	onCell := onStyle.Render("██")
-	offCell := "  "
+func landingPixelLogoRows(text string, onStyle lipgloss.Style, maxWidth int) []string {
+	const glyphHeight = 7
 	runes := []rune(text)
 	if len(runes) == 0 {
 		return nil
 	}
-	rowBuilders := make([]strings.Builder, glyphHeight)
-	for i, r := range runes {
-		glyph, ok := landingPixelGlyphs[unicode.ToUpper(r)]
-		if !ok {
-			glyph = landingPixelGlyphs[' ']
-		}
-		for rowIdx := 0; rowIdx < glyphHeight; rowIdx++ {
-			rowPattern := glyph[rowIdx]
-			for _, cell := range rowPattern {
-				if cell == '1' {
-					rowBuilders[rowIdx].WriteString(onCell)
-				} else {
-					rowBuilders[rowIdx].WriteString(offCell)
+	renderWithCells := func(onCell, offCell, letterGap string) []string {
+		rowBuilders := make([]strings.Builder, glyphHeight)
+		for i, r := range runes {
+			glyph, ok := landingPixelGlyphs[unicode.ToUpper(r)]
+			if !ok {
+				glyph = landingPixelGlyphs[' ']
+			}
+			for rowIdx := 0; rowIdx < glyphHeight; rowIdx++ {
+				rowPattern := glyph[rowIdx]
+				for _, cell := range rowPattern {
+					if cell == '1' {
+						rowBuilders[rowIdx].WriteString(onCell)
+					} else {
+						rowBuilders[rowIdx].WriteString(offCell)
+					}
+				}
+				if i < len(runes)-1 {
+					rowBuilders[rowIdx].WriteString(letterGap)
 				}
 			}
-			if i < len(runes)-1 {
-				rowBuilders[rowIdx].WriteByte(' ')
-			}
+		}
+		rows := make([]string, glyphHeight)
+		for i := range rowBuilders {
+			rows[i] = rowBuilders[i].String()
+		}
+		return rows
+	}
+
+	configs := []struct {
+		onCell    string
+		offCell   string
+		letterGap string
+	}{
+		{onCell: onStyle.Render("█") + " ", offCell: "  ", letterGap: " "},
+		{onCell: onStyle.Render("██"), offCell: "  ", letterGap: " "},
+		{onCell: onStyle.Render("█"), offCell: " ", letterGap: " "},
+	}
+
+	lastRows := []string{}
+	for _, cfg := range configs {
+		rows := renderWithCells(cfg.onCell, cfg.offCell, cfg.letterGap)
+		lastRows = rows
+		if maxWidth <= 0 || lipgloss.Width(rows[0]) <= maxWidth {
+			return rows
 		}
 	}
-	rows := make([]string, glyphHeight)
-	for i := range rowBuilders {
-		rows[i] = rowBuilders[i].String()
-	}
-	return rows
+	return lastRows
 }
 
 func (m model) renderLandingOverlayPanel() string {

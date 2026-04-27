@@ -2663,6 +2663,94 @@ func TestHandleKeyCapturesImplicitClipboardRuneBurstBeforeVisibleInput(t *testin
 	}
 }
 
+func TestHandleKeyCapturesSingleMultibyteClipboardRuneBeforeVisibleInput(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	m.clipboardRead = fakeClipboardTextReader{
+		text: strings.Join([]string{
+			"能、帮我看下这个仓库结构",
+			"给这段代码做 review",
+			"顺便看一下最近改动",
+			"补充下测试建议",
+			"最后总结风险点",
+		}, "\n"),
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("能")})
+	updated := got.(model)
+	if updated.input.Value() != "" {
+		t.Fatalf("expected single multibyte rune to stay hidden before confirmation, got %q", updated.input.Value())
+	}
+	if !updated.hiddenPasteProbe.active {
+		t.Fatalf("expected hidden paste probe to activate for single multibyte rune")
+	}
+	if updated.hiddenPasteProbe.buffered != "能" {
+		t.Fatalf("expected hidden paste probe to buffer the first rune, got %q", updated.hiddenPasteProbe.buffered)
+	}
+}
+
+func TestHiddenPasteProbeCommitsMarkerOnSecondMatchingRune(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	m.clipboardRead = fakeClipboardTextReader{
+		text: strings.Join([]string{
+			"能、帮我看下这个仓库结构",
+			"给这段代码做 review",
+			"顺便看一下最近改动",
+			"补充下测试建议",
+			"最后总结风险点",
+		}, "\n"),
+	}
+
+	got, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("能")})
+	updated := got.(model)
+	if cmd == nil {
+		t.Fatalf("expected first hidden probe rune to schedule a flush command")
+	}
+
+	got, _ = updated.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("、")})
+	updated = got.(model)
+	if !regexp.MustCompile(`^\[Paste #\d+ ~\d+ lines\]$`).MatchString(updated.input.Value()) {
+		t.Fatalf("expected second matching rune to commit marker without visible raw text, got %q", updated.input.Value())
+	}
+	if updated.hiddenPasteProbe.active {
+		t.Fatalf("expected hidden paste probe to clear after marker commit")
+	}
+	if !updated.pasteTransaction.Active || updated.pasteTransaction.Consumed != 2 {
+		t.Fatalf("expected marker commit to start transaction with consumed=2, got active=%v consumed=%d", updated.pasteTransaction.Active, updated.pasteTransaction.Consumed)
+	}
+}
+
+func TestHiddenPasteProbeFlushesBufferedRuneWhenNotConfirmed(t *testing.T) {
+	m := newImagePipelineModel(t)
+	m.screen = screenChat
+	m.clipboardRead = fakeClipboardTextReader{
+		text: strings.Join([]string{
+			"能、帮我看下这个仓库结构",
+			"给这段代码做 review",
+			"顺便看一下最近改动",
+			"补充下测试建议",
+			"最后总结风险点",
+		}, "\n"),
+	}
+
+	got, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("能")})
+	updated := got.(model)
+	if !updated.hiddenPasteProbe.active {
+		t.Fatalf("expected hidden paste probe to activate")
+	}
+	flushID := updated.hiddenPasteProbe.flushID
+
+	got, _ = updated.Update(hiddenPasteProbeFlushMsg{ID: flushID})
+	flushed := got.(model)
+	if flushed.hiddenPasteProbe.active {
+		t.Fatalf("expected hidden paste probe to clear after flush")
+	}
+	if flushed.input.Value() != "能" {
+		t.Fatalf("expected buffered rune to flush into visible input, got %q", flushed.input.Value())
+	}
+}
+
 func TestTerminalPasteEventWithEmptyPayloadPastesClipboardImage(t *testing.T) {
 	m := newImagePipelineModel(t)
 	m.screen = screenChat

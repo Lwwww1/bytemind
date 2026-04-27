@@ -53,6 +53,7 @@ const (
 	thinkingSpinnerFPS         = 80 * time.Millisecond
 	pasteAggregateDebounce     = 120 * time.Millisecond
 	pasteBurstSettleDelay      = 120 * time.Millisecond
+	hiddenPasteProbeDelay      = 45 * time.Millisecond
 )
 
 type footerShortcutHint struct {
@@ -253,6 +254,10 @@ type pasteBurstSettleMsg struct {
 	Generation int
 }
 
+type hiddenPasteProbeFlushMsg struct {
+	ID int
+}
+
 type mcpCommandResultMsg struct {
 	Input    string
 	Response string
@@ -284,6 +289,16 @@ type pasteBurstCandidateState struct {
 	lastEventAt time.Time
 	charCount   int
 	eventCount  int
+}
+
+type hiddenPasteProbeState struct {
+	active      bool
+	baseInput   string
+	clipboard   string
+	buffered    string
+	startedAt   time.Time
+	lastEventAt time.Time
+	flushID     int
 }
 
 var commandItems = []commandItem{
@@ -415,6 +430,7 @@ type model struct {
 	pasteBurstLastEventAt      time.Time
 	pasteBurstSource           string
 	pasteBurstGeneration       int
+	hiddenPasteProbe           hiddenPasteProbeState
 	clipboard                  clipboardImageReader
 	clipboardRead              clipboardTextReader
 	clipboardText              clipboardTextWriter
@@ -778,6 +794,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clearPasteBurstCapture()
 		return m, nil
+	case hiddenPasteProbeFlushMsg:
+		if !m.hiddenPasteProbe.active || msg.ID != m.hiddenPasteProbe.flushID {
+			return m, nil
+		}
+		m.flushHiddenPasteProbeToInput()
+		m.syncInputOverlays()
+		return m, nil
 	case mouseSelectionScrollTickMsg:
 		return m.handleMouseSelectionScrollTick(msg)
 	case tokenMonitorTickMsg:
@@ -907,22 +930,24 @@ func isCtrlVPasteKey(msg tea.KeyMsg) bool {
 	return normalizeKeyName(msg.String()) == "ctrl+v"
 }
 
-func (m *model) tryStartImplicitClipboardPasteFromKey(msg tea.KeyMsg) bool {
-	if m == nil || msg.Paste || m.hasActivePasteSession() || m.hasActivePasteBurst() {
+func allowsImmediateSingleRuneClipboardCapture(currentInput, fragment string) bool {
+	fragment = strings.TrimSpace(fragment)
+	if len([]rune(fragment)) != 1 || len(fragment) <= 1 {
 		return false
 	}
-	if msg.Type != tea.KeyRunes || len(msg.Runes) <= 1 {
+	trimmed := strings.TrimSpace(currentInput)
+	if trimmed == "" {
+		return true
+	}
+	chain, ok := extractLeadingCompressedMarker(trimmed)
+	return ok && chain == trimmed
+}
+
+func (m *model) commitImplicitClipboardPaste(prefix, clipboardText string) bool {
+	if m == nil {
 		return false
 	}
-	fragment := normalizeNewlines(strings.ReplaceAll(string(msg.Runes), ctrlVMarkerRune, ""))
-	if strings.TrimSpace(fragment) == "" {
-		return false
-	}
-	clipboardText, ok := m.readClipboardTextForPaste()
-	if !ok || !m.isLongPastedText(clipboardText) {
-		return false
-	}
-	if !strings.HasPrefix(normalizeNewlines(clipboardText), fragment) {
+	if strings.TrimSpace(prefix) == "" || strings.TrimSpace(clipboardText) == "" {
 		return false
 	}
 	marker, content, err := m.compressPastedText(clipboardText)
@@ -930,16 +955,82 @@ func (m *model) tryStartImplicitClipboardPasteFromKey(msg tea.KeyMsg) bool {
 		m.statusNote = err.Error()
 		return false
 	}
+	base := m.input.Value()
+	if m.hiddenPasteProbe.active {
+		base = m.hiddenPasteProbe.baseInput
+	}
 	m.beginPasteTransaction(clipboardText, "clipboard-capture")
-	m.pasteTransaction.Consumed = len([]rune(fragment))
-	m.setInputValue(m.input.Value() + marker)
+	m.pasteTransaction.Consumed = len([]rune(prefix))
+	m.setInputValue(base + marker)
 	now := time.Now()
 	m.lastPasteAt = now
 	m.markPasteConfirmPending(now)
 	m.statusNote = fmt.Sprintf("Long pasted text (%d lines) compressed as %s. Use [Paste #%s], [Paste #%s line10], or [Paste #%s line10~line20].",
 		content.Lines, marker, content.ID, content.ID, content.ID)
 	m.syncInputOverlays()
+	m.clearHiddenPasteProbe()
 	return true
+}
+
+func (m *model) handleHiddenPasteProbeKey(msg tea.KeyMsg) (bool, tea.Cmd) {
+	if m == nil || !m.hiddenPasteProbe.active {
+		return false, nil
+	}
+	fragment, ok := pasteEchoFragmentFromKey(msg)
+	if !ok {
+		m.flushHiddenPasteProbeToInput()
+		return false, nil
+	}
+	fragment = normalizeNewlines(strings.ReplaceAll(fragment, ctrlVMarkerRune, ""))
+	if strings.TrimSpace(fragment) == "" {
+		m.flushHiddenPasteProbeToInput()
+		return false, nil
+	}
+	probe := m.hiddenPasteProbe
+	candidate := probe.buffered + fragment
+	clipboard := normalizeNewlines(probe.clipboard)
+	if !strings.HasPrefix(clipboard, candidate) {
+		m.flushHiddenPasteProbeToInput()
+		return false, nil
+	}
+	probe.buffered = candidate
+	probe.lastEventAt = time.Now()
+	probe.flushID++
+	m.hiddenPasteProbe = probe
+	if len([]rune(strings.TrimSpace(candidate))) >= 2 || strings.Contains(candidate, "\n") || strings.Contains(candidate, "\t") {
+		return m.commitImplicitClipboardPaste(candidate, probe.clipboard), nil
+	}
+	return true, scheduleHiddenPasteProbeFlush(probe.flushID)
+}
+
+func (m *model) tryStartImplicitClipboardPasteFromKey(msg tea.KeyMsg) tea.Cmd {
+	if m == nil || msg.Paste || m.hasActivePasteSession() || m.hasActivePasteBurst() || m.hiddenPasteProbe.active {
+		return nil
+	}
+	if msg.Type != tea.KeyRunes || len(msg.Runes) == 0 {
+		return nil
+	}
+	fragment := normalizeNewlines(strings.ReplaceAll(string(msg.Runes), ctrlVMarkerRune, ""))
+	if strings.TrimSpace(fragment) == "" {
+		return nil
+	}
+	clipboardText, ok := m.readClipboardTextForPaste()
+	if !ok || !m.isLongPastedText(clipboardText) {
+		return nil
+	}
+	if !strings.HasPrefix(normalizeNewlines(clipboardText), fragment) {
+		return nil
+	}
+	if len(msg.Runes) == 1 && !allowsImmediateSingleRuneClipboardCapture(m.input.Value(), fragment) {
+		return nil
+	}
+	if len(msg.Runes) == 1 {
+		return m.startHiddenPasteProbe(fragment, clipboardText)
+	}
+	if m.commitImplicitClipboardPaste(fragment, clipboardText) {
+		return func() tea.Msg { return nil }
+	}
+	return nil
 }
 
 func (m model) pasteFragmentFromKey(msg tea.KeyMsg) (string, string, bool) {
@@ -1157,8 +1248,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.tryStartImplicitClipboardPasteFromKey(msg) {
-		return m, nil
+	if handled, cmd := m.handleHiddenPasteProbeKey(msg); handled {
+		return m, cmd
+	}
+
+	if cmd := m.tryStartImplicitClipboardPasteFromKey(msg); cmd != nil {
+		return m, cmd
 	}
 
 	if m.shouldPromoteImplicitPasteCandidate(msg) {

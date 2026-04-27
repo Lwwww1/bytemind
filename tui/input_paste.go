@@ -85,6 +85,12 @@ func schedulePasteBurstSettle(generation int) tea.Cmd {
 	})
 }
 
+func scheduleHiddenPasteProbeFlush(id int) tea.Cmd {
+	return tea.Tick(hiddenPasteProbeDelay, func(time.Time) tea.Msg {
+		return hiddenPasteProbeFlushMsg{ID: id}
+	})
+}
+
 func (m *model) touchPasteBurst(source string) int {
 	if m == nil {
 		return 0
@@ -421,6 +427,50 @@ func (m *model) clearPasteSession() {
 	}
 	m.pasteSession = pasteSessionState{}
 	m.clearPasteBurstCandidate()
+}
+
+func (m *model) clearHiddenPasteProbe() {
+	if m == nil {
+		return
+	}
+	m.hiddenPasteProbe = hiddenPasteProbeState{}
+}
+
+func (m *model) startHiddenPasteProbe(fragment, clipboardText string) tea.Cmd {
+	if m == nil {
+		return nil
+	}
+	now := time.Now()
+	id := m.hiddenPasteProbe.flushID + 1
+	if id <= 0 {
+		id = 1
+	}
+	m.hiddenPasteProbe = hiddenPasteProbeState{
+		active:      true,
+		baseInput:   m.input.Value(),
+		clipboard:   clipboardText,
+		buffered:    fragment,
+		startedAt:   now,
+		lastEventAt: now,
+		flushID:     id,
+	}
+	return scheduleHiddenPasteProbeFlush(id)
+}
+
+func (m *model) flushHiddenPasteProbeToInput() {
+	if m == nil || !m.hiddenPasteProbe.active {
+		return
+	}
+	probe := m.hiddenPasteProbe
+	m.clearHiddenPasteProbe()
+	if strings.TrimSpace(probe.buffered) == "" {
+		return
+	}
+	m.setInputValue(probe.baseInput + probe.buffered)
+	now := time.Now()
+	m.lastInputAt = now
+	m.inputBurstBaseValue = probe.baseInput
+	m.inputBurstSize = max(1, len([]rune(strings.TrimSpace(probe.buffered))))
 }
 
 func (m *model) readClipboardTextForPaste() (string, bool) {

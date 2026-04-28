@@ -52,7 +52,7 @@ func TestRenderLandingProducesContent(t *testing.T) {
 	if !strings.Contains(plain, landingInputPlaceholder) {
 		t.Fatalf("expected action-oriented landing placeholder, got %q", plain)
 	}
-	for _, want := range []string{"[Enter] send", "[Shift+Enter] newline", "[/] commands", "[Ctrl+L] sessions", "[Ctrl+C] quit"} {
+	for _, want := range []string{"[Enter] send", "[Ctrl+J] newline", "[/] commands", "[Ctrl+L] sessions", "[Ctrl+C] quit"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("expected landing shortcut hint %q, got %q", want, plain)
 		}

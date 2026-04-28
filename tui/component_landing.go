@@ -11,7 +11,7 @@ import (
 
 var landingShortcutHints = []footerShortcutHint{
 	{Key: "Enter", Label: "send"},
-	{Key: "Shift+Enter", Label: "newline"},
+	{Key: "Ctrl+J", Label: "newline"},
 	{Key: "/", Label: "commands"},
 	{Key: "Ctrl+L", Label: "sessions"},
 	{Key: "Ctrl+C", Label: "quit"},

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"bytemind/internal/config"
+	"github.com/1024XEngineer/bytemind/internal/config"
 )
 
 func TestMaybePrintUpdateReminderSkipsWhenDisabled(t *testing.T) {
@@ -238,7 +238,7 @@ func TestFetchLatestVersionFromGitHubSuccessAndHeaders(t *testing.T) {
 	if receivedAccept != "application/vnd.github+json" {
 		t.Fatalf("expected accept header, got %q", receivedAccept)
 	}
-	if receivedUserAgent != "bytemind/v1.0.0" {
+	if receivedUserAgent != "github.com/1024XEngineer/bytemind/v1.0.0" {
 		t.Fatalf("expected user-agent header, got %q", receivedUserAgent)
 	}
 }

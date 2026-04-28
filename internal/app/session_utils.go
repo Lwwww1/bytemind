@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"bytemind/internal/session"
+	"github.com/1024XEngineer/bytemind/internal/session"
 )
 
 const DefaultSessionListLimit = 8

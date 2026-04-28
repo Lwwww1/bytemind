@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"bytemind/internal/session"
+	"github.com/1024XEngineer/bytemind/internal/session"
 )
 
 func TestResolveSessionIDSupportsUniquePrefix(t *testing.T) {

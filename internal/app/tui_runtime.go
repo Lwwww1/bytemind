@@ -6,10 +6,10 @@ import (
 	"io"
 	"os"
 
-	"bytemind/internal/assets"
-	"bytemind/internal/config"
-	"bytemind/internal/mcpctl"
-	"bytemind/tui"
+	"github.com/1024XEngineer/bytemind/internal/assets"
+	"github.com/1024XEngineer/bytemind/internal/config"
+	"github.com/1024XEngineer/bytemind/internal/mcpctl"
+	"github.com/1024XEngineer/bytemind/tui"
 )
 
 type TUIRequest struct {

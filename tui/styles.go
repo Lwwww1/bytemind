@@ -172,34 +172,17 @@ var (
 
 	landingVersionStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#DDE6F0")).
-				Background(colorLandingPanel).
+				Background(lipgloss.Color("#020A14")).
 				Faint(true)
-
-	landingHintStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#7FA4CC")).
-				Background(colorLandingPanel)
-
-	landingActionKeyStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#DCEBFF")).
-				Background(colorLandingPanel).
-				Bold(true)
-
-	landingActionLabelStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#A9C6E8")).
-				Background(colorLandingPanel)
-
-	landingActionDividerStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#5E7DA4")).
-					Background(colorLandingPanel)
 
 	landingModeBuildActiveStyle = lipgloss.NewStyle().
 					Foreground(lipgloss.Color("#4CB7FF")).
-					Background(colorLandingPanel).
+					Background(lipgloss.Color("#06233A")).
 					Bold(true)
 
 	landingModePlanActiveStyle = lipgloss.NewStyle().
 					Foreground(lipgloss.Color("#A9C6E8")).
-					Background(colorLandingPanel).
+					Background(lipgloss.Color("#162036")).
 					Bold(true)
 
 	landingModeInactiveStyle = lipgloss.NewStyle().

@@ -45,11 +45,25 @@ func TestRenderLandingProducesContent(t *testing.T) {
 	if !strings.Contains(plain, "v1.2.3") {
 		t.Fatalf("expected version in landing canvas, got %q", plain)
 	}
+	if !strings.Contains(plain, "[ Build ]") {
+		t.Fatalf("expected active build tab in landing mode row, got %q", plain)
+	}
+	if !strings.Contains(plain, landingInputPlaceholder) {
+		t.Fatalf("expected action-oriented landing placeholder, got %q", plain)
+	}
+	for _, want := range []string{"[Enter] send", "[Shift+Enter] newline", "[/] commands", "[Ctrl+L] sessions", "[Ctrl+C] quit"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("expected landing shortcut hint %q, got %q", want, plain)
+		}
+	}
 	if strings.Contains(plain, "bytemind@localhost") {
 		t.Fatalf("expected prompt hero header not to use localhost label, got %q", plain)
 	}
 	if strings.Contains(plain, "launching bytemind") {
 		t.Fatalf("expected prompt hero launch line to use assistant label, got %q", plain)
+	}
+	if strings.Contains(plain, "Let's get started") {
+		t.Fatalf("expected old landing placeholder to be removed, got %q", plain)
 	}
 	if !strings.Contains(plain, "█") {
 		t.Fatalf("expected prompt hero pixel matrix logo in rendered content, got %q", plain)
@@ -96,6 +110,14 @@ func TestLandingPromptHelpers(t *testing.T) {
 	m := model{width: 0}
 	if got := m.landingPromptHeroWidth(); got != 74 {
 		t.Fatalf("expected default prompt hero width 74, got %d", got)
+	}
+	wide := model{width: 120}
+	if got, want := wide.landingPromptHeroWidth(), wide.landingInputShellWidth(); got != want {
+		t.Fatalf("expected landing hero width to align with input width %d, got %d", want, got)
+	}
+	restoredRows := landingPixelLogoRows(landingLogoText, landingModeStyle, landingModeStyle, 0, wide.landingPromptHeroWidth()-2)
+	if got, want := xansi.StringWidth(restoredRows[0]), landingPreferredLogoWidth(landingLogoText); got != want {
+		t.Fatalf("expected restored-width logo to keep stable pixel width %d, got %d", want, got)
 	}
 	for _, tc := range []struct {
 		workspace string
@@ -150,23 +172,18 @@ func TestRenderLandingCanvasUsesLandingContentTop(t *testing.T) {
 	}
 }
 
-func TestRenderLandingCanvasPlacesVersionBottomRight(t *testing.T) {
+func TestRenderLandingHeroPlacesVersionInHeader(t *testing.T) {
 	m := model{
 		width:   30,
 		height:  5,
 		version: "v1.2.3",
 	}
-	rendered := m.renderLandingCanvas("A")
-	lines := strings.Split(strings.ReplaceAll(rendered, "\r\n", "\n"), "\n")
-	if len(lines) != m.height {
-		t.Fatalf("expected %d canvas rows, got %d", m.height, len(lines))
+	hero := xansi.Strip(m.renderLandingHero())
+	if !strings.Contains(hero, "v1.2.3") {
+		t.Fatalf("expected landing hero header to contain version, got %q", hero)
 	}
-	bottom := xansi.Strip(lines[len(lines)-1])
-	if got := xansi.StringWidth(lines[len(lines)-1]); got != m.width {
-		t.Fatalf("expected version row width %d, got %d", m.width, got)
-	}
-	if !strings.HasSuffix(strings.TrimRight(bottom, " "), "v1.2.3") {
-		t.Fatalf("expected version to be bottom-right aligned, got %q", bottom)
+	if strings.Contains(hero, "●") {
+		t.Fatalf("expected landing hero header to replace mac-style dots with version, got %q", hero)
 	}
 }
 

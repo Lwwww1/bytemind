@@ -10,10 +10,14 @@ import (
 )
 
 var landingShortcutHints = []footerShortcutHint{
+	{Key: "Enter", Label: "send"},
+	{Key: "Shift+Enter", Label: "newline"},
 	{Key: "/", Label: "commands"},
 	{Key: "Ctrl+L", Label: "sessions"},
 	{Key: "Ctrl+C", Label: "quit"},
 }
+
+const landingLogoText = "BYTEMIND"
 
 func (m model) renderLandingHero() string {
 	innerWidth := m.landingPromptHeroWidth()
@@ -25,20 +29,14 @@ func (m model) renderLandingHero() string {
 	brandStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E6F2FF")).Bold(true)
 	pixelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2BE8FF"))
 	pixelGlowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#91CFD5"))
-	dotMutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#455C71"))
-	dotActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64DF69"))
 
 	headerHost := headerHostStyle.Render(landingWorkspaceName(m.workspace))
-	dots := strings.Join([]string{
-		dotMutedStyle.Render("●"),
-		dotMutedStyle.Render("●"),
-		dotActiveStyle.Render("●"),
-	}, " ")
-	headerGap := max(1, innerWidth-lipgloss.Width(headerHost)-lipgloss.Width(dots))
-	headerRow := headerBgStyle.Render(padLandingANSI(headerHost+strings.Repeat(" ", headerGap)+dots, innerWidth))
+	headerMeta := m.landingHeaderVersion(innerWidth - lipgloss.Width(headerHost) - 1)
+	headerGap := max(0, innerWidth-lipgloss.Width(headerHost)-lipgloss.Width(headerMeta))
+	headerRow := headerBgStyle.Render(padLandingANSI(headerHost+strings.Repeat(" ", headerGap)+headerMeta, innerWidth))
 
 	promptRow := padLandingANSI("  "+promptSigilStyle.Render(">_")+"  "+promptLabelStyle.Render("Your AI assistant"), innerWidth)
-	pixelRows := landingPixelLogoRows("BYTEMIND", pixelStyle, pixelGlowStyle, m.landingGlowStep, innerWidth-2)
+	pixelRows := landingPixelLogoRows(landingLogoText, pixelStyle, pixelGlowStyle, m.landingGlowStep, innerWidth-2)
 	logoRows := make([]string, 0, len(pixelRows))
 	for _, row := range pixelRows {
 		left := max(0, (innerWidth-lipgloss.Width(row))/2)
@@ -92,8 +90,34 @@ func (m model) landingPromptHeroWidth() int {
 		return 74
 	}
 	maxFit := max(24, m.width-8)
-	preferred := min(118, max(74, (m.width*5)/6))
+	preferred := max(landingStableHeroWidth(), m.landingInputShellWidth())
 	return clamp(preferred, 62, maxFit)
+}
+
+func landingStableHeroWidth() int {
+	return landingPreferredLogoWidth(landingLogoText) + 2
+}
+
+func landingPreferredLogoWidth(text string) int {
+	const (
+		glyphWidth = 5
+		cellWidth  = 2
+		gapWidth   = 2
+	)
+	runeCount := len([]rune(text))
+	if runeCount == 0 {
+		return 0
+	}
+	return runeCount*glyphWidth*cellWidth + (runeCount-1)*gapWidth
+}
+
+func (m model) landingHeaderVersion(maxWidth int) string {
+	version := strings.TrimSpace(m.version)
+	if version == "" || maxWidth <= 0 {
+		return ""
+	}
+	version = xansi.Cut(version, 0, maxWidth)
+	return landingVersionStyle.Render(version)
 }
 
 func padLandingANSI(text string, width int) string {
@@ -318,25 +342,18 @@ func ensureMinRows(text string, rows int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m model) renderLandingInputActions() string {
-	actions := landingActionKeyStyle.Render("Enter") + " " + landingActionLabelStyle.Render("send") +
-		landingActionDividerStyle.Render(" | ") +
-		landingActionKeyStyle.Render("Shift+Enter") + " " + landingActionLabelStyle.Render("newline")
-	return landingHintStyle.Render(actions)
-}
-
 func (m model) renderLandingModeTabs() string {
-	buildStyle := landingModeInactiveStyle
-	planStyle := landingModeInactiveStyle
+	buildLabel := landingModeInactiveStyle.Render("Build")
+	planLabel := landingModeInactiveStyle.Render("Plan")
 	if m.mode == modeBuild {
-		buildStyle = landingModeBuildActiveStyle
+		buildLabel = landingModeBuildActiveStyle.Render("[ Build ]")
 	} else {
-		planStyle = landingModePlanActiveStyle
+		planLabel = landingModePlanActiveStyle.Render("[ Plan ]")
 	}
-	sep := landingModeInactiveStyle.Render("   ")
-	tabs := buildStyle.Render("Build") +
+	sep := landingModeInactiveStyle.Render("    ")
+	tabs := buildLabel +
 		sep +
-		planStyle.Render("Plan")
+		planLabel
 	modelLabel := m.currentModelLabel()
 	if strings.TrimSpace(modelLabel) == "" || modelLabel == "-" {
 		return tabs
@@ -347,9 +364,10 @@ func (m model) renderLandingModeTabs() string {
 func renderLandingShortcutHints() string {
 	parts := make([]string, 0, len(landingShortcutHints))
 	for _, hint := range landingShortcutHints {
-		parts = append(parts, landingShortcutKeyStyle.Render(hint.Key)+" "+landingShortcutLabelStyle.Render(hint.Label))
+		key := landingShortcutKeyStyle.Render("[" + hint.Key + "]")
+		parts = append(parts, key+" "+landingShortcutLabelStyle.Render(hint.Label))
 	}
-	return strings.Join(parts, landingShortcutDividerStyle.Render("  |  "))
+	return strings.Join(parts, landingShortcutDividerStyle.Render("   "))
 }
 
 func (m model) renderLandingContent(markInputZone bool) string {
@@ -365,8 +383,6 @@ func (m model) renderLandingContent(markInputZone bool) string {
 		parts,
 		"",
 		m.renderLandingInputBox(markInputZone),
-		m.renderLandingInputActions(),
-		"",
 		renderLandingShortcutHints(),
 	)
 	return strings.Join(parts, "\n")
@@ -407,26 +423,7 @@ func (m model) renderLandingCanvas(content string) string {
 	for len(rows) < m.height {
 		rows = append(rows, m.renderLandingCanvasRow("", len(rows)))
 	}
-	if versionRow, ok := m.renderLandingVersionRow(m.height - 1); ok {
-		rows[m.height-1] = versionRow
-	}
 	return strings.Join(rows, "\n")
-}
-
-func (m model) renderLandingVersionRow(row int) (string, bool) {
-	version := strings.TrimSpace(m.version)
-	if version == "" || m.width <= 0 {
-		return "", false
-	}
-	rowStyle := lipgloss.NewStyle().Background(m.landingGradientColor(row))
-	label := landingVersionStyle.Render(version)
-	labelWidth := lipgloss.Width(label)
-	if labelWidth >= m.width {
-		return xansi.Cut(label, 0, m.width), true
-	}
-	left := max(0, m.width-labelWidth-2)
-	right := max(0, m.width-left-labelWidth)
-	return rowStyle.Width(left).Render("") + rowStyle.Render(label) + rowStyle.Width(right).Render(""), true
 }
 
 func (m model) renderLandingCanvasRow(line string, row int) string {

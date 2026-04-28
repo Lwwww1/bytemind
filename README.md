@@ -131,7 +131,7 @@ go run ./cmd/bytemind --yolo
     "api_key": "your-api-key-here"
   },
   "approval_policy": "on-request",
-  "max_iterations": 32,
+  "max_iterations": 64,
   "stream": true
 }
 ```

@@ -131,16 +131,7 @@ func decideBySandboxGuard(in ToolDecisionInput) (ToolDecision, bool) {
 	name := strings.TrimSpace(in.ToolName)
 	switch name {
 	case "web_fetch", "web_search":
-		if in.SandboxWorkerNetwork {
-			return ToolDecision{}, false
-		}
-		backend := sandboxBackendDisplayName(in.SandboxBackend)
-		return ToolDecision{
-			Decision:   corepkg.DecisionDeny,
-			ReasonCode: policyReasonSandboxGuard,
-			Reason:     "system sandbox required mode cannot run web_* tools because backend " + backend + " worker network isolation is unavailable",
-			RiskLevel:  toRiskLevel(in.SafetyClass),
-		}, true
+		return ToolDecision{}, false
 	case "run_shell":
 		if !runShellArgumentsRequireNetworkIsolation(in.ToolArguments) {
 			return ToolDecision{}, false

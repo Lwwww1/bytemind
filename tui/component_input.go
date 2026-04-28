@@ -26,9 +26,9 @@ func (m model) landingInputShellWidth() int {
 func (m model) modeAccentColor() lipgloss.Color {
 	if m.screen == screenLanding {
 		if m.mode == modePlan {
-			return lipgloss.Color("#A9C6E8")
+			return lipgloss.Color(landingPlanAccent)
 		}
-		return lipgloss.Color("#4CB7FF")
+		return lipgloss.Color(landingBuildAccent)
 	}
 	if m.mode == modePlan {
 		return colorThinking

@@ -2,6 +2,12 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
+const (
+	landingBuildAccent = "#4CB7FF"
+	landingPlanAccent  = "#D86BFF"
+	landingPlanBg      = "#2C123D"
+)
+
 type semanticColorTokens struct {
 	Panel         lipgloss.Color
 	PanelMuted    lipgloss.Color
@@ -163,7 +169,7 @@ var (
 					Underline(true)
 
 	landingModeStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#4CB7FF")).
+				Foreground(lipgloss.Color(landingBuildAccent)).
 				Bold(true)
 
 	landingModelStyle = lipgloss.NewStyle().
@@ -176,13 +182,13 @@ var (
 				Faint(true)
 
 	landingModeBuildActiveStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#4CB7FF")).
+					Foreground(lipgloss.Color(landingBuildAccent)).
 					Background(lipgloss.Color("#06233A")).
 					Bold(true)
 
 	landingModePlanActiveStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#A9C6E8")).
-					Background(lipgloss.Color("#162036")).
+					Foreground(lipgloss.Color(landingPlanAccent)).
+					Background(lipgloss.Color(landingPlanBg)).
 					Bold(true)
 
 	landingModeInactiveStyle = lipgloss.NewStyle().

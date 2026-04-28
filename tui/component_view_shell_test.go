@@ -7,6 +7,7 @@ import (
 	"github.com/1024XEngineer/bytemind/internal/config"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
 )
 
@@ -184,6 +185,27 @@ func TestRenderLandingHeroPlacesVersionInHeader(t *testing.T) {
 	}
 	if strings.Contains(hero, "●") {
 		t.Fatalf("expected landing hero header to replace mac-style dots with version, got %q", hero)
+	}
+}
+
+func TestLandingModeAccentColors(t *testing.T) {
+	build := model{screen: screenLanding, mode: modeBuild}
+	if got, want := build.modeAccentColor(), lipgloss.Color(landingBuildAccent); got != want {
+		t.Fatalf("expected landing build input accent %q, got %q", want, got)
+	}
+	if got, want := landingModeBuildActiveStyle.GetForeground(), lipgloss.Color(landingBuildAccent); got != want {
+		t.Fatalf("expected landing build tab accent %q, got %q", want, got)
+	}
+
+	plan := model{screen: screenLanding, mode: modePlan}
+	if got, want := plan.modeAccentColor(), lipgloss.Color(landingPlanAccent); got != want {
+		t.Fatalf("expected landing plan input accent %q, got %q", want, got)
+	}
+	if got, want := landingModePlanActiveStyle.GetForeground(), lipgloss.Color(landingPlanAccent); got != want {
+		t.Fatalf("expected landing plan tab accent %q, got %q", want, got)
+	}
+	if got, want := landingModePlanActiveStyle.GetBackground(), lipgloss.Color(landingPlanBg); got != want {
+		t.Fatalf("expected landing plan tab background %q, got %q", want, got)
 	}
 }
 

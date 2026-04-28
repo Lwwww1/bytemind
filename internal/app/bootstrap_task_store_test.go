@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"bytemind/internal/provider"
-	runtimepkg "bytemind/internal/runtime"
+	"github.com/1024XEngineer/bytemind/internal/provider"
+	runtimepkg "github.com/1024XEngineer/bytemind/internal/runtime"
 )
 
 func TestBootstrapRuntimeFacadeClientCreateMessageReturnsContent(t *testing.T) {

@@ -31,8 +31,8 @@ func (f fakeClipboardImageReader) ReadImage(context.Context) (string, []byte, st
 }
 
 type fakeClipboardTextReader struct {
-	text string
-	err  error
+	text  string
+	err   error
 	calls *int
 }
 
@@ -100,7 +100,7 @@ func TestApplyInputImagePipelineConvertsPastedPathToPlaceholder(t *testing.T) {
 	}
 
 	updated, note := m.applyInputImagePipeline("", imagePath, "ctrl+v")
-	if updated != "[Image #1]" {
+	if updated != "[Image#1]" {
 		t.Fatalf("expected image placeholder, got %q", updated)
 	}
 	if !strings.Contains(note, "Attached 1 image") {
@@ -205,7 +205,7 @@ func TestBuildPromptInputExpandsReferencedPlaceholdersOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build prompt input: %v", err)
 	}
-	if display != "inspect [Image #1] only" {
+	if display != "inspect [Image#1] only" {
 		t.Fatalf("unexpected display text: %q", display)
 	}
 	if len(input.Assets) != 1 {
@@ -292,7 +292,7 @@ func TestApplyInputImagePipelineReplacesInlinePathAndKeepsTrailingText(t *testin
 	}
 
 	updated, note := m.applyInputImagePipeline("", imagePath+"图片在描述什么？", "ctrl+v")
-	if updated != "[Image #1]图片在描述什么？" {
+	if updated != "[Image#1]图片在描述什么？" {
 		t.Fatalf("expected inline path replaced and text preserved, got %q", updated)
 	}
 	if !strings.Contains(note, "Attached 1 image") {
@@ -314,7 +314,7 @@ func TestBuildPromptInputGracefullyDegradesMissingImageAsset(t *testing.T) {
 	if len(input.Assets) != 0 {
 		t.Fatalf("expected no binary asset payload when cache is missing, got %d", len(input.Assets))
 	}
-	if strings.Contains(input.UserMessage.Text(), "[Image #1]") {
+	if strings.Contains(input.UserMessage.Text(), "[Image#1]") {
 		t.Fatalf("expected unavailable marker text, got %q", input.UserMessage.Text())
 	}
 	if !strings.Contains(input.UserMessage.Text(), "Image #1 unavailable") {
@@ -381,7 +381,7 @@ func TestHandleEmptyClipboardPasteReadsAndAttachesImage(t *testing.T) {
 	if !strings.Contains(note, "Attached image from clipboard") {
 		t.Fatalf("expected clipboard attach note, got %q", note)
 	}
-	if m.input.Value() != "[Image #1]" {
+	if m.input.Value() != "[Image#1]" {
 		t.Fatalf("expected placeholder inserted into input, got %q", m.input.Value())
 	}
 }
@@ -478,7 +478,7 @@ func TestApplyWholeInputImagePathFallbackRequiresPasteSignalOrRecentPaste(t *tes
 
 	m.lastPasteAt = time.Now()
 	updated, note := m.applyWholeInputImagePathFallback(imagePath, "rune")
-	if updated != "[Image #1]" {
+	if updated != "[Image#1]" {
 		t.Fatalf("expected fallback conversion with recent paste window, got %q", updated)
 	}
 	if !strings.Contains(note, "Attached 1 image") {
@@ -698,5 +698,17 @@ func TestRemoveImagePlaceholderSpansHandlesOverlapAndEmptyInput(t *testing.T) {
 	})
 	if updated != "xy" {
 		t.Fatalf("expected overlap-safe placeholder removal, got %q", updated)
+	}
+}
+
+func TestImagePlaceholderPatternAcceptsLegacyAndAtomicFormats(t *testing.T) {
+	legacy, legacyOK := imageIDFromPlaceholder("[Image #7]")
+	if !legacyOK || legacy != 7 {
+		t.Fatalf("expected legacy placeholder to parse, got id=%d ok=%v", legacy, legacyOK)
+	}
+
+	atomic, atomicOK := imageIDFromPlaceholder("[Image#8]")
+	if !atomicOK || atomic != 8 {
+		t.Fatalf("expected atomic placeholder to parse, got id=%d ok=%v", atomic, atomicOK)
 	}
 }

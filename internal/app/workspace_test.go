@@ -106,6 +106,7 @@ func TestResolveWorkspaceRejectsHighRiskHomeWithoutOverride(t *testing.T) {
 	})
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", "")
+	t.Setenv("BYTEMIND_ALLOW_BROAD_WORKSPACE", "")
 	if err := os.Chdir(home); err != nil {
 		t.Fatal(err)
 	}

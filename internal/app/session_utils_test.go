@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,6 +87,21 @@ func TestSameWorkspaceNormalizesPaths(t *testing.T) {
 	workspace := t.TempDir()
 	if !SameWorkspace(workspace, filepath.Join(workspace, ".")) {
 		t.Fatal("expected normalized paths to match")
+	}
+}
+
+func TestSameWorkspaceNormalizesSymlinkedPaths(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "workspace-link")
+	if err := os.Symlink(workspace, link); err != nil {
+		t.Skipf("symlinks are not available: %v", err)
+	}
+	if !SameWorkspace(workspace, link) {
+		t.Fatalf("expected symlinked workspace %q to match %q", link, workspace)
 	}
 }
 
